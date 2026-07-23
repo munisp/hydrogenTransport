@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "H2Fleet",
+    "slug": "h2fleet-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "h2fleet",
+    "backgroundColor": "#fafaf9",
+    "primaryColor": "#b45309",
+    "splash": {
+      "backgroundColor": "#fafaf9"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.h2fleet.mobile"
+    },
+    "android": {
+      "package": "org.h2fleet.mobile"
+    },
+    "extra": {
+      "apiBase": "http://localhost:9080",
+      "keycloak": {
+        "url": "http://localhost:8088",
+        "realm": "h2fleet",
+        "clientId": "h2fleet-mobile"
+      },
+      "arrivalsPollMs": 20000,
+      "togglesPollMs": 30000
+    }
+  }
+}
