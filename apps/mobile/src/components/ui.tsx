@@ -40,7 +40,7 @@ export function StatusBadge({ status }: { status: string }) {
   const tone = toneColors[statusTone(status)];
   return (
     <View style={[styles.badge, { backgroundColor: tone.bg }]}>
-      <Text style={[styles.badgeText, { color: tone.fg }]}>{status}</Text>
+      <Text style={[styles.badgeText, { color: tone.fg }]}>{status.replace(/_/g, " ")}</Text>
     </View>
   );
 }
