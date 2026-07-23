@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="H2Fleet">
+  <rect width="512" height="512" rx="96" fill="#44403c"/>
+  <path
+    d="M256 96c0 0-96 112-96 200a96 96 0 0 0 192 0c0-88-96-200-96-200z"
+    fill="#f59e0b"
+  />
+  <text
+    x="256"
+    y="336"
+    text-anchor="middle"
+    font-family="ui-sans-serif, system-ui, sans-serif"
+    font-size="96"
+    font-weight="700"
+    fill="#44403c"
+  >H2</text>
+  <rect x="128" y="392" width="256" height="16" rx="8" fill="#0f766e"/>
+</svg>
