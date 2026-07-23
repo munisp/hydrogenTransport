@@ -1,0 +1,26 @@
+# --- languages ---
+node_modules/
+dist/
+target/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+
+# --- env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
+
+# --- runtime data ---
+*.log
+models/*.bin
+models/*.pkl
+!models/.gitkeep
+apps/pwa/dev-dist/
