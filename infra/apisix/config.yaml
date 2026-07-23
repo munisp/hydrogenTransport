@@ -1,0 +1,36 @@
+# APISIX node configuration (traditional mode backed by etcd).
+# The route *definitions* live in ./apisix.yaml — this file is the node config.
+#
+# To run APISIX in pure STANDALONE mode instead (no etcd, routes loaded directly
+# from apisix.yaml), set:
+#   deployment.role: traditional
+#   deployment.role_traditional.config_provider: yaml
+# and keep apisix.yaml mounted at /usr/local/apisix/conf/apisix.yaml.
+apisix:
+  node_listen: 9080
+  enable_admin: true
+  enable_admin_cors: true
+  allow_admin:
+    - 0.0.0.0/0            # dev only — restrict in real deployments
+  admin_key:
+    - name: admin
+      key: h2fleet-admin-key-change-me
+      role: admin
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  admin:
+    admin_listen:
+      ip: 0.0.0.0
+      port: 9180
+  etcd:
+    host:
+      - http://etcd:2379
+    prefix: /apisix
+    timeout: 30
+plugin_attr:
+  prometheus:
+    export_addr:
+      ip: 0.0.0.0
+      port: 9091

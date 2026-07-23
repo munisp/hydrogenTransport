@@ -1,0 +1,182 @@
+# =============================================================================
+# APISIX standalone route definitions — SPEC §3.6 gateway map
+#
+#   /api/toggles/*  -> toggle-service:8080      /api/fleet/*    -> fleet-api:8081
+#   /api/infra/*    -> infra-api:8082           /api/citizen/*  -> citizen-api:8083
+#   /api/commerce/* -> commerce-api:8084        /api/ml/*       -> predictive-maintenance:8090
+#   /api/optimize/* -> route-optimizer:8091     /api/twin/*     -> digital-twin:8092
+#
+# Every route uses proxy-rewrite to strip the "/api/<domain>" prefix so the
+# upstreams see their native paths (e.g. /api/fleet/v1/vehicles -> /v1/vehicles).
+#
+# Auth plugins:
+#   * key-auth example on the machine-to-machine open-data route (header `apikey`)
+#   * openid-connect example on citizen routes (Keycloak realm `h2fleet`,
+#     bearer-only passthrough: the JWT is validated at the gateway AND forwarded
+#     so services can do fine-grained checks with Permify)
+#
+# OpenAppSec WAF: APISIX integrates via the `openappsec` plugin
+# (https://docs.openappsec.io/integrations/apisix). With profile `waf` in
+# docker-compose the nano-agent sidecar (openappsec-agent) runs on this network;
+# add the plugin below to any route to enforce/learn:
+#     openappsec:
+#       host: http://openappsec-agent:8081
+#       mode: detect            # "prevent" to enforce
+# It is left commented on the routes because the agent is an optional profile.
+# =============================================================================
+
+routes:
+  # ------------------------------------------------------------- toggles ----
+  - uri: /api/toggles/*
+    name: toggles
+    upstream:
+      type: roundrobin
+      nodes:
+        "toggle-service:8080": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/toggles(/.*)$", "$1"]
+      # GETs are public; PUT requires Keycloak role platform-admin (enforced in
+      # toggle-service against the forwarded JWT).
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # GET /v1/toggles readable without a token
+
+  # --------------------------------------------------------------- fleet ----
+  - uri: /api/fleet/*
+    name: fleet
+    upstream:
+      type: roundrobin
+      nodes:
+        "fleet-api:8081": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/fleet(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+
+  # --------------------------------------------------------------- infra ----
+  - uri: /api/infra/*
+    name: infra
+    upstream:
+      type: roundrobin
+      nodes:
+        "infra-api:8082": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/infra(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+
+  # -------------------------------------------------------------- citizen ---
+  - uri: /api/citizen/*
+    name: citizen
+    upstream:
+      type: roundrobin
+      nodes:
+        "citizen-api:8083": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/citizen(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # arrivals/alerts are public; mutations 401 in service
+
+  # ------------------------------------------------------------- commerce ---
+  - uri: /api/commerce/*
+    name: commerce
+    upstream:
+      type: roundrobin
+      nodes:
+        "commerce-api:8084": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/commerce(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+
+  # ------------------------------------------------------------------- ml ---
+  - uri: /api/ml/*
+    name: predictive-maintenance
+    upstream:
+      type: roundrobin
+      nodes:
+        "predictive-maintenance:8090": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/ml(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+
+  # -------------------------------------------------------------- optimize --
+  - uri: /api/optimize/*
+    name: route-optimizer
+    upstream:
+      type: roundrobin
+      nodes:
+        "route-optimizer:8091": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/optimize(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+
+  # ------------------------------------------------------------------ twin --
+  - uri: /api/twin/*
+    name: digital-twin
+    upstream:
+      type: roundrobin
+      nodes:
+        "digital-twin:8092": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/twin(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: h2fleet-services-secret-change-me
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+
+  # ------------------------------------- machine-to-machine (key-auth demo) -
+  # Example: external data consumer hitting the open-data API with an API key
+  # instead of OIDC. Consumer `data-partner` is declared below.
+  - uri: /api/open-data/*
+    name: open-data-keyauth
+    upstream:
+      type: roundrobin
+      nodes:
+        "citizen-api:8083": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/open-data(/.*)$", "/v1/opendata$1"]
+      key-auth:
+        header: apikey
+
+consumers:
+  - username: data-partner
+    plugins:
+      key-auth:
+        key: h2fleet-partner-demo-key
+
+#END
