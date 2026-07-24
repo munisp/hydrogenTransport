@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
-# Build context: repository root (needs packages/toggle-client/python).
+# Build context: repository root (needs packages/toggle-client/python and services/python/shared).
 FROM python:3.12-slim AS builder
 
 WORKDIR /build
 COPY packages/toggle-client/python /build/toggle-client
+COPY services/python/shared /build/shared
 COPY services/python/route-optimizer/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt \
-    && pip install --no-cache-dir --prefix=/install /build/toggle-client
+    && pip install --no-cache-dir --prefix=/install /build/toggle-client \
+    && pip install --no-cache-dir --prefix=/install /build/shared
 
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

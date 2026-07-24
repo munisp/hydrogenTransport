@@ -1,0 +1,92 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet route-optimizer
+  version: 0.1.0
+  description: >-
+    OR-Tools route + refueling schedule optimization. When the
+    route-energy-optimizer module toggle is OFF the /v1 route returns 404
+    (SPEC §3.2). Optimization requires a Keycloak JWT.
+servers:
+  - url: http://route-optimizer:8091
+tags:
+  - name: optimize
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200':
+          description: Health status (db/toggle details in body)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  service: { type: string, example: route-optimizer }
+                  module: { type: string, example: route-energy-optimizer }
+                  enabled: { type: boolean }
+                  db: { type: boolean }
+        '503':
+          description: Dependency unreachable
+          content:
+            application/json:
+              schema: { type: object }
+  /v1/optimize/route:
+    post:
+      tags: [optimize]
+      summary: Optimize bus routes and refueling plan
+      operationId: optimizeRoute
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bus_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                date: { type: string, format: date }
+      responses:
+        '200':
+          description: Optimization result (routes, refuel plans, dropped stops)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  routes: { type: array, items: { type: object } }
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: No buses available / no stops to optimize / validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token.
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string }

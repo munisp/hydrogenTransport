@@ -3,6 +3,12 @@
 Route + refuel planning with OR-Tools VRP and hydrogen range constraints
 (module `route-energy-optimizer`, Domain 1). APISIX: `/api/optimize/*` → route-optimizer:8091.
 
+Auth: `POST /v1/optimize/route` requires a Keycloak RS256 Bearer token (SPEC §3.5)
+verified via the shared `h2fleet_auth` package (`services/python/shared`);
+`/healthz` stays public. Env: `KEYCLOAK_ISSUER` (JWKS source; unset ⇒ guarded
+routes 503), `KEYCLOAK_ISSUER_ALT` (extra accepted issuers, default
+`http://localhost:8088/realms/h2fleet`).
+
 ## `POST /v1/optimize/route`
 
 ```json
@@ -60,3 +66,7 @@ curl -X POST localhost:8091/v1/optimize/route \
 # Docker (build context = repo root):
 docker build -f services/python/route-optimizer/Dockerfile -t h2fleet/route-optimizer .
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

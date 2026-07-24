@@ -11,7 +11,9 @@ import logging
 from contextlib import asynccontextmanager
 
 import asyncpg
+from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi import Depends, FastAPI, HTTPException, Request
+from h2fleet_auth import KeycloakJwtVerifier
 from toggle_client import AsyncToggleClient
 
 from .config import settings
@@ -22,17 +24,25 @@ from .vrp import haversine_km, plan_refuels, range_km, solve_vrp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("route-optimizer")
 
+# Keycloak OIDC JWT (RS256) verifier; mutating routes require a valid Bearer
+# token (SPEC §3.5). Fail-closed when KEYCLOAK_ISSUER is unset.
+jwt_verifier = KeycloakJwtVerifier.from_env()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=4)
     app.state.toggles = AsyncToggleClient(settings.toggle_url)
     yield
+    await jwt_verifier.aclose()
     await app.state.toggles.close()
     await app.state.pool.close()
 
 
 app = FastAPI(title="H2Fleet route-optimizer", version="0.1.0", lifespan=lifespan)
+
+# Prometheus metrics: GET /metrics (infra/observability/prometheus.yml, job h2fleet-services).
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.get("/healthz")
@@ -57,7 +67,11 @@ async def require_enabled(request: Request) -> None:
         raise HTTPException(status_code=404, detail="module route-energy-optimizer is disabled")
 
 
-@app.post("/v1/optimize/route", response_model=OptimizeResponse, dependencies=[Depends(require_enabled)])
+@app.post(
+    "/v1/optimize/route",
+    response_model=OptimizeResponse,
+    dependencies=[Depends(require_enabled), Depends(jwt_verifier.require_auth)],
+)
 async def optimize_route(req: OptimizeRequest, request: Request):
     problem, source = await load_problem(request.app.state.pool, req.bus_ids, req.date)
     if not problem.buses:
