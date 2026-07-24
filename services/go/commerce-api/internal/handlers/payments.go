@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -14,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 
-	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/auth"
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/ledger"
 )
 
@@ -94,6 +96,13 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 				h.internal(w, "load idempotent payment", qerr)
 				return
 			}
+			if existing.RiderSub != auth.Subject(r.Context()) &&
+				!auth.HasAnyRole(r.Context(), "operator", "platform-admin") {
+				// Idempotency keys are scoped to their owner; replaying
+				// someone else's key must not leak their payment.
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "payment not found"})
+				return
+			}
 			writeJSON(w, http.StatusOK, existing) // idempotent replay
 			return
 		}
@@ -112,11 +121,19 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 			h.log.Error("failed to publish fare.payment.initiated", zap.Error(err))
 		}
 
-		// Ledger transfer: rider wallet (1xxx) → operator revenue (2xxx).
+		// Ledger transfer: rider wallet (1xxx, persisted per-rider mapping) →
+		// operator revenue (2xxx). The TigerBeetle transfer ID is derived
+		// deterministically from the Idempotency-Key so client retries of the
+		// same request can never double-post the transfer.
+		account, err := h.riderAccount(r.Context(), req.RiderSub)
+		if err != nil {
+			h.internal(w, "ensure rider ledger account", err)
+			return
+		}
 		status := "settled"
 		var tbID *string
 		transferID, err := h.ledger.Transfer(
-			ledger.RiderAccount(req.RiderSub), ledger.OperatorRevenueAccount,
+			ledger.DeterministicTransferID(idemKey), account, ledger.OperatorRevenueAccount,
 			uint64(req.AmountMinor), ledger.CodeFare)
 		if err != nil {
 			h.log.Error("ledger transfer failed", zap.String("payment", paymentID), zap.Error(err))
@@ -125,13 +142,24 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 			tbID = &transferID
 		}
 
-		// Optional Mojaloop leg.
+		// Optional Mojaloop leg. A Mojaloop failure never fabricates a
+		// transfer id — the payment is marked mojaloop_failed instead.
 		var mlID *string
+		var mlErr error
 		if req.UseMojaloop && status == "settled" {
-			id := h.mojaloopTransfer(r, mojaloopEndpoint, paymentID, req)
-			mlID = &id
+			id, err := h.mojaloopTransfer(r, mojaloopEndpoint, paymentID, req)
+			if err != nil {
+				h.log.Error("mojaloop transfer failed", zap.String("payment", paymentID), zap.Error(err))
+				status = "mojaloop_failed"
+				mlErr = err
+			} else {
+				mlID = &id
+			}
 		}
 
+		// Persist the final status FIRST; domain events are published only
+		// after the DB update commits (outbox-lite ordering) so consumers
+		// never observe an event for a state that was never recorded.
 		p, err := scanPayment(h.db.QueryRow(r.Context(), `
 			UPDATE commerce.fare_payments
 			SET status = $2, tb_transfer_id = $3, mojaloop_transfer_id = $4
@@ -141,53 +169,117 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 			return
 		}
 
-		if status == "settled" {
-			event["tb_transfer_id"] = tbID
-			event["mojaloop_transfer_id"] = mlID
-			if err := h.pub.Publish(r.Context(), "fare.payment.settled", event); err != nil {
-				h.log.Error("failed to publish fare.payment.settled", zap.Error(err))
+		if status != "settled" {
+			reason := "ledger transfer failed"
+			if status == "mojaloop_failed" {
+				reason = "mojaloop transfer failed: " + mlErr.Error()
 			}
+			event["reason"] = reason
+			event["failed_at"] = time.Now().UTC().Format(time.RFC3339)
+			if err := h.pub.Publish(r.Context(), "fare.payment.failed", event); err != nil {
+				h.log.Error("failed to publish fare.payment.failed", zap.Error(err))
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": reason, "payment": p})
+			return
+		}
+
+		event["tb_transfer_id"] = tbID
+		if mlID != nil {
+			event["mojaloop_transfer_id"] = *mlID
+		}
+		event["settled_at"] = time.Now().UTC().Format(time.RFC3339)
+		if err := h.pub.Publish(r.Context(), "fare.payment.settled", event); err != nil {
+			h.log.Error("failed to publish fare.payment.settled", zap.Error(err))
 		}
 		writeJSON(w, http.StatusCreated, p)
 	}
 }
 
-// mojaloopTransfer performs the Mojaloop leg. With MOJALOOP_ENDPOINT set it
-// POSTs a transfer request; otherwise it returns a simulated transfer ID
-// (SPEC §4 simulated fallback).
-func (h *Handler) mojaloopTransfer(r *http.Request, endpoint, paymentID string, req createPaymentRequest) string {
-	if endpoint == "" {
-		id := "ml-" + uuid.NewString()
-		h.log.Info("mojaloop transfer simulated", zap.String("payment", paymentID), zap.String("transfer_id", id))
-		return id
+// riderAccount returns the persisted TigerBeetle wallet account for a rider,
+// allocating one sequentially from 1001 on first use. The mapping lives in
+// commerce.rider_accounts (no hash-derived IDs → no collisions). Allocation
+// runs in a transaction: INSERT ... ON CONFLICT (rider_sub) DO NOTHING, then
+// SELECT. A concurrent first allocation for a different rider can collide on
+// the account_id unique index; those rare races are retried.
+func (h *Handler) riderAccount(ctx context.Context, riderSub string) (uint64, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		tx, err := h.db.Begin(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO commerce.rider_accounts (rider_sub, account_id)
+			SELECT $1, COALESCE(MAX(account_id), 1000) + 1 FROM commerce.rider_accounts
+			ON CONFLICT (rider_sub) DO NOTHING`, riderSub); err != nil {
+			_ = tx.Rollback(ctx)
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" { // account_id race
+				lastErr = err
+				continue
+			}
+			return 0, err
+		}
+		var accountID uint64
+		if err := tx.QueryRow(ctx,
+			`SELECT account_id FROM commerce.rider_accounts WHERE rider_sub = $1`, riderSub).Scan(&accountID); err != nil {
+			_ = tx.Rollback(ctx)
+			return 0, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
+		return accountID, nil
 	}
+	return 0, fmt.Errorf("allocate rider account: %w", lastErr)
+}
+
+// mojaloopTransfer performs the Mojaloop leg. With MOJALOOP_ENDPOINT set it
+// POSTs a transfer request and returns the real transfer id (the server
+// echoed id, or the client-generated transferId we submitted when the switch
+// accepts without a body); any transport error or non-2xx response is an
+// error and persists NO id. Without an endpoint it returns a clearly-labelled
+// simulated id (SPEC §4 simulated fallback).
+func (h *Handler) mojaloopTransfer(r *http.Request, endpoint, paymentID string, req createPaymentRequest) (string, error) {
+	if endpoint == "" {
+		id := "ml-simulated-" + uuid.NewString()
+		h.log.Info("mojaloop transfer simulated", zap.String("payment", paymentID), zap.String("transfer_id", id))
+		return id, nil
+	}
+	transferID := uuid.NewString()
 	body, _ := json.Marshal(map[string]any{
-		"transferId": uuid.NewString(),
+		"transferId": transferID,
 		"payer":      map[string]string{"partyId": req.RiderSub},
 		"payee":      map[string]string{"partyId": "h2fleet-operator"},
 		"amount":     map[string]any{"amount": req.AmountMinor, "currency": req.Currency},
 	})
 	resp, err := h.httpClient().Post(endpoint+"/transfers", "application/json", bytes.NewReader(body))
 	if err != nil {
-		h.log.Error("mojaloop transfer failed", zap.Error(err))
-		return "ml-failed-" + paymentID
+		return "", fmt.Errorf("mojaloop transfer request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("mojaloop transfer rejected: status %d: %s", resp.StatusCode, string(respBody))
+	}
 	var parsed struct {
 		TransferID string `json:"transferId"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err == nil && parsed.TransferID != "" {
-		return parsed.TransferID
+		return parsed.TransferID, nil
 	}
-	return "ml-" + uuid.NewString()
+	// Accepted (e.g. 202) without a body: the switch will settle under the
+	// transferId we submitted — that id is genuine, not fabricated.
+	return transferID, nil
 }
 
 func (h *Handler) httpClient() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-// GetPayment handles GET /v1/payments/{id} (status polling).
+// GetPayment handles GET /v1/payments/{id} (Keycloak JWT, status polling).
+// Payments are financial PII: callers may only read their own payment unless
+// they carry the operator or platform-admin realm role.
 func (h *Handler) GetPayment(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	p, err := scanPayment(h.db.QueryRow(r.Context(),
@@ -200,15 +292,27 @@ func (h *Handler) GetPayment(w http.ResponseWriter, r *http.Request) {
 		h.internal(w, "get payment", err)
 		return
 	}
+	if p.RiderSub != auth.Subject(r.Context()) &&
+		!auth.HasAnyRole(r.Context(), "operator", "platform-admin") {
+		// 404 (not 403) so payment existence is not leaked to non-owners.
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "payment not found"})
+		return
+	}
 	writeJSON(w, http.StatusOK, p)
 }
 
-// ListPayments handles GET /v1/payments?rider_sub=&status=.
+// ListPayments handles GET /v1/payments?rider_sub=&status= (Keycloak JWT).
+// Non-operator callers are always scoped to their own rider_sub — the
+// rider_sub filter may not exceed the caller's own subject.
 func (h *Handler) ListPayments(w http.ResponseWriter, r *http.Request) {
+	rider := r.URL.Query().Get("rider_sub")
+	if !auth.HasAnyRole(r.Context(), "operator", "platform-admin") {
+		rider = auth.Subject(r.Context())
+	}
 	query := `SELECT ` + paymentCols + ` FROM commerce.fare_payments`
 	args := []any{}
 	where := ""
-	if rider := r.URL.Query().Get("rider_sub"); rider != "" {
+	if rider != "" {
 		where += ` WHERE rider_sub = $1`
 		args = append(args, rider)
 	}
