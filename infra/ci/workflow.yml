@@ -1,6 +1,7 @@
 # NOTE: this is the GitHub Actions CI workflow for H2Fleet.
 # It lives here because the API token used to publish the repo lacks the
-# "workflow" scope. Move this file to .github/workflows/ci.yml (one web-UI
+# "workflow" scope. Move this file (and infra/ci/validate_events.py, which it
+# invokes via a repo-relative path) to .github/workflows/ci.yml (one web-UI
 # commit or a token with workflow scope) to activate CI.
 name: ci
 
@@ -8,10 +9,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   go:
-    name: Go services (build + vet)
+    name: Go services (build + vet + test)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -21,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
       - name: Build & vet ${{ matrix.service }}
         working-directory: services/go/${{ matrix.service }}
         run: |
@@ -29,6 +34,51 @@ jobs:
           go build ./...
           go vet ./...
           if [ -n "$(find . -name '*_test.go' -print -quit)" ]; then go test ./...; fi
+
+  toggle-client-go:
+    name: toggle-client SDK (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Test packages/toggle-client/go
+        working-directory: packages/toggle-client/go
+        run: |
+          if [ ! -f go.mod ]; then echo "not present yet, skipping"; exit 0; fi
+          go vet ./...
+          go test ./...
+
+  toggle-client-python:
+    name: toggle-client SDK (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test packages/toggle-client/python
+        working-directory: packages/toggle-client/python
+        run: |
+          pip install -e . pytest httpx
+          pytest -q
+
+  toggle-client-ts:
+    name: toggle-client SDK (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Test packages/toggle-client/ts
+        working-directory: packages/toggle-client/ts
+        run: |
+          # lockfile committed — npm ci; fall back to npm install if absent
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+          npm run typecheck
+          npm test
 
   rust:
     name: Rust services (cargo check)
@@ -49,7 +99,8 @@ jobs:
         working-directory: services/rust/${{ matrix.service }}
         run: |
           if [ ! -f Cargo.toml ]; then echo "service not present yet, skipping"; exit 0; fi
-          cargo check --all-targets
+          # --locked once a Cargo.lock is committed; graceful fallback otherwise
+          if [ -f Cargo.lock ]; then cargo check --locked --all-targets; else cargo check --all-targets; fi
           cargo clippy --all-targets -- -D warnings || true
 
   python:
@@ -58,7 +109,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [predictive-maintenance, route-optimizer, carbon-analytics, lakehouse-etl]
+        service: [predictive-maintenance, route-optimizer, carbon-analytics, lakehouse-etl, telemetry-simulator]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,6 +125,19 @@ jobs:
             pip install pytest
             pytest -q
           fi
+
+  event-schemas:
+    name: Event schema validation (SPEC §3.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate fixtures against schemas
+        run: |
+          pip install jsonschema
+          python infra/ci/validate_events.py
 
   pwa:
     name: PWA (typecheck + build)
@@ -92,6 +156,89 @@ jobs:
           npx tsc --noEmit
           npx vite build
 
+  gosec:
+    name: gosec (Go SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+      - name: Scan Go services
+        run: |
+          rc=0
+          for s in toggle-service fleet-api infra-api citizen-api commerce-api; do
+            d="services/go/$s"
+            [ -f "$d/go.mod" ] || continue
+            echo "== gosec $d"
+            (cd "$d" && "$(go env GOPATH)/bin/gosec" -quiet ./...) || rc=1
+          done
+          exit $rc
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  trivy:
+    name: trivy fs scan (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  docker-build:
+    name: docker build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Go services — repo-root context per their Dockerfiles
+          - { name: toggle-service, context: ., file: services/go/toggle-service/Dockerfile }
+          - { name: fleet-api, context: ., file: services/go/fleet-api/Dockerfile }
+          - { name: infra-api, context: ., file: services/go/infra-api/Dockerfile }
+          - { name: citizen-api, context: ., file: services/go/citizen-api/Dockerfile }
+          - { name: commerce-api, context: ., file: services/go/commerce-api/Dockerfile }
+          # Rust services — service-dir context (matches docker-compose)
+          - { name: telemetry-ingest, context: services/rust/telemetry-ingest }
+          - { name: digital-twin, context: services/rust/digital-twin }
+          # Python services — repo-root context
+          - { name: predictive-maintenance, context: ., file: services/python/predictive-maintenance/Dockerfile }
+          - { name: route-optimizer, context: ., file: services/python/route-optimizer/Dockerfile }
+          - { name: carbon-analytics, context: ., file: services/python/carbon-analytics/Dockerfile }
+          - { name: lakehouse-etl, context: ., file: services/python/lakehouse-etl/Dockerfile }
+          - { name: telemetry-simulator, context: ., file: services/python/telemetry-simulator/Dockerfile }
+          # Backup runner + PWA
+          - { name: backup, context: infra/backup }
+          - { name: pwa, context: ., file: apps/pwa/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file || format('{0}/Dockerfile', matrix.context) }}
+          push: false
+          tags: ghcr.io/munisp/h2fleet/${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
   compose:
     name: docker-compose config validation
     runs-on: ubuntu-latest
@@ -99,6 +246,35 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate compose file (all profiles)
         run: |
+          # one-shot mounts referenced by the compose file must exist
+          mkdir -p infra/sql/migrations
           docker compose -f infra/docker-compose.yml config --quiet
           docker compose -f infra/docker-compose.yml --profile apps config --quiet
           docker compose -f infra/docker-compose.yml --profile all --profile waf --profile etl --profile fluvio config --quiet
+
+  # Optional end-to-end smoke: builds the full stack and runs
+  # tests/e2e/smoke.sh against the gateway. Manual-only — it builds ~15
+  # images and takes tens of minutes, so it never runs on push/PR.
+  compose-smoke:
+    name: E2E smoke (full compose stack)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    services: {}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space for image builds
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h
+      - name: Start full stack (make up-all)
+        run: make up-all
+      - name: Run E2E smoke suite
+        env:
+          SMOKE_GATEWAY_TIMEOUT: "600"
+        run: bash tests/e2e/smoke.sh
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml --profile apps logs --tail=200
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/docker-compose.yml --profile all --profile apps down -v

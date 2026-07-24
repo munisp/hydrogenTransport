@@ -5,27 +5,64 @@
 #   /api/infra/*    -> infra-api:8082           /api/citizen/*  -> citizen-api:8083
 #   /api/commerce/* -> commerce-api:8084        /api/ml/*       -> predictive-maintenance:8090
 #   /api/optimize/* -> route-optimizer:8091     /api/twin/*     -> digital-twin:8092
+#   /api/open-data/* -> citizen-api:8083 (open-data surface, key-auth)
+#
+# carbon-analytics:8094 is deliberately NOT mapped to any /api/* prefix: it is
+# an internal batch/analytics service reachable only inside the cluster
+# network. Do not add a public route for it (see docs/GATEWAY.md).
 #
 # Every route uses proxy-rewrite to strip the "/api/<domain>" prefix so the
 # upstreams see their native paths (e.g. /api/fleet/v1/vehicles -> /v1/vehicles).
 #
-# Auth plugins:
-#   * key-auth example on the machine-to-machine open-data route (header `apikey`)
-#   * openid-connect example on citizen routes (Keycloak realm `h2fleet`,
-#     bearer-only passthrough: the JWT is validated at the gateway AND forwarded
-#     so services can do fine-grained checks with Permify)
+# Auth model (defense in depth, see docs/GATEWAY.md §Authentication):
+#   * openid-connect runs bearer_only on every /api/* route. With
+#     `unauth_action: pass` a request WITHOUT a token is passed through instead
+#     of 401'd at the edge — public GETs and /healthz keep working.
+#   * When a bearer token IS present the gateway validates it against Keycloak
+#     and forwards it; every backend service then enforces its own JWT
+#     middleware on all mutating routes (Permify on admin routes).
+#   * key-auth is used instead of OIDC on the machine-to-machine open-data
+#     route (header `apikey`).
 #
-# OpenAppSec WAF: APISIX integrates via the `openappsec` plugin
-# (https://docs.openappsec.io/integrations/apisix). With profile `waf` in
-# docker-compose the nano-agent sidecar (openappsec-agent) runs on this network;
-# add the plugin below to any route to enforce/learn:
-#     openappsec:
-#       host: http://openappsec-agent:8081
-#       mode: detect            # "prevent" to enforce
-# It is left commented on the routes because the agent is an optional profile.
+# Global rules (applied to EVERY route, see bottom of file):
+#   * prometheus  — metrics exporter on :9091 (plugin_attr in config.yaml)
+#   * cors        — PWA origin (env PWA_ORIGIN, default http://localhost:3000)
+#   * openappsec  — OpenAppSec WAF, mode: detect by default; flip the single
+#                   `mode:` value in the global rule to `prevent` to enforce.
+#                   REQUIRES the openappsec-agent sidecar (compose profile
+#                   `waf`) with AGENT_TOKEN set; see docs/GATEWAY.md §WAF.
 # =============================================================================
 
 routes:
+  # ------------------------------------------------- leak ingest (sensors) --
+  # Dedicated route for the H2 sensor webhook, declared AHEAD of the generic
+  # /api/infra/* route so it can carry stricter rate limiting. The upstream
+  # accepts either the shared sensor token (X-Sensor-Token / LEAK_INGEST_TOKEN)
+  # or a Keycloak JWT — enforced in infra-api.
+  - uri: /api/infra/v1/safety/leak
+    methods: ["POST"]
+    name: infra-leak-ingest
+    upstream:
+      type: roundrobin
+      nodes:
+        "infra-api:8082": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/infra(/.*)$", "$1"]
+      # Stricter than the default API limit: sensor bursts should never be
+      # able to stampede the incident pipeline.
+      limit-req:
+        rate: 10                # r/s per remote address
+        burst: 20
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass     # sensors authenticate with X-Sensor-Token in-service
+
   # ------------------------------------------------------------- toggles ----
   - uri: /api/toggles/*
     name: toggles
@@ -41,7 +78,7 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # GET /v1/toggles readable without a token
 
@@ -58,8 +95,9 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
 
   # --------------------------------------------------------------- infra ----
   - uri: /api/infra/*
@@ -74,8 +112,9 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
 
   # -------------------------------------------------------------- citizen ---
   - uri: /api/citizen/*
@@ -87,10 +126,15 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/citizen(/.*)$", "$1"]
+      limit-count:
+        count: 600                # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # arrivals/alerts are public; mutations 401 in service
 
@@ -107,8 +151,9 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
 
   # ------------------------------------------------------------------- ml ---
   - uri: /api/ml/*
@@ -123,8 +168,9 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
 
   # -------------------------------------------------------------- optimize --
   - uri: /api/optimize/*
@@ -139,8 +185,9 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
 
   # ------------------------------------------------------------------ twin --
   - uri: /api/twin/*
@@ -155,12 +202,13 @@ routes:
       openid-connect:
         bearer_only: true
         client_id: services
-        client_secret: h2fleet-services-secret-change-me
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
 
   # ------------------------------------- machine-to-machine (key-auth demo) -
-  # Example: external data consumer hitting the open-data API with an API key
-  # instead of OIDC. Consumer `data-partner` is declared below.
+  # External data consumers hit the open-data API with an API key (header
+  # `apikey`) instead of OIDC. Consumer `data-partner` is declared below.
   - uri: /api/open-data/*
     name: open-data-keyauth
     upstream:
@@ -170,6 +218,11 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/open-data(/.*)$", "/v1/opendata$1"]
+      limit-count:
+        count: 600                # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       key-auth:
         header: apikey
 
@@ -177,6 +230,44 @@ consumers:
   - username: data-partner
     plugins:
       key-auth:
-        key: h2fleet-partner-demo-key
+        # PLACEHOLDER — real keys are provisioned per partner via a secret
+        # manager (or the APISIX secret reference `$ENV://H2_PARTNER_API_KEY`).
+        # Never commit a production key here; see docs/GATEWAY.md §Secrets.
+        key: REPLACE_ME_PROVISION_PER_PARTNER
+
+# =============================================================================
+# Global rules — plugins applied to EVERY route (all /api/* traffic).
+# =============================================================================
+global_rules:
+  - id: 1
+    plugins:
+      # Prometheus metrics exporter (listens on :9091 per plugin_attr in
+      # config.yaml; publish that port for the Prometheus server to scrape).
+      prometheus: {}
+
+      # CORS for the PWA (apps/pwa). Origin is env-overridable via PWA_ORIGIN
+      # (APISIX expands ${{VAR:=default}}); default matches the local compose
+      # stack where the PWA is served at http://localhost:3000. Credentials are
+      # allowed because the PWA sends the Keycloak bearer token / cookies.
+      # NOTE: with allow_credential=true the origin must be explicit (never *).
+      cors:
+        allow_origins: "${{PWA_ORIGIN:=http://localhost:3000}}"
+        allow_methods: "**"
+        allow_headers: "**"
+        expose_headers: "**"
+        max_age: 5
+        allow_credential: true
+
+      # OpenAppSec WAF (nano-agent attachment).
+      # TOGGLE: default `detect` (learn/log only). Change the single value
+      # below to `prevent` to start blocking.
+      #   * Requires the openappsec-agent sidecar on this network (compose
+      #     profile `waf`) with AGENT_TOKEN set — see docs/GATEWAY.md §WAF.
+      #   * If the agent is NOT deployed, comment this plugin out; an
+      #     unreachable agent can add latency or fail requests depending on
+      #     agent connectivity.
+      openappsec:
+        host: http://openappsec-agent:8081
+        mode: detect            # TOGGLE: "prevent" to enforce blocking
 
 #END

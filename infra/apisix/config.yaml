@@ -1,36 +1,71 @@
-# APISIX node configuration (traditional mode backed by etcd).
-# The route *definitions* live in ./apisix.yaml — this file is the node config.
+# =============================================================================
+# APISIX node configuration — STANDALONE mode (routes from ./apisix.yaml).
 #
-# To run APISIX in pure STANDALONE mode instead (no etcd, routes loaded directly
-# from apisix.yaml), set:
-#   deployment.role: traditional
-#   deployment.role_traditional.config_provider: yaml
-# and keep apisix.yaml mounted at /usr/local/apisix/conf/apisix.yaml.
+# Route/service/consumer definitions live in ./apisix.yaml, mounted at
+# /usr/local/apisix/conf/apisix.yaml. `deployment.role_traditional.config_provider:
+# yaml` makes APISIX load them directly from that file (no etcd round-trip).
+# See docs/GATEWAY.md for the operations guide (TLS, WAF, keys, checklist).
+# =============================================================================
 apisix:
   node_listen: 9080
   enable_admin: true
-  enable_admin_cors: true
-  allow_admin:
-    - 0.0.0.0/0            # dev only — restrict in real deployments
-  admin_key:
-    - name: admin
-      key: h2fleet-admin-key-change-me
-      role: admin
+  # ---------------------------------------------------------------------------
+  # TLS (PRODUCTION) — complete but DISABLED by default. To enable:
+  #   1. Uncomment the `ssl` block below.
+  #   2. Mount a cert/key pair into the container, e.g.:
+  #        - ../infra/apisix/certs/h2fleet.crt:/etc/ssl/h2fleet/tls.crt:ro
+  #        - ../infra/apisix/certs/h2fleet.key:/etc/ssl/h2fleet/tls.key:ro
+  #      In Kubernetes, issue via cert-manager + Let's Encrypt and mount the
+  #      generated TLS Secret (see docs/GATEWAY.md §TLS).
+  #   3. Publish 9443 on the apisix container and redirect 9080 -> 9443 at the
+  #      edge (or terminate TLS at an LB in front of APISIX instead).
+  # Per-SNI certificates can additionally be declared as `ssls:` objects in
+  # apisix.yaml. The fallback/default certificate for unknown SNI is set here.
+  # ---------------------------------------------------------------------------
+  # ssl:
+  #   enable: true
+  #   listen:
+  #     - ip: 0.0.0.0
+  #       port: 9443
+  #   ssl_protocols: TLSv1.2 TLSv1.3
+  #   ssl_cert: /etc/ssl/h2fleet/tls.crt        # mounted default/fallback cert
+  #   ssl_cert_key: /etc/ssl/h2fleet/tls.key    # mounted default/fallback key
+
 deployment:
   role: traditional
   role_traditional:
-    config_provider: etcd
+    # STANDALONE: routes are loaded from conf/apisix.yaml (this is the fix for
+    # "routes never load" — etcd provider ignores the standalone file).
+    config_provider: yaml
   admin:
+    enable_admin: true
+    # Bind loopback only: the standalone Admin API must never be reachable from
+    # other containers or hosts. Do NOT publish :9180 in docker-compose.
     admin_listen:
-      ip: 0.0.0.0
+      ip: 127.0.0.1
       port: 9180
+    allow_admin:
+      - 127.0.0.1/32        # loopback only — lockdown, not dev-permissive
+    admin_key:
+      - name: admin
+        # PLACEHOLDER — real value injected from the APISIX_ADMIN_KEY env var
+        # (APISIX expands ${{VAR}} in config.yaml). Rotate regularly and store
+        # in a secret manager; see docs/GATEWAY.md §Admin API key rotation.
+        key: ${{APISIX_ADMIN_KEY:=REPLACE_ME_ROTATE_THIS_ADMIN_KEY}}
+        role: admin
+  # Unused in standalone mode (config_provider: yaml). Kept so the stack can be
+  # switched back to an etcd-backed control plane without losing settings, and
+  # so the etcd service in compose remains meaningful if that happens.
   etcd:
     host:
       - http://etcd:2379
     prefix: /apisix
     timeout: 30
+
 plugin_attr:
   prometheus:
     export_addr:
+      # Metrics exporter for the `prometheus` plugin (enabled via a global rule
+      # in apisix.yaml). Publish :9091 for the Prometheus server to scrape.
       ip: 0.0.0.0
       port: 9091
