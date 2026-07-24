@@ -3,6 +3,7 @@
 #   docker build -f services/go/toggle-service/Dockerfile .
 FROM golang:1.22-alpine AS build
 WORKDIR /src
+COPY packages/go-auth /packages/go-auth
 COPY services/go/toggle-service/go.mod services/go/toggle-service/go.sum ./
 RUN go mod download
 COPY services/go/toggle-service ./

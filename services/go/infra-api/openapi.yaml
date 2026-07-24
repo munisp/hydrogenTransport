@@ -1,0 +1,582 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet infra-api
+  version: 0.1.0
+  description: >-
+    Domain 2 (Infrastructure & Safety) API: refueling stations, H2 leak
+    incidents (Temporal incident-response workflow), dispatch jobs (Temporal
+    dispatch workflow), compliance reporting and depot management.
+    Module-gated routes return 404 when their module toggle is OFF (SPEC §3.2).
+servers:
+  - url: http://infra-api:8082
+tags:
+  - name: refueling-stations
+  - name: leak-detection
+  - name: dispatch-workforce
+  - name: compliance-reporting
+  - name: depot-management
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200': { $ref: '#/components/responses/HealthOk' }
+        '503': { $ref: '#/components/responses/HealthDegraded' }
+  /v1/stations:
+    get:
+      tags: [refueling-stations]
+      summary: List refueling stations
+      operationId: listStations
+      responses:
+        '200':
+          description: Station list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stations:
+                    type: array
+                    items: { $ref: '#/components/schemas/Station' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [refueling-stations]
+      summary: Create a station (operator role)
+      operationId: createStation
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                capacity_kg: { type: number }
+                status: { type: string }
+      responses:
+        '201':
+          description: Created station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Station' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/stations/{id}:
+    get:
+      tags: [refueling-stations]
+      summary: Get one station
+      operationId: getStation
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Station' }
+        '404':
+          description: Station not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/stations/{id}/status:
+    patch:
+      tags: [refueling-stations]
+      summary: Update station status (operator role)
+      operationId: updateStationStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, example: online }
+      responses:
+        '200':
+          description: Updated station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Station' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Station not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/incidents:
+    get:
+      tags: [leak-detection]
+      summary: List safety incidents
+      operationId: listIncidents
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, in_progress, acknowledged, resolved] }
+      responses:
+        '200':
+          description: Incident list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incidents:
+                    type: array
+                    items: { $ref: '#/components/schemas/Incident' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [leak-detection]
+      summary: Open an incident manually (JWT)
+      operationId: openIncident
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, example: h2_leak }
+                severity: { type: string, enum: [low, medium, high, critical], default: medium }
+                bus_id: { type: string, format: uuid }
+                station_id: { type: string, format: uuid }
+                meta: { type: object }
+      responses:
+        '201':
+          description: Opened incident
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/incidents/{id}/ack:
+    post:
+      tags: [leak-detection]
+      summary: Acknowledge an incident (operator role); cancels workflow escalation
+      operationId: ackIncident
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Acknowledged incident
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Incident not found or not in an acknowledgeable status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/incidents/{id}/resolve:
+    post:
+      tags: [leak-detection]
+      summary: Resolve an incident (operator role); closes the workflow
+      operationId: resolveIncident
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Resolved incident
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Incident not found or already resolved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/safety/leak:
+    post:
+      tags: [leak-detection]
+      summary: >-
+        H2 sensor webhook. Authenticated by X-Sensor-Token (LEAK_INGEST_TOKEN)
+        or a Keycloak JWT. Opens an incident, publishes safety.leak.detected
+        and starts/signals the incident-response Temporal workflow.
+      operationId: ingestLeak
+      security:
+        - bearerAuth: []
+        - sensorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sensor_id]
+              properties:
+                sensor_id: { type: string }
+                station_id: { type: string, format: uuid }
+                bus_id: { type: string, format: uuid }
+                severity: { type: string, default: high }
+                h2_ppm: { type: number }
+                location: { type: string }
+      responses:
+        '202':
+          description: Leak accepted; incident opened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incident: { $ref: '#/components/schemas/Incident' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/dispatch/jobs:
+    get:
+      tags: [dispatch-workforce]
+      summary: List dispatch jobs
+      operationId: listDispatchJobs
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [assigned, accepted, requeued] }
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: '#/components/schemas/DispatchJob' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [dispatch-workforce]
+      summary: Assign a dispatch job (operator role); starts the dispatch workflow
+      operationId: createDispatchJob
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_sub]
+              properties:
+                driver_sub: { type: string }
+                vehicle_id: { type: string, format: uuid }
+                route: { type: string }
+                starts_at: { type: string, format: date-time }
+      responses:
+        '201':
+          description: Assigned job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DispatchJob' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/dispatch/jobs/{id}/accept:
+    post:
+      tags: [dispatch-workforce]
+      summary: Accept an assigned job (driver role); cancels the workflow timeout
+      operationId: acceptDispatchJob
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Accepted job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DispatchJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Job not found, not in assigned status, or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/compliance/reports:
+    get:
+      tags: [compliance-reporting]
+      summary: List compliance reports
+      operationId: listComplianceReports
+      responses:
+        '200':
+          description: Report list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reports:
+                    type: array
+                    items: { $ref: '#/components/schemas/ComplianceReport' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/compliance/reports/{id}:
+    get:
+      tags: [compliance-reporting]
+      summary: Get one compliance report
+      operationId: getComplianceReport
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComplianceReport' }
+        '404':
+          description: Report not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/compliance/reports/generate:
+    post:
+      tags: [compliance-reporting]
+      summary: Generate a report (operator role + Permify report:generate)
+      operationId: generateComplianceReport
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: Generated report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComplianceReport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/depot/bays:
+    get:
+      tags: [depot-management]
+      summary: List depot bays
+      operationId: listDepotBays
+      responses:
+        '200':
+          description: Bay list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bays:
+                    type: array
+                    items: { $ref: '#/components/schemas/DepotBay' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/depot/work-orders:
+    get:
+      tags: [depot-management]
+      summary: List work orders
+      operationId: listWorkOrders
+      responses:
+        '200':
+          description: Work order list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  work_orders:
+                    type: array
+                    items: { $ref: '#/components/schemas/WorkOrder' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [depot-management]
+      summary: Create a work order (operator role)
+      operationId: createWorkOrder
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                description: { type: string }
+                asset_ref: { type: string }
+      responses:
+        '201':
+          description: Created work order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/depot/work-orders/{id}/close:
+    post:
+      tags: [depot-management]
+      summary: Close a work order (operator role)
+      operationId: closeWorkOrder
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Closed work order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Work order not found, already closed, or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token.
+    sensorToken:
+      type: apiKey
+      in: header
+      name: X-Sensor-Token
+      description: Shared sensor ingest token (LEAK_INGEST_TOKEN).
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Station:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string }
+        capacity_kg: { type: number }
+    Incident:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        bus_id: { type: string, format: uuid }
+        station_id: { type: string, format: uuid }
+        status: { type: string, enum: [open, in_progress, acknowledged, resolved] }
+        opened_at: { type: string, format: date-time }
+        meta: { type: object }
+    DispatchJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        driver_sub: { type: string }
+        vehicle_id: { type: string, format: uuid }
+        route: { type: string }
+        starts_at: { type: string, format: date-time }
+        status: { type: string, enum: [assigned, accepted, requeued] }
+        created_at: { type: string, format: date-time }
+        accepted_at: { type: string, format: date-time }
+    ComplianceReport:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        generated_at: { type: string, format: date-time }
+        report: { type: object }
+    DepotBay:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        depot: { type: string }
+        label: { type: string }
+        kind: { type: string }
+        occupied_by: { type: string, format: uuid }
+        status: { type: string }
+    WorkOrder:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        asset_ref: { type: string }
+        status: { type: string }
+        opened_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time }
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+  responses:
+    HealthOk:
+      description: Service healthy
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Health' }
+    HealthDegraded:
+      description: Postgres unreachable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Health' }
+    BadRequest:
+      description: Invalid request body
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but lacking the required role/permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ModuleDisabled:
+      description: The module toggle for this route is OFF (SPEC §3.2)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

@@ -35,3 +35,7 @@ go run ./cmd/server
 docker build -t h2fleet/toggle-service .
 docker run -p 8080:8080 -e DATABASE_URL=postgres://... h2fleet/toggle-service
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

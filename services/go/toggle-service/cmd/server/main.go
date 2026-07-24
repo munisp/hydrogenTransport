@@ -15,10 +15,11 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/auth"
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/handlers"
+	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/metrics"
 )
 
 func main() {
@@ -54,6 +55,11 @@ func main() {
 	defer pub.Close()
 
 	jwtmw := auth.New(cfg.KeycloakIssuer, log)
+	// Permify ReBAC check on toggle mutations (SPEC §3.5). When PERMIFY_GRPC
+	// is unset the check falls back to the platform-admin role only (warned
+	// once); see packages/go-auth for the documented fallback contract.
+	perm := auth.NewPermify(os.Getenv("PERMIFY_GRPC"), os.Getenv("PERMIFY_TENANT"), log)
+	defer perm.Close()
 
 	h := handlers.New(pool, rdb, pub, log)
 	if err := h.EnsureSchemaAndSeed(ctx); err != nil {
@@ -61,13 +67,17 @@ func main() {
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Timeout(15*time.Second))
+	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, metrics.Middleware("toggle-service"), middleware.Timeout(15*time.Second))
 	r.Get("/healthz", h.Healthz)
+	r.Handle("/metrics", metrics.Handler())
 
 	r.Route("/v1/toggles", func(r chi.Router) {
 		r.Get("/", h.List)
 		r.Get("/{module}", h.Get)
-		r.With(jwtmw.RequireRole("platform-admin")).Put("/{module}", h.Put)
+		r.With(
+			jwtmw.RequireRole("platform-admin"),
+			perm.Require("module", "manage", func(r *http.Request) string { return chi.URLParam(r, "module") }),
+		).Put("/{module}", h.Put)
 	})
 
 	srv := &http.Server{
