@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/fuel.reading.json",
+  "title": "fuel.reading",
+  "description": "H2 tank level / consumption reading (fuel-monitoring). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "fuel.reading"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "bus_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "h2_level_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "consumption_kg_per_100km": {
+          "type": "number"
+        },
+        "estimated_range_km": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "bus_id",
+        "ts",
+        "h2_level_pct"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

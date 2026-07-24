@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/maintenance.predicted.json",
+  "title": "maintenance.predicted",
+  "description": "High-risk component prediction emitted by predictive-maintenance. CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "maintenance.predicted"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "bus_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "component": {
+          "type": "string",
+          "enum": [
+            "fuel_cell",
+            "compressor",
+            "tank_valve",
+            "battery"
+          ]
+        },
+        "risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "predicted_failure_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "model_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bus_id",
+        "component",
+        "risk_score",
+        "model_version"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}
