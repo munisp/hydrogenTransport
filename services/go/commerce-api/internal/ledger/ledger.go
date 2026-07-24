@@ -6,8 +6,8 @@
 package ledger
 
 import (
+	"crypto/sha256"
 	"fmt"
-	"hash/crc32"
 	"sync"
 
 	tb "github.com/tigerbeetle/tigerbeetle-go"
@@ -32,18 +32,34 @@ const (
 	CarbonFundAccount      uint64 = 4001
 )
 
-// RiderAccount maps a rider subject to a deterministic 1xxx wallet account ID.
-func RiderAccount(sub string) uint64 {
-	return 1000 + uint64(crc32.ChecksumIEEE([]byte(sub))%900)
+// Rider wallet accounts (1xxx) are assigned per rider via the persisted
+// commerce.rider_accounts mapping (see handlers.riderAccount) — never derived
+// by hashing the rider subject, which could collide across riders.
+
+// DeterministicTransferID derives a stable TigerBeetle transfer ID (uint128)
+// from an idempotency key: first 16 bytes of SHA-256 over a namespaced key.
+// Retrying a request with the same key therefore targets the same transfer,
+// which TigerBeetle deduplicates (TransferExists) instead of double-posting.
+func DeterministicTransferID(idempotencyKey string) tb_types.Uint128 {
+	sum := sha256.Sum256([]byte("h2fleet:tb-transfer:" + idempotencyKey))
+	var b [16]byte
+	copy(b[:], sum[:16])
+	return tb_types.BytesToUint128(b)
 }
+
+// NewTransferID returns a fresh random transfer ID for flows that do not
+// carry an idempotency key.
+func NewTransferID() tb_types.Uint128 { return tb_types.ID() }
 
 // Ledger posts double-entry transfers.
 type Ledger interface {
 	// EnsureAccount creates the account if missing (idempotent).
 	EnsureAccount(id uint64, code uint16) error
-	// Transfer posts amount (minor units) from debit to credit; returns the
-	// TigerBeetle transfer ID (hex).
-	Transfer(debit, credit, amount uint64, code uint16) (string, error)
+	// Transfer posts amount (minor units) from debit to credit under the
+	// given (caller-chosen, ideally deterministic) transfer ID; returns the
+	// TigerBeetle transfer ID (hex). A transfer ID that was already posted
+	// with identical parameters is a retry and returns success.
+	Transfer(id tb_types.Uint128, debit, credit, amount uint64, code uint16) (string, error)
 	Close()
 }
 
@@ -99,14 +115,13 @@ func (l *tbLedger) EnsureAccount(id uint64, code uint16) error {
 	return nil
 }
 
-func (l *tbLedger) Transfer(debit, credit, amount uint64, code uint16) (string, error) {
+func (l *tbLedger) Transfer(id tb_types.Uint128, debit, credit, amount uint64, code uint16) (string, error) {
 	if err := l.EnsureAccount(debit, code); err != nil {
 		return "", fmt.Errorf("ensure debit account: %w", err)
 	}
 	if err := l.EnsureAccount(credit, code); err != nil {
 		return "", fmt.Errorf("ensure credit account: %w", err)
 	}
-	id := tb_types.ID()
 	results, err := l.client.CreateTransfers([]tb_types.Transfer{{
 		ID:              id,
 		DebitAccountID:  tb_types.ToUint128(debit),
@@ -131,14 +146,20 @@ func (l *tbLedger) Transfer(debit, credit, amount uint64, code uint16) (string, 
 func (l *tbLedger) Close() { l.client.Close() }
 
 // simulated is an in-memory ledger for dev environments without TigerBeetle.
+// It enforces the same core invariants as the real ledger: a transfer that
+// would drive the debit account negative is rejected, and re-posting an
+// already-seen transfer ID is treated as an idempotent retry.
 type simulated struct {
-	mu       sync.Mutex
-	balances map[uint64]int64
-	seq      uint64
+	mu        sync.Mutex
+	balances  map[uint64]int64
+	transfers map[tb_types.Uint128]string // posted transfer id → hex string
 }
 
 func newSimulated() *simulated {
-	return &simulated{balances: map[uint64]int64{}}
+	return &simulated{
+		balances:  map[uint64]int64{},
+		transfers: map[tb_types.Uint128]string{},
+	}
 }
 
 func (s *simulated) EnsureAccount(id uint64, _ uint16) error {
@@ -150,20 +171,27 @@ func (s *simulated) EnsureAccount(id uint64, _ uint16) error {
 	return nil
 }
 
-func (s *simulated) Transfer(debit, credit, amount uint64, _ uint16) (string, error) {
+func (s *simulated) Transfer(id tb_types.Uint128, debit, credit, amount uint64, _ uint16) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	hexID := id.String()
+	if existing, ok := s.transfers[id]; ok {
+		return existing, nil // idempotent retry of an already-posted transfer
+	}
 	if _, ok := s.balances[debit]; !ok {
 		s.balances[debit] = 0
 	}
 	if _, ok := s.balances[credit]; !ok {
 		s.balances[credit] = 0
 	}
+	if s.balances[debit]-int64(amount) < 0 {
+		return "", fmt.Errorf("transfer rejected: debit account %d would go negative (balance %d, amount %d)",
+			debit, s.balances[debit], amount)
+	}
 	s.balances[debit] -= int64(amount)
 	s.balances[credit] += int64(amount)
-	s.seq++
-	// Deterministic, TigerBeetle-shaped (32-hex) transfer ID.
-	return fmt.Sprintf("%032x", s.seq), nil
+	s.transfers[id] = hexID
+	return hexID, nil
 }
 
 func (s *simulated) Close() {}

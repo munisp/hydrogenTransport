@@ -66,7 +66,7 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 
 	status := "executed"
 	transferID, err := h.ledger.Transfer(
-		ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount,
+		ledger.NewTransferID(), ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount,
 		uint64(req.PriceMinor), ledger.CodeEnergy)
 	if err != nil {
 		h.log.Error("energy trade ledger transfer failed", zap.Error(err))
