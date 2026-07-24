@@ -14,13 +14,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
-	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/auth"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/handlers"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/ledger"
+	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/metrics"
 )
 
 func main() {
@@ -64,15 +65,16 @@ func main() {
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Timeout(30*time.Second))
+	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, metrics.Middleware("commerce-api"), middleware.Timeout(30*time.Second))
 	r.Get("/healthz", h.Healthz)
+	r.Handle("/metrics", metrics.Handler())
 
 	// fare-payments module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "fare-payments"))
 		r.With(jwtmw.RequireAuth).Post("/v1/payments", h.CreatePayment(os.Getenv("MOJALOOP_ENDPOINT")))
-		r.Get("/v1/payments", h.ListPayments)
-		r.Get("/v1/payments/{id}", h.GetPayment)
+		r.With(jwtmw.RequireAuth).Get("/v1/payments", h.ListPayments)
+		r.With(jwtmw.RequireAuth).Get("/v1/payments/{id}", h.GetPayment)
 	})
 	// loyalty-marketplace module
 	r.Group(func(r chi.Router) {
@@ -80,13 +82,13 @@ func main() {
 		r.With(jwtmw.RequireAuth).Get("/v1/loyalty/balance", h.GetLoyaltyBalance)
 		r.With(jwtmw.RequireAuth).Post("/v1/loyalty/redeem", h.RedeemOffer)
 		r.Get("/v1/marketplace/offers", h.ListOffers)
-		r.With(jwtmw.RequireAuth).Post("/v1/marketplace/offers", h.CreateOffer)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/marketplace/offers", h.CreateOffer)
 	})
 	// energy-trading module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "energy-trading"))
 		r.Get("/v1/energy/trades", h.ListTrades)
-		r.With(jwtmw.RequireAuth).Post("/v1/energy/trades", h.CreateTrade)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/energy/trades", h.CreateTrade)
 	})
 	// gov-dashboard module
 	r.With(gate.Module(tc, "gov-dashboard")).Get("/v1/gov/kpis", h.GetGovKPIs)
@@ -95,8 +97,8 @@ func main() {
 		r.Use(gate.Module(tc, "advertising"))
 		r.Get("/v1/ads/campaigns", h.ListCampaigns)
 		r.Get("/v1/ads/campaigns/{id}", h.GetCampaign)
-		r.With(jwtmw.RequireAuth).Post("/v1/ads/campaigns", h.CreateCampaign)
-		r.With(jwtmw.RequireAuth).Patch("/v1/ads/campaigns/{id}", h.UpdateCampaign)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/ads/campaigns", h.CreateCampaign)
+		r.With(jwtmw.RequireRole("operator")).Patch("/v1/ads/campaigns/{id}", h.UpdateCampaign)
 	})
 
 	srv := &http.Server{

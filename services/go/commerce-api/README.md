@@ -49,3 +49,7 @@ Dockerfile builds on `golang:1.22-bookworm` and ships `distroless/cc`.
 go run ./cmd/server
 docker build -f services/go/commerce-api/Dockerfile -t h2fleet/commerce-api .   # context = repo root
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

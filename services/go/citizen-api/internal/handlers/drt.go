@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
-	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/auth"
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 )
 
 // DRTRequest mirrors citizen.drt_requests (demand-responsive module).
@@ -46,6 +46,14 @@ type latLon struct {
 	Lon float64 `json:"lon"`
 }
 
+// floatValue dereferences a nullable coordinate (nil → null in the event payload).
+func floatValue(f *float64) any {
+	if f == nil {
+		return nil
+	}
+	return *f
+}
+
 // CreateDRTRequest handles POST /v1/drt/requests (Keycloak JWT). Creates the
 // row in citizen.drt_requests and publishes drt.requested (SPEC §3.3) via the
 // Dapr pubsub building block (or direct Kafka fallback).
@@ -78,13 +86,20 @@ func (h *Handler) CreateDRTRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// drt.requested payload per packages/events/schemas/drt.requested.json:
+	// nested pickup/dropoff {lat,lon} objects + requested_at.
 	if err := h.pub.Publish(r.Context(), "drt.requested", map[string]any{
-		"request_id":  d.ID,
-		"user_sub":    d.UserSub,
-		"pickup_lat":  d.PickupLat,
-		"pickup_lon":  d.PickupLon,
-		"dropoff_lat": d.DropoffLat,
-		"dropoff_lon": d.DropoffLon,
+		"request_id": d.ID,
+		"user_sub":   d.UserSub,
+		"pickup": map[string]any{
+			"lat": floatValue(d.PickupLat),
+			"lon": floatValue(d.PickupLon),
+		},
+		"dropoff": map[string]any{
+			"lat": floatValue(d.DropoffLat),
+			"lon": floatValue(d.DropoffLon),
+		},
+		"requested_at": d.RequestedAt.UTC().Format(time.RFC3339),
 	}); err != nil {
 		h.log.Error("failed to publish drt.requested", zap.Error(err))
 	}
@@ -97,8 +112,10 @@ func (h *Handler) ListDRTRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireDB(w) {
 		return
 	}
+	// The ?user_sub= override is gated behind the operator realm role; plain
+	// users always see their own requests regardless of the query parameter.
 	userSub := r.URL.Query().Get("user_sub")
-	if userSub == "" {
+	if userSub == "" || !auth.HasRole(r.Context(), "operator") {
 		userSub = auth.Subject(r.Context())
 	}
 	if userSub == "" {
@@ -167,7 +184,9 @@ func (h *Handler) CancelDRTRequest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, d)
 }
 
-// GetDRTRequest handles GET /v1/drt/requests/{id}.
+// GetDRTRequest handles GET /v1/drt/requests/{id} (Keycloak JWT). DRT
+// requests contain citizen PII: callers may only read their own request
+// unless they carry the operator or platform-admin realm role.
 func (h *Handler) GetDRTRequest(w http.ResponseWriter, r *http.Request) {
 	if !h.requireDB(w) {
 		return
@@ -181,6 +200,12 @@ func (h *Handler) GetDRTRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		h.internal(w, "get drt request", err)
+		return
+	}
+	if d.UserSub != auth.Subject(r.Context()) &&
+		!auth.HasAnyRole(r.Context(), "operator", "platform-admin") {
+		// 404 (not 403) so request existence is not leaked to non-owners.
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
 		return
 	}
 	writeJSON(w, http.StatusOK, d)

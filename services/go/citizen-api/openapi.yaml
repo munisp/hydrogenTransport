@@ -1,0 +1,276 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet citizen-api
+  version: 0.1.0
+  description: >-
+    Domain 3 (Citizen & Engagement) API: passenger info, mobile bootstrap,
+    demand-responsive transport, carbon credits and the open-data portal.
+    Module-gated routes return 404 when their module toggle is OFF (SPEC §3.2).
+servers:
+  - url: http://citizen-api:8083
+tags:
+  - name: passenger-pwa
+  - name: mobile-app
+  - name: demand-responsive
+  - name: carbon-credits
+  - name: open-data-portal
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200': { $ref: '#/components/responses/HealthOk' }
+        '503': { $ref: '#/components/responses/HealthDegraded' }
+  /v1/passenger/stops:
+    get:
+      tags: [passenger-pwa]
+      summary: List stops
+      operationId: listStops
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/passenger/routes:
+    get:
+      tags: [passenger-pwa]
+      summary: List routes
+      operationId: listRoutes
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/passenger/arrivals:
+    get:
+      tags: [passenger-pwa]
+      summary: Upcoming arrivals (optionally per stop)
+      operationId: getArrivals
+      parameters:
+        - name: stop_id
+          in: query
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/passenger/journey:
+    get:
+      tags: [passenger-pwa]
+      summary: Plan a journey
+      operationId: planJourney
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string }
+        - name: to
+          in: query
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/passenger/alerts:
+    get:
+      tags: [passenger-pwa]
+      summary: Active service alerts
+      operationId: listAlerts
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/mobile/config:
+    get:
+      tags: [mobile-app]
+      summary: Bootstrap config for the Expo apps (module states, endpoints)
+      operationId: mobileConfig
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/drt/requests:
+    post:
+      tags: [demand-responsive]
+      summary: Request an on-demand shuttle (JWT)
+      operationId: createDRTRequest
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pickup: { type: string }
+                dropoff: { type: string }
+                pax: { type: integer }
+      responses:
+        '201':
+          description: Created DRT request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DRTRequest' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+    get:
+      tags: [demand-responsive]
+      summary: List own DRT requests (JWT)
+      operationId: listDRTRequests
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Request list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items: { $ref: '#/components/schemas/DRTRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/drt/requests/{id}:
+    get:
+      tags: [demand-responsive]
+      summary: Get one DRT request (JWT)
+      operationId: getDRTRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: DRT request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DRTRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Request not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/drt/requests/{id}/cancel:
+    post:
+      tags: [demand-responsive]
+      summary: Cancel a DRT request (JWT)
+      operationId: cancelDRTRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Cancelled request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DRTRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Request not found or not cancellable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/carbon/credits:
+    get:
+      tags: [carbon-credits]
+      summary: List issued carbon credits
+      operationId: listCarbonCredits
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/carbon/credits/summary:
+    get:
+      tags: [carbon-credits]
+      summary: CO2 avoided / credit totals
+      operationId: carbonSummary
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/opendata/datasets:
+    get:
+      tags: [open-data-portal]
+      summary: List open datasets
+      operationId: listDatasets
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/opendata/search:
+    get:
+      tags: [open-data-portal]
+      summary: Search datasets via OpenSearch
+      operationId: searchOpenData
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '502':
+          description: OpenSearch upstream unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token.
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    DRTRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        rider_sub: { type: string }
+        pickup: { type: string }
+        dropoff: { type: string }
+        status: { type: string }
+        requested_at: { type: string, format: date-time }
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+  responses:
+    JsonOk:
+      description: Successful JSON response
+      content:
+        application/json:
+          schema: { type: object }
+    HealthOk:
+      description: Service healthy
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Health' }
+    HealthDegraded:
+      description: Postgres unreachable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Health' }
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ModuleDisabled:
+      description: The module toggle for this route is OFF (SPEC §3.2)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
