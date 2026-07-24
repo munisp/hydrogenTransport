@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://h2fleet.example/schemas/fare.payment.settled.json",
-  "title": "fare.payment.settled",
-  "description": "Fare payment settled; TigerBeetle ledger entries posted. CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "$id": "https://h2fleet.example/schemas/fare.payment.failed.json",
+  "title": "fare.payment.failed",
+  "description": "Fare payment failed on Mojaloop rails (fare-payments). CloudEvents-ish envelope (SPEC.md §3.3).",
   "type": "object",
   "properties": {
     "id": {
@@ -11,7 +11,7 @@
       "description": "Unique event id."
     },
     "type": {
-      "const": "fare.payment.settled"
+      "const": "fare.payment.failed"
     },
     "source": {
       "type": "string",
@@ -29,9 +29,8 @@
           "type": "string",
           "format": "uuid"
         },
-        "mojaloop_transfer_id": {
-          "type": ["string", "null"],
-          "description": "FSPIOP transfer id; null when the settlement completed without a Mojaloop transfer reference."
+        "rider_sub": {
+          "type": "string"
         },
         "amount_minor": {
           "type": "integer",
@@ -42,16 +41,17 @@
           "minLength": 3,
           "maxLength": 3
         },
-        "settled_at": {
+        "reason": {
           "type": "string",
-          "format": "date-time"
+          "description": "Machine-readable failure reason (e.g. payer_rejected, transfer_timeout, insufficient_funds)."
         }
       },
       "required": [
         "payment_id",
+        "rider_sub",
         "amount_minor",
         "currency",
-        "settled_at"
+        "reason"
       ],
       "additionalProperties": true
     }
