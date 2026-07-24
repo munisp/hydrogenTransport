@@ -61,6 +61,8 @@ pub async fn insert_batch(pool: &PgPool, batch: &[TelemetryEnriched]) -> anyhow:
     let lon: Vec<f64> = batch.iter().map(|r| r.raw.lon).collect();
 
     let result = sqlx::query(
+        // ON CONFLICT DO NOTHING: dedup at-least-once redeliveries against the
+        // UNIQUE(bus_id, ts) constraint (migration 0004_telemetry_dedup).
         r#"
         INSERT INTO fleet.telemetry
             (bus_id, ts, speed_kph, h2_level_pct, fuel_cell_kw, battery_soc_pct, odometer_km, geom)
@@ -70,6 +72,7 @@ pub async fn insert_batch(pool: &PgPool, batch: &[TelemetryEnriched]) -> anyhow:
         FROM unnest($1::uuid[], $2::timestamptz[], $3::float8[], $4::float8[], $5::float8[],
                     $6::float8[], $7::float8[], $8::float8[], $9::float8[])
              AS u(bus_id, ts, speed_kph, h2_level_pct, fuel_cell_kw, battery_soc_pct, odometer_km, lat, lon)
+        ON CONFLICT DO NOTHING
         "#,
     )
     .bind(&bus_ids)

@@ -19,11 +19,16 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::model::{Envelope, OutEnvelope, TelemetryEnriched, TelemetryRaw};
+use crate::model::{DlqRecord, Envelope, OutEnvelope, TelemetryEnriched, TelemetryRaw};
 use crate::store;
 use crate::toggles::ToggleGate;
 
 const SERVICE_NAME: &str = "telemetry-ingest";
+
+/// Max TimescaleDB insert attempts per batch before the batch is dead-lettered.
+/// With the backoff schedule below (2s doubling, capped at 60s) this spans
+/// roughly five minutes of retrying before giving up.
+const MAX_FLUSH_ATTEMPTS: u32 = 10;
 
 struct Pending {
     raw: TelemetryRaw,
@@ -109,6 +114,7 @@ pub async fn run(
                         if batch.is_empty() {
                             batch_started = Some(Instant::now());
                         }
+                        metrics::counter!("telemetry_records_consumed_total").increment(1);
                         batch.push(Pending { raw, partition, offset });
                     }
                     None => {
@@ -170,17 +176,40 @@ async fn flush(
     let raws: Vec<TelemetryRaw> = batch.iter().map(|p| p.raw.clone()).collect();
     let enriched: Vec<TelemetryEnriched> = store::enrich_batch(redis, &raws).await;
 
-    // --- durable write with bounded retry; offsets are NOT committed on failure ---
-    let mut backoff = Duration::from_millis(200);
+    // --- durable write with bounded retry; on permanent failure the batch is
+    // published to the DLQ and offsets ARE committed so the pipeline never
+    // wedges on a poison/outage batch (see MAX_FLUSH_ATTEMPTS) ---
+    let mut backoff = Duration::from_secs(2);
+    let mut attempt: u32 = 0;
+    let mut last_err = String::new();
     let rows = loop {
+        attempt += 1;
         match store::insert_batch(pool, &enriched).await {
-            Ok(rows) => break rows,
+            Ok(rows) => break Some(rows),
             Err(err) => {
-                tracing::error!(error = %err, size = enriched.len(), "timescale insert failed; retrying");
+                last_err = err.to_string();
+                if attempt >= MAX_FLUSH_ATTEMPTS {
+                    tracing::error!(
+                        error = %err, size = enriched.len(), attempts = attempt,
+                        dlq_topic = %cfg.dlq_topic,
+                        "timescale insert failed permanently; dead-lettering batch"
+                    );
+                    break None;
+                }
+                tracing::error!(error = %err, size = enriched.len(), attempt, max_attempts = MAX_FLUSH_ATTEMPTS, "timescale insert failed; retrying");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                backoff = (backoff * 2).min(Duration::from_secs(60));
             }
         }
+    };
+
+    let Some(rows) = rows else {
+        dead_letter(cfg, producer, &enriched, &last_err, attempt).await;
+        metrics::counter!("telemetry_records_dlq_total").increment(batch.len() as u64);
+        commit_batch_offsets(consumer, &cfg.input_topic, batch);
+        tracing::error!(size = batch.len(), "batch dead-lettered; offsets committed");
+        batch.clear();
+        return;
     };
 
     // --- republish telemetry.enriched (best effort, logged on failure) ---
@@ -209,6 +238,15 @@ async fn flush(
     }
 
     // --- commit offsets (highest offset per partition, +1) ---
+    commit_batch_offsets(consumer, &cfg.input_topic, batch);
+
+    metrics::counter!("telemetry_records_written_total").increment(rows);
+    tracing::debug!(rows, batch = batch.len(), "batch flushed");
+    batch.clear();
+}
+
+/// Commit the highest offset (+1) per partition for a consumed batch.
+fn commit_batch_offsets(consumer: &StreamConsumer, topic: &str, batch: &[Pending]) {
     let mut tpl = TopicPartitionList::new();
     let mut high: std::collections::HashMap<i32, i64> = std::collections::HashMap::new();
     for p in batch.iter() {
@@ -217,15 +255,44 @@ async fn flush(
             .or_insert(p.offset);
     }
     for (partition, offset) in high {
-        tpl.add_partition_offset(cfg.input_topic.as_str(), partition, Offset::Offset(offset + 1))
+        tpl.add_partition_offset(topic, partition, Offset::Offset(offset + 1))
             .ok();
     }
     if let Err(err) = consumer.commit(&tpl, CommitMode::Async) {
         tracing::warn!(error = %err, "offset commit failed (will redeliver)");
     }
+}
 
-    tracing::debug!(rows, batch = batch.len(), "batch flushed");
-    batch.clear();
+/// Publish every record of a permanently failed batch to the DLQ topic
+/// (best effort; publish failures are logged, not retried).
+async fn dead_letter(
+    cfg: &Config,
+    producer: &FutureProducer,
+    enriched: &[TelemetryEnriched],
+    error: &str,
+    attempts: u32,
+) {
+    for rec in enriched {
+        let out = OutEnvelope {
+            id: Uuid::new_v4(),
+            kind: cfg.dlq_topic.as_str(),
+            source: SERVICE_NAME,
+            time: Utc::now(),
+            data: DlqRecord { record: rec, error, attempts },
+        };
+        let payload = match serde_json::to_vec(&out) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::error!(error = %err, "serialize DLQ event failed");
+                continue;
+            }
+        };
+        let key = rec.raw.bus_id.to_string();
+        let record = FutureRecord::to(cfg.dlq_topic.as_str()).key(&key).payload(&payload);
+        if let Err((err, _)) = producer.send(record, Duration::from_secs(5)).await {
+            tracing::error!(error = %err, bus_id = %key, topic = %cfg.dlq_topic, "DLQ publish failed");
+        }
+    }
 }
 
 fn commit_one(consumer: &StreamConsumer, topic: &str, partition: i32, offset: i64) {

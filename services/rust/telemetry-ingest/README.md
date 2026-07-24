@@ -16,8 +16,15 @@ telemetry.raw ──► parse envelope ──► validate ──► enrich (Redi
   whichever comes first. Single round-trip insert via `unnest($1::uuid[], …)`.
 - **Backpressure-safe**: the consumer simply stops polling while a batch flushes — Kafka TCP
   flow control + `max.poll.interval.ms` bound memory; there is no unbounded queue. Offsets are
-  committed only after the TimescaleDB write succeeds (DB failures retry with capped exponential
-  backoff; at-least-once semantics).
+  committed only after the TimescaleDB write succeeds (at-least-once semantics).
+- **Dedup**: inserts use `ON CONFLICT DO NOTHING` against `UNIQUE(bus_id, ts)` on
+  `fleet.telemetry` (migration `0004_telemetry_dedup.sql`), so at-least-once redeliveries
+  and intra-batch duplicates are idempotent.
+- **Bounded retry + DLQ**: a failed insert is retried up to 10 times with exponential
+  backoff (2 s doubling, capped at 60 s — roughly five minutes total). If the batch still
+  fails, every record is published to `DLQ_TOPIC` (default `telemetry.raw.dlq`) as an
+  envelope `{id, type: "telemetry.raw.dlq", source, time, data: {record, error, attempts}}`,
+  the offsets are committed, and an error is logged — the pipeline never wedges.
 - **Poison records**: malformed envelopes / implausible values are logged, dropped, and their
   offset committed so the consumer never wedges.
 - **Toggle gate**: polls `GET $TOGGLE_URL/v1/toggles/telematics` every `TOGGLE_POLL_INTERVAL_S`
@@ -60,6 +67,7 @@ Envelope contract is unchanged across the bridge (SPEC §3.3, `packages/events`)
 | `KAFKA_GROUP_ID` | `telemetry-ingest` | consumer group |
 | `INPUT_TOPIC` | `telemetry.raw` | |
 | `OUTPUT_TOPIC` | `telemetry.enriched` | |
+| `DLQ_TOPIC` | `telemetry.raw.dlq` | dead-letter topic after 10 failed insert attempts |
 | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/h2fleet` | TimescaleDB |
 | `REDIS_ADDR` | `localhost:6379` | host:port or redis:// URL |
 | `TOGGLE_URL` | `http://localhost:8080` | toggle-service |

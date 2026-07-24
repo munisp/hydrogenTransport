@@ -91,6 +91,11 @@ async fn main() -> anyhow::Result<()> {
     let gate = ToggleGate::new();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    // Prometheus recorder; /metrics is scraped per infra/observability/prometheus.yml.
+    let prom_recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let prom_handle = prom_recorder.handle();
+    metrics::set_global_recorder(prom_recorder).context("install prometheus recorder")?;
+
     // Toggle poller (every 10s by default).
     {
         let gate = gate.clone();
@@ -106,9 +111,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Health endpoint (only HTTP surface).
+    // Health + metrics endpoints (only HTTP surface).
     let health = Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/metrics",
+            get(move || {
+                let handle = prom_handle.clone();
+                async move { handle.render() }
+            }),
+        )
         .with_state(Arc::new(HealthState { pool: pool.clone(), gate: gate.clone() }));
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     let listener = tokio::net::TcpListener::bind(addr).await.context("bind health port")?;

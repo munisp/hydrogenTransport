@@ -15,6 +15,8 @@ pub struct Config {
     pub input_topic: String,
     /// Output topic (telemetry.enriched).
     pub output_topic: String,
+    /// Dead-letter topic for batches that exhaust the insert retry budget.
+    pub dlq_topic: String,
     /// Postgres/TimescaleDB DSN.
     pub database_url: String,
     /// Redis address (host:port or redis://host:port).
@@ -46,6 +48,7 @@ impl Config {
             kafka_group_id: env_or("KAFKA_GROUP_ID", "telemetry-ingest"),
             input_topic: env_or("INPUT_TOPIC", "telemetry.raw"),
             output_topic: env_or("OUTPUT_TOPIC", "telemetry.enriched"),
+            dlq_topic: env_or("DLQ_TOPIC", "telemetry.raw.dlq"),
             database_url: env_or(
                 "DATABASE_URL",
                 "postgres://postgres:postgres@localhost:5432/h2fleet",
