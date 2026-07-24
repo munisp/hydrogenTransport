@@ -1,0 +1,11 @@
+{
+  "id": "4a5b6c7d-8e9f-4a0b-1c2d-3e4f5a6b7c8d",
+  "type": "station.status.changed",
+  "source": "infra-api",
+  "time": "2025-01-15T13:05:00Z",
+  "data": {
+    "station_id": "c9e7d5b3-2f4a-4b6c-9d8e-7f6a5b4c3d2e",
+    "status": "maintenance",
+    "available_kg": 790.0
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "7a8b9c0d-1e2f-4a5b-9c8d-0e1f2a3b4c5d",
+  "type": "twin.updated",
+  "source": "digital-twin",
+  "time": "2025-01-15T08:30:05.000Z",
+  "data": {
+    "bus_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "ts": "2025-01-15T08:30:05.000Z",
+    "state": {
+      "speed_kph": 32.5,
+      "h2_level_pct": 61.25,
+      "fuel_cell_kw": 48.0,
+      "battery_soc_pct": 72.5,
+      "odometer_km": 41250.6,
+      "lat": 52.52,
+      "lon": 13.4049,
+      "route_id": "R3",
+      "status": "active"
+    }
+  }
+}

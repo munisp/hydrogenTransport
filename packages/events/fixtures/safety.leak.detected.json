@@ -1,0 +1,18 @@
+{
+  "id": "5d6e7f8a-9b0c-4d1e-2f3a-5b6c7d8e9f0a",
+  "type": "safety.leak.detected",
+  "source": "infra-api",
+  "time": "2025-01-15T10:12:44Z",
+  "data": {
+    "incident_id": "d5e6f7a8-9b0c-4d1e-2f3a-5b6c7d8e9f0a",
+    "bus_id": "8a2c4e6f-1b3d-4a5c-8e9f-0a1b2c3d4e5f",
+    "station_id": null,
+    "sensor_id": "h2-ppm-bus-023",
+    "h2_ppm": 8500,
+    "severity": "high",
+    "location": {
+      "lat": 52.5242,
+      "lon": 13.4101
+    }
+  }
+}

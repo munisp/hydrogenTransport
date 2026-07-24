@@ -1,0 +1,20 @@
+{
+  "id": "3f6b7c2e-9a1d-4e5f-b8a0-1c2d3e4f5a6b",
+  "type": "telemetry.raw",
+  "source": "telemetry-simulator",
+  "time": "2025-01-15T08:30:00.000Z",
+  "data": {
+    "bus_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "ts": "2025-01-15T08:30:00.000Z",
+    "speed_kph": 32.5,
+    "h2_level_pct": 61.25,
+    "fuel_cell_kw": 48.0,
+    "battery_soc_pct": 72.5,
+    "odometer_km": 41250.6,
+    "lat": 52.52,
+    "lon": 13.4049,
+    "route_id": "R3",
+    "depot_id": "depot-central",
+    "heading_deg": 142.0
+  }
+}

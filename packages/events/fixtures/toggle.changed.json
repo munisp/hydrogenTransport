@@ -1,0 +1,11 @@
+{
+  "id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+  "type": "toggle.changed",
+  "source": "toggle-service",
+  "time": "2025-01-15T09:00:00.000Z",
+  "data": {
+    "module": "advertising",
+    "domain": "commerce",
+    "enabled": false
+  }
+}
