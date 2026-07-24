@@ -1,17 +1,13 @@
 -- =============================================================================
--- H2Fleet — 002_seed.sql
+-- H2Fleet — 0002_seed.sql (goose)
 -- Seed data: 50 buses (H2-001..H2-050) on a mid-size city grid,
 -- 3 refueling stations, all 20 feature toggles ON, sample incidents,
--- carbon credits and trades.
--- Coordinates: deterministic 10x5 grid centred on (13.4049, 52.5200) with a
--- small hash-based jitter so buses do not stack exactly on intersections.
---
--- DEPRECATED COMPAT SHIM: the canonical seed source is
--- infra/sql/migrations/0002_seed.sql (goose). This file is kept only for
--- docker-entrypoint-initdb.d compatibility on fresh boots. New seed data
--- goes into a new numbered migration, NOT here.
+-- telemetry, carbon credits and fare/trades.
+-- Canonical seed source; supersedes infra/sql/002_seed.sql (kept for
+-- docker-entrypoint-initdb.d compatibility on fresh boots).
 -- =============================================================================
 
+-- +goose Up
 -- ------------------------------------------------------------- 20 toggles --
 INSERT INTO public.feature_toggles (module, domain, enabled) VALUES
     ('telematics',              'fleet',    true),
@@ -114,3 +110,23 @@ INSERT INTO commerce.trades (kind, quantity_kg, price_minor, status, created_at)
     ('h2-sale',       250.0,  225000, 'settled',  now() - interval '5 days'),
     ('energy-export', 180.0,  148500, 'executed', now() - interval '1 day')
 ON CONFLICT DO NOTHING;
+
+-- +goose Down
+DELETE FROM commerce.trades
+ WHERE (kind, quantity_kg, price_minor) IN (('h2-sale', 250.0, 225000), ('energy-export', 180.0, 148500));
+DELETE FROM commerce.fare_payments WHERE rider_sub = 'citizen';
+DELETE FROM citizen.carbon_credits WHERE period IN ('2024-04', '2024-05', '2024-W23');
+DELETE FROM fleet.telemetry
+ WHERE bus_id IN (SELECT id FROM fleet.vehicles WHERE fleet_no IN ('H2-001', 'H2-002', 'H2-003'));
+DELETE FROM infra.incidents
+ WHERE (type, severity) IN (('leak', 'high'), ('fuel-cell-fault', 'medium'), ('station-fault', 'low'));
+DELETE FROM infra.stations WHERE name IN ('Depot Central HRS', 'Riverside HRS', 'Northgate HRS');
+DELETE FROM fleet.vehicles WHERE fleet_no ~ '^H2-[0-9]{3}$';
+DELETE FROM public.feature_toggles WHERE module IN (
+    'telematics', 'predictive-maintenance', 'digital-twin', 'fuel-monitoring',
+    'route-energy-optimizer', 'refueling-stations', 'leak-detection',
+    'dispatch-workforce', 'compliance-reporting', 'depot-management',
+    'passenger-pwa', 'mobile-app', 'demand-responsive', 'carbon-credits',
+    'open-data-portal', 'fare-payments', 'loyalty-marketplace',
+    'energy-trading', 'gov-dashboard', 'advertising'
+);

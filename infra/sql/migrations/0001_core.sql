@@ -1,18 +1,14 @@
 -- =============================================================================
--- H2Fleet — 001_init.sql
+-- H2Fleet — 0001_core.sql (goose)
 -- Extensions, per-domain schemas and ALL core tables (SPEC §3.4).
--- Runs automatically on first Postgres boot (docker-entrypoint-initdb.d).
+-- Canonical schema source; supersedes infra/sql/001_init.sql (kept for
+-- docker-entrypoint-initdb.d compatibility on fresh boots).
 -- Image: timescale/timescaledb-ha (ships postgis + timescaledb).
---
--- DEPRECATED COMPAT SHIM: the canonical, versioned schema source is
--- infra/sql/migrations/ (goose). This file is kept only so a fresh
--- docker-entrypoint-initdb.d boot still yields a usable database before the
--- migrator runs. New DDL goes into a new numbered migration, NOT here.
--- NOTE: feature_toggles.enabled intentionally stays DEFAULT false here for
--- byte-compat with existing initdb boots; the canonical default in
--- migrations/0001_core.sql is true (matches seed behaviour).
+-- NOTE: feature_toggles.enabled defaults to TRUE (reconciled with the seed
+-- behaviour — all modules ship enabled unless explicitly toggled off).
 -- =============================================================================
 
+-- +goose Up
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid()
@@ -30,7 +26,7 @@ CREATE SCHEMA IF NOT EXISTS commerce;
 CREATE TABLE IF NOT EXISTS public.feature_toggles (
     module     text PRIMARY KEY,
     domain     text NOT NULL,
-    enabled    boolean NOT NULL DEFAULT false,
+    enabled    boolean NOT NULL DEFAULT true,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -151,13 +147,40 @@ CREATE TABLE IF NOT EXISTS commerce.trades (
 );
 
 -- Convenience: updated_at maintenance for toggles.
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION public.touch_updated_at() RETURNS trigger AS $$
 BEGIN
     NEW.updated_at := now();
     RETURN NEW;
 END; $$ LANGUAGE plpgsql;
+-- +goose StatementEnd
 
 DROP TRIGGER IF EXISTS feature_toggles_touch ON public.feature_toggles;
 CREATE TRIGGER feature_toggles_touch
     BEFORE UPDATE ON public.feature_toggles
     FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
+
+-- +goose Down
+DROP TRIGGER IF EXISTS feature_toggles_touch ON public.feature_toggles;
+DROP FUNCTION IF EXISTS public.touch_updated_at();
+
+DROP TABLE IF EXISTS commerce.trades;
+DROP TABLE IF EXISTS commerce.fare_payments;
+DROP TABLE IF EXISTS citizen.carbon_credits;
+DROP TABLE IF EXISTS citizen.drt_requests;
+DROP TABLE IF EXISTS infra.incidents;
+DROP TABLE IF EXISTS infra.stations;
+DROP TABLE IF EXISTS fleet.twin_snapshots;
+DROP TABLE IF EXISTS fleet.maintenance_predictions;
+DROP TABLE IF EXISTS fleet.telemetry;
+DROP TABLE IF EXISTS fleet.vehicles;
+DROP TABLE IF EXISTS public.feature_toggles;
+
+DROP SCHEMA IF EXISTS commerce;
+DROP SCHEMA IF EXISTS citizen;
+DROP SCHEMA IF EXISTS infra;
+DROP SCHEMA IF EXISTS fleet;
+
+DROP EXTENSION IF EXISTS pgcrypto;
+DROP EXTENSION IF EXISTS timescaledb;
+DROP EXTENSION IF EXISTS postgis;
