@@ -45,3 +45,7 @@ Events use the **Dapr pubsub building block** (component `h2pubsub`) when
 go run ./cmd/server
 docker build -f services/go/citizen-api/Dockerfile -t h2fleet/citizen-api .   # context = repo root
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

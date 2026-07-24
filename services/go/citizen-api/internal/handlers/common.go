@@ -15,15 +15,20 @@ import (
 // Handler serves the citizen endpoints. db may be nil when DATABASE_URL is
 // unset; DB-backed endpoints then respond 503.
 type Handler struct {
-	db  *pgxpool.Pool
+	db  DB
 	pub pubsub.Publisher
 	tc  *toggle.Client
 	log *zap.Logger
 }
 
-// New builds a Handler.
+// New builds a Handler. A nil pool stays a nil DB (not a non-nil interface
+// wrapping a nil pointer) so requireDB keeps reporting 503.
 func New(db *pgxpool.Pool, pub pubsub.Publisher, tc *toggle.Client, log *zap.Logger) *Handler {
-	return &Handler{db: db, pub: pub, tc: tc, log: log}
+	var d DB
+	if db != nil {
+		d = db
+	}
+	return &Handler{db: d, pub: pub, tc: tc, log: log}
 }
 
 // Healthz reports liveness/readiness.

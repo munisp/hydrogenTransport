@@ -14,12 +14,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
-	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/auth"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/handlers"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/pubsub"
+	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/metrics"
 )
 
 func main() {
@@ -59,8 +60,9 @@ func main() {
 	od := handlers.NewOpenData(os.Getenv("OPENSEARCH_URL"), os.Getenv("OPENSEARCH_INDEX"), log)
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Timeout(30*time.Second))
+	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, metrics.Middleware("citizen-api"), middleware.Timeout(30*time.Second))
 	r.Get("/healthz", h.Healthz)
+	r.Handle("/metrics", metrics.Handler())
 
 	// passenger-pwa module: GTFS-static style seed data + service alerts
 	r.Group(func(r chi.Router) {
@@ -78,7 +80,7 @@ func main() {
 		r.Use(gate.Module(tc, "demand-responsive"))
 		r.With(jwtmw.RequireAuth).Post("/v1/drt/requests", h.CreateDRTRequest)
 		r.With(jwtmw.RequireAuth).Get("/v1/drt/requests", h.ListDRTRequests)
-		r.Get("/v1/drt/requests/{id}", h.GetDRTRequest)
+		r.With(jwtmw.RequireAuth).Get("/v1/drt/requests/{id}", h.GetDRTRequest)
 		r.With(jwtmw.RequireAuth).Post("/v1/drt/requests/{id}/cancel", h.CancelDRTRequest)
 	})
 	// carbon-credits module
