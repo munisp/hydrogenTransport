@@ -12,7 +12,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
+from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi import Depends, FastAPI, HTTPException, Request
+from h2fleet_auth import KeycloakJwtVerifier
 from pydantic import BaseModel, Field
 from toggle_client import AsyncToggleClient
 
@@ -23,6 +25,10 @@ from .model import ComponentRisk, load_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("predictive-maintenance")
+
+# Keycloak OIDC JWT (RS256) verifier; mutating routes require a valid Bearer
+# token (SPEC §3.5). Fail-closed when KEYCLOAK_ISSUER is unset.
+jwt_verifier = KeycloakJwtVerifier.from_env()
 
 
 class PredictRequest(BaseModel):
@@ -59,11 +65,15 @@ async def lifespan(app: FastAPI):
         await consumer_task
     except asyncio.CancelledError:
         pass
+    await jwt_verifier.aclose()
     await toggles.close()
     await pool.close()
 
 
 app = FastAPI(title="H2Fleet predictive-maintenance", version="0.1.0", lifespan=lifespan)
+
+# Prometheus metrics: GET /metrics (infra/observability/prometheus.yml, job h2fleet-services).
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.get("/healthz")
@@ -92,7 +102,11 @@ async def require_enabled(request: Request) -> None:
         raise HTTPException(status_code=404, detail="module predictive-maintenance is disabled")
 
 
-@app.post("/v1/predict", response_model=PredictResponse, dependencies=[Depends(require_enabled)])
+@app.post(
+    "/v1/predict",
+    response_model=PredictResponse,
+    dependencies=[Depends(require_enabled), Depends(jwt_verifier.require_auth)],
+)
 async def predict(req: PredictRequest, request: Request):
     pool = request.app.state.pool
     model = request.app.state.model_holder["model"]

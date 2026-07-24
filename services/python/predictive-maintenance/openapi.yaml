@@ -1,0 +1,98 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet predictive-maintenance
+  version: 0.1.0
+  description: >-
+    ML failure-risk scoring for fuel-cell/battery/H2 systems. When the
+    predictive-maintenance module toggle is OFF the /v1 route returns 404
+    (SPEC §3.2). Scoring requires a Keycloak JWT.
+servers:
+  - url: http://predictive-maintenance:8090
+tags:
+  - name: predictions
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200':
+          description: Health status (db/model/toggle details in body)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  service: { type: string, example: predictive-maintenance }
+                  module: { type: string, example: predictive-maintenance }
+                  enabled: { type: boolean }
+                  db: { type: boolean }
+        '503':
+          description: Dependency unreachable
+          content:
+            application/json:
+              schema: { type: object }
+  /v1/predict:
+    post:
+      tags: [predictions]
+      summary: Score failure risk for one bus from recent telemetry
+      operationId: predict
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bus_id]
+              properties:
+                bus_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Per-component risk scores
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bus_id: { type: string, format: uuid }
+                  model_version: { type: string }
+                  feature_window_hours: { type: integer }
+                  predictions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        component: { type: string }
+                        risk: { type: number }
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Module disabled or no telemetry for the bus in the feature window
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token.
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string }

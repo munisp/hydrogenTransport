@@ -10,6 +10,8 @@ ML failure-risk scoring for the H2 fleet (module `predictive-maintenance`, Domai
   (SPEC §3.3 envelope) for components with `risk_score >= HIGH_RISK_THRESHOLD` (0.7).
 - Toggle-gated: when the module is OFF, API routes return 404 and the Kafka loop idles.
   APISIX: `/api/ml/*` → predictive-maintenance:8090 (SPEC §3.6).
+- Auth: `POST /v1/predict` requires a Keycloak RS256 Bearer token (SPEC §3.5) verified
+  via the shared `h2fleet_auth` package (`services/python/shared`); `/healthz` stays public.
 
 ## Model
 
@@ -40,6 +42,7 @@ The artifact's feature list is validated against the runtime at load.
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/h2fleet` |
 | `KAFKA_BROKERS` | `localhost:9092` |
 | `TOGGLE_URL` | `http://localhost:8080` |
+| `KEYCLOAK_ISSUER` / `KEYCLOAK_ISSUER_ALT` | unset / `http://localhost:8088/realms/h2fleet` | JWKS source + accepted issuers; unset issuer ⇒ guarded routes 503 |
 | `INPUT_TOPIC` / `OUTPUT_TOPIC` | `telemetry.enriched` / `maintenance.predicted` |
 | `MODEL_PATH` | `models/model.joblib` |
 | `FEATURE_WINDOW_HOURS` | `24` |
@@ -54,3 +57,7 @@ uvicorn app.main:app --port 8090
 docker build -f services/python/predictive-maintenance/Dockerfile -t h2fleet/predictive-maintenance .
 curl -X POST localhost:8090/v1/predict -H 'content-type: application/json' -d '{"bus_id":"<uuid>"}'
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.
