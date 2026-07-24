@@ -1,0 +1,30 @@
+# Dev overlay — "city-pilot" style deployment: only the fleet + infra domains
+# are enabled. toggle-service seeds/enables only modules whose domain is in
+# TOGGLE_DOMAINS; all citizen/commerce routes therefore return 404 and their
+# consumers/workflows do not start (SPEC §1).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: h2fleet
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: ConfigMap
+      name: h2fleet-config
+    patch: |-
+      - op: replace
+        path: /data/TOGGLE_DOMAINS
+        value: "fleet,infra"
+  # dev: single replica of everything
+  - target:
+      kind: Deployment
+      name: fleet-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+images:
+  - name: ghcr.io/munisp/h2fleet/toggle-service
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/fleet-api
+    newTag: dev

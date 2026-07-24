@@ -1,0 +1,40 @@
+# Dapr cron input bindings — scheduled jobs that used to require a separate
+# scheduler. Bound services expose an HTTP endpoint named after the binding.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cron-carbon-daily
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "0 2 * * *"   # 02:00 daily: carbon-analytics credit issuance batch
+scopes:
+  - carbon-analytics
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cron-compliance-weekly
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "0 5 * * MON" # Monday 05:00: infra-api compliance report generation
+scopes:
+  - infra-api
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cron-settlement-hourly
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "0 * * * *"   # hourly: commerce-api fare settlement reconciliation
+scopes:
+  - commerce-api

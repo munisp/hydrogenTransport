@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: h2fleet
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - toggle-service.yaml
+  - fleet-api.yaml
+  # Add the remaining service manifests here as they are promoted to k8s
+  # (same pattern as fleet-api: Deployment + Service + envFrom h2fleet-config).
+commonLabels:
+  app.kubernetes.io/part-of: h2fleet

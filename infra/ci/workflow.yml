@@ -1,0 +1,104 @@
+# NOTE: this is the GitHub Actions CI workflow for H2Fleet.
+# It lives here because the API token used to publish the repo lacks the
+# "workflow" scope. Move this file to .github/workflows/ci.yml (one web-UI
+# commit or a token with workflow scope) to activate CI.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: Go services (build + vet)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [toggle-service, fleet-api, infra-api, citizen-api, commerce-api]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build & vet ${{ matrix.service }}
+        working-directory: services/go/${{ matrix.service }}
+        run: |
+          if [ ! -f go.mod ]; then echo "service not present yet, skipping"; exit 0; fi
+          go build ./...
+          go vet ./...
+          if [ -n "$(find . -name '*_test.go' -print -quit)" ]; then go test ./...; fi
+
+  rust:
+    name: Rust services (cargo check)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [telemetry-ingest, digital-twin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/rust/${{ matrix.service }}
+      - name: Install librdkafka deps
+        run: sudo apt-get update && sudo apt-get install -y librdkafka-dev pkg-config libssl-dev
+      - name: cargo check ${{ matrix.service }}
+        working-directory: services/rust/${{ matrix.service }}
+        run: |
+          if [ ! -f Cargo.toml ]; then echo "service not present yet, skipping"; exit 0; fi
+          cargo check --all-targets
+          cargo clippy --all-targets -- -D warnings || true
+
+  python:
+    name: Python services
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [predictive-maintenance, route-optimizer, carbon-analytics, lakehouse-etl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install, compile, test ${{ matrix.service }}
+        working-directory: services/python/${{ matrix.service }}
+        run: |
+          if [ ! -f requirements.txt ]; then echo "service not present yet, skipping"; exit 0; fi
+          pip install -r requirements.txt
+          python -m compileall -q .
+          if ls tests/test_*.py >/dev/null 2>&1 || ls test_*.py >/dev/null 2>&1; then
+            pip install pytest
+            pytest -q
+          fi
+
+  pwa:
+    name: PWA (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build PWA
+        working-directory: apps/pwa
+        run: |
+          if [ ! -f package.json ]; then echo "pwa not present yet, skipping"; exit 0; fi
+          # use npm ci when a lockfile is committed, otherwise npm install
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+          npx tsc --noEmit
+          npx vite build
+
+  compose:
+    name: docker-compose config validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file (all profiles)
+        run: |
+          docker compose -f infra/docker-compose.yml config --quiet
+          docker compose -f infra/docker-compose.yml --profile apps config --quiet
+          docker compose -f infra/docker-compose.yml --profile all --profile waf --profile etl --profile fluvio config --quiet

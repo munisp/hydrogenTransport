@@ -1,0 +1,27 @@
+# Dapr pub/sub component backed by Kafka (event backbone, SPEC §3.3).
+# Used by citizen-api and commerce-api (Dapr abstraction); fleet hot path uses
+# sarama/rdkafka directly. Name "h2pubsub" is referenced by the services.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: h2pubsub
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: kafka:9092
+    - name: consumerGroup
+      value: h2fleet-dapr
+    - name: authType
+      value: none
+    - name: maxMessageBytes
+      value: "1048576"
+    # Topics per SPEC §3.3 are auto-created by Kafka; Dapr subscribes on demand.
+    # telemetry.raw, telemetry.enriched, twin.updated, maintenance.predicted,
+    # fuel.reading, safety.leak.detected, dispatch.job.assigned, drt.requested,
+    # fare.payment.initiated, fare.payment.settled, carbon.credit.issued,
+    # energy.trade.executed, toggle.changed, station.status.changed
+scopes:
+  - citizen-api
+  - commerce-api
