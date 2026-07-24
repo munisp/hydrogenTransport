@@ -251,7 +251,7 @@ services:
              sleep 2;
              curl -sf -X POST http://permify:3478/v1/tenants/t1/schemas
                -H 'Content-Type: application/json'
-               -d '{\"schema\": '\"'$$(cat /schema.perm | sed 's/\"/\\\"/g' | sed 's/^/\n/' | tr -d \"\n\")'\"'}'
+               -d '{\"schema\": '\"'$$(cat /schema.perm | sed 's/\"/\\\\\"/g' | sed 's/^/\\n/' | tr -d \"\n\")'\"'}'
              || echo 'schema write best-effort (use Permify UI/CLI to verify)'"
     depends_on:
       permify:
