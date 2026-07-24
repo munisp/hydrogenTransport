@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"context"
+	"strings"
 
 	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
@@ -42,6 +43,24 @@ type temporalSignaler struct {
 }
 
 func (t *temporalSignaler) Signal(ctx context.Context, workflowID, signalName string, payload any) error {
+	// Start the workflow if it is not running yet: handlers signal right
+	// after creating the incident/job, so SignalWithStart makes the signal
+	// the workflow's first event instead of failing on a missing run.
+	if wf, ok := workflowForID(workflowID); ok {
+		_, err := t.c.SignalWithStartWorkflow(ctx, workflowID, signalName, payload,
+			client.StartWorkflowOptions{
+				ID:        workflowID,
+				TaskQueue: TaskQueue,
+			}, wf)
+		if err != nil {
+			t.log.Error("temporal signal-with-start failed",
+				zap.String("workflow", workflowID), zap.String("signal", signalName), zap.Error(err))
+			return err
+		}
+		t.log.Info("temporal signal sent (workflow started if needed)",
+			zap.String("workflow", workflowID), zap.String("signal", signalName))
+		return nil
+	}
 	if err := t.c.SignalWorkflow(ctx, workflowID, "", signalName, payload); err != nil {
 		t.log.Error("temporal signal failed",
 			zap.String("workflow", workflowID), zap.String("signal", signalName), zap.Error(err))
@@ -53,6 +72,19 @@ func (t *temporalSignaler) Signal(ctx context.Context, workflowID, signalName st
 }
 
 func (t *temporalSignaler) Close() { t.c.Close() }
+
+// workflowForID maps a workflow ID prefix to its workflow function; the
+// second return value is false for unknown prefixes.
+func workflowForID(workflowID string) (any, bool) {
+	switch {
+	case strings.HasPrefix(workflowID, IncidentWorkflowIDPrefix):
+		return IncidentResponseWorkflow, true
+	case strings.HasPrefix(workflowID, DispatchWorkflowIDPrefix):
+		return DispatchWorkflow, true
+	default:
+		return nil, false
+	}
+}
 
 type noopSignaler struct {
 	log *zap.Logger
