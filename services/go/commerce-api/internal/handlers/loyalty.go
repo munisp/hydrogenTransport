@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/auth"
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 )
 
 // LoyaltyBalance is a rider's rewards balance (loyalty-marketplace module).
