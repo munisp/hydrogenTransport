@@ -15,7 +15,7 @@ import (
 
 // Handler serves the commerce endpoints.
 type Handler struct {
-	db     *pgxpool.Pool
+	db     DB
 	ledger ledger.Ledger
 	pub    events.Publisher
 	log    *zap.Logger
@@ -36,6 +36,13 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS tb_transfer_id text`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS fare_payments_idempotency_key_uq
 			ON commerce.fare_payments (idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		// Persisted rider → TigerBeetle wallet mapping (replaces hash-derived
+		// account ids; sequential allocation starts at 1001).
+		`CREATE TABLE IF NOT EXISTS commerce.rider_accounts (
+			rider_sub  text PRIMARY KEY,
+			account_id bigint NOT NULL UNIQUE,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`,
 		`CREATE TABLE IF NOT EXISTS commerce.loyalty_accounts (
 			user_sub   text PRIMARY KEY,
 			points     integer NOT NULL DEFAULT 0 CHECK (points >= 0),
