@@ -33,10 +33,14 @@ Schedule via cron / k8s CronJob, e.g. `0 3 1 * *` (monthly).
 |---|---|
 | `GET /healthz` | liveness + db + toggle state |
 | `GET /v1/carbon/credits?period=YYYY-MM` | issued credits (all periods when omitted) |
-| `POST /v1/carbon/compute {"period":"YYYY-MM","publish":true}` | recompute + republish |
+| `POST /v1/carbon/compute {"period":"YYYY-MM","publish":true}` | recompute + republish (Keycloak RS256 Bearer token required, SPEC §3.5) |
 
 Toggle-gated: module OFF → routes 404. Consumed by citizen-api `/api/citizen/*`
 (this service is internal; not directly in the APISIX prefix table of SPEC §3.6).
+Auth is verified via the shared `h2fleet_auth` package (`services/python/shared`);
+`/healthz` and `GET /v1/carbon/credits` stay public. Env: `KEYCLOAK_ISSUER`
+(JWKS source; unset ⇒ guarded routes 503), `KEYCLOAK_ISSUER_ALT` (extra accepted
+issuers, default `http://localhost:8088/realms/h2fleet`).
 
 ## Configuration (env)
 
@@ -58,3 +62,7 @@ uvicorn app.main:app --port 8094
 docker build -f services/python/carbon-analytics/Dockerfile -t h2fleet/carbon-analytics .
 docker run --rm h2fleet/carbon-analytics python -m app.cli --period 2025-01
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

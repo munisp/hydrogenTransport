@@ -1,0 +1,147 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet toggle-service
+  version: 0.1.0
+  description: >-
+    Central feature-toggle control plane (SPEC §3.2). Toggles are stored in
+    Postgres (feature_toggles), cached in Redis (toggles:<module>, 30s TTL)
+    and published to Kafka as toggle.changed on mutation.
+servers:
+  - url: http://toggle-service:8080
+tags:
+  - name: toggles
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: Postgres unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /v1/toggles:
+    get:
+      tags: [toggles]
+      summary: List every module toggle
+      operationId: listToggles
+      responses:
+        '200':
+          description: Map of module id -> enabled flag (all 20 modules)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  toggles:
+                    type: object
+                    additionalProperties: { type: boolean }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/toggles/{module}:
+    get:
+      tags: [toggles]
+      summary: Get one module toggle
+      operationId: getToggle
+      parameters:
+        - $ref: '#/components/parameters/Module'
+      responses:
+        '200':
+          description: Toggle state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Toggle' }
+        '404':
+          description: Unknown module id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      tags: [toggles]
+      summary: Enable/disable a module (platform-admin only)
+      operationId: putToggle
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Module'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Updated toggle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Toggle' }
+        '400':
+          description: Invalid body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown module id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/InternalError' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token; PUT requires role platform-admin plus Permify module:manage.
+  parameters:
+    Module:
+      name: module
+      in: path
+      required: true
+      description: Module identifier (one of the 20 ids in SPEC §3.1)
+      schema: { type: string, example: telematics }
+  schemas:
+    Toggle:
+      type: object
+      properties:
+        module: { type: string, example: telematics }
+        enabled: { type: boolean }
+        domain: { type: string, example: fleet }
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but lacking the required role/permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

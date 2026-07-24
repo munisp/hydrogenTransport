@@ -1,0 +1,135 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet carbon-analytics
+  version: 0.1.0
+  description: >-
+    CO2 avoided accounting and credit issuance. When the carbon-credits
+    module toggle is OFF the /v1 routes return 404 (SPEC §3.2). Computing a
+    period requires a Keycloak JWT.
+servers:
+  - url: http://carbon-analytics:8094
+tags:
+  - name: carbon
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200':
+          description: Health status (db/toggle details in body)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  service: { type: string, example: carbon-analytics }
+                  module: { type: string, example: carbon-credits }
+                  enabled: { type: boolean }
+                  db: { type: boolean }
+        '503':
+          description: Dependency unreachable
+          content:
+            application/json:
+              schema: { type: object }
+  /v1/carbon/credits:
+    get:
+      tags: [carbon]
+      summary: List issued carbon credits
+      operationId: listCredits
+      parameters:
+        - name: period
+          in: query
+          description: Filter by period (YYYY-MM)
+          schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' }
+      responses:
+        '200':
+          description: Credit list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credits:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        credit_id: { type: string }
+                        period: { type: string }
+                        kg_co2_avoided: { type: number }
+                        credits: { type: number }
+                        issued_at: { type: string, format: date-time }
+                  count: { type: integer }
+        '404':
+          description: Module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Invalid period format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/carbon/compute:
+    post:
+      tags: [carbon]
+      summary: Compute (and optionally publish) credits for a period (JWT)
+      operationId: compute
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [period]
+              properties:
+                period: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' }
+                publish: { type: boolean, default: true }
+      responses:
+        '200':
+          description: Computation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { type: string }
+                  total_km: { type: number }
+                  bus_count: { type: integer }
+                  kg_co2_avoided: { type: number }
+                  credits: { type: number }
+                  credit_id: { type: string }
+                  event_published: { type: boolean }
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token.
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
