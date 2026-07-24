@@ -18,6 +18,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 redis = { version = "0.27", features = ["tokio-comp", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 anyhow = "1"
 thiserror = "1"
 

@@ -1,0 +1,104 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet digital-twin
+  version: 0.1.0
+  description: >-
+    Per-bus digital twin read API (Rust hot path). Hot state lives in Redis
+    (twin:<bus_id>, indexed by twin:buses) and is snapshotted to Postgres.
+    When the digital-twin module toggle is OFF the /v1 routes return 404
+    (SPEC §3.2).
+servers:
+  - url: http://digital-twin:8092
+tags:
+  - name: twin
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe (checks Redis)
+      operationId: healthz
+      responses:
+        '200':
+          description: Always 200; body reports redis/status details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  service: { type: string, example: digital-twin }
+                  module: { type: string, example: digital-twin }
+                  enabled: { type: boolean }
+                  redis: { type: boolean }
+  /v1/twin:
+    get:
+      tags: [twin]
+      summary: List all hot twin states
+      operationId: listTwins
+      responses:
+        '200':
+          description: Twin states (TTL-expired twins omitted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  twins:
+                    type: array
+                    items: { $ref: '#/components/schemas/TwinState' }
+                  count: { type: integer }
+        '404':
+          description: Module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: Redis unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/twin/{bus_id}:
+    get:
+      tags: [twin]
+      summary: Get the hot twin state for one bus
+      operationId: getTwin
+      parameters:
+        - name: bus_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Twin state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwinState' }
+        '404':
+          description: No twin for this bus (or module disabled)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: Redis unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  schemas:
+    TwinState:
+      type: object
+      properties:
+        bus_id: { type: string, format: uuid }
+        ts: { type: string, format: date-time }
+        speed_kph: { type: number }
+        h2_level_pct: { type: number }
+        fuel_cell_kw: { type: number }
+        battery_soc_pct: { type: number }
+        odometer_km: { type: number }
+        lat: { type: number }
+        lon: { type: number }
+    Error:
+      type: object
+      properties:
+        error: { type: string }

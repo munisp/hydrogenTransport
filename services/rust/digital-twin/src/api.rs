@@ -20,14 +20,20 @@ use crate::twin::{TWIN_INDEX_KEY, TWIN_KEY_PREFIX};
 pub struct AppState {
     pub redis: MultiplexedConnection,
     pub gate: ToggleGate,
+    pub prom: metrics_exporter_prometheus::PrometheusHandle,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(render_metrics))
         .route("/v1/twin", get(list_twins))
         .route("/v1/twin/:bus_id", get(get_twin))
         .with_state(state)
+}
+
+async fn render_metrics(State(state): State<Arc<AppState>>) -> String {
+    state.prom.render()
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -78,7 +84,13 @@ async fn list_twins(
         return Ok(Json(serde_json::json!({ "twins": [] })));
     }
     let keys: Vec<String> = bus_ids.iter().map(|b| format!("{}{}", TWIN_KEY_PREFIX, b)).collect();
-    let values: Vec<Option<String>> = redis.get(keys).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    // MGET: `redis.get(keys)` would emit `GET k1 k2 ...` (a server error), so
+    // issue an explicit MGET and treat nil entries as missing twins.
+    let values: Vec<Option<String>> = redis::cmd("MGET")
+        .arg(&keys)
+        .query_async(&mut redis)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let twins: Vec<TwinState> = values
         .into_iter()
         .flatten()

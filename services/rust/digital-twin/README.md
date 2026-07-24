@@ -68,3 +68,7 @@ docker build -t h2fleet/digital-twin .
 docker run --rm -p 8092:8092 --env-file .env h2fleet/digital-twin
 curl localhost:8092/v1/twin
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

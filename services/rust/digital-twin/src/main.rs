@@ -87,8 +87,17 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     ));
 
-    // HTTP API (read + health).
-    let app = api::router(Arc::new(AppState { redis: redis.clone(), gate: gate.clone() }));
+    // Prometheus recorder; /metrics is scraped per infra/observability/prometheus.yml.
+    let prom_recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let prom_handle = prom_recorder.handle();
+    metrics::set_global_recorder(prom_recorder).context("install prometheus recorder")?;
+
+    // HTTP API (read + health + metrics).
+    let app = api::router(Arc::new(AppState {
+        redis: redis.clone(),
+        gate: gate.clone(),
+        prom: prom_handle,
+    }));
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     let listener = tokio::net::TcpListener::bind(addr).await.context("bind api port")?;
     let mut shutdown_api = shutdown_rx.clone();
