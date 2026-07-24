@@ -15,7 +15,7 @@ import (
 
 // Handler serves the infra endpoints.
 type Handler struct {
-	db  *pgxpool.Pool
+	db  DB
 	pub events.Publisher
 	wf  workflow.Signaler
 	log *zap.Logger

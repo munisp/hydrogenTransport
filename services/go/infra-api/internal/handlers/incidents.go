@@ -107,38 +107,37 @@ func (h *Handler) insertIncident(r *http.Request, req createIncidentRequest) (In
 		req.Type, req.Severity, req.BusID, req.StationID, string(metaJSON)))
 }
 
-// transitionIncident moves an incident to a new status (ack/resolve).
-func (h *Handler) transitionIncident(w http.ResponseWriter, r *http.Request, from, to string) {
+// AckIncident handles POST /v1/incidents/{id}/ack (Keycloak JWT). Incidents
+// set in_progress by the incident-response workflow can be acknowledged too.
+func (h *Handler) AckIncident(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	i, err := scanIncident(h.db.QueryRow(r.Context(), `
-		UPDATE infra.incidents SET status = $2
-		WHERE id = $1 AND status = $3
-		RETURNING `+incidentCols, id, to, from))
+		UPDATE infra.incidents SET status = 'acknowledged'
+		WHERE id = $1 AND status IN ('open','in_progress')
+		RETURNING `+incidentCols, id))
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "incident not found or not in status '" + from + "'",
-		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "incident not found or not in an acknowledgeable status"})
 		return
 	}
 	if err != nil {
-		h.internal(w, "transition incident", err)
+		h.internal(w, "ack incident", err)
 		return
+	}
+	// Signal the workflow so the escalation timer is cancelled.
+	if err := h.wf.Signal(r.Context(), "incident-"+id, "incident-acknowledged",
+		map[string]any{"incident_id": id}); err != nil {
+		h.log.Error("failed to signal incident acknowledgement", zap.String("incident", id), zap.Error(err))
 	}
 	writeJSON(w, http.StatusOK, i)
 }
 
-// AckIncident handles POST /v1/incidents/{id}/ack (Keycloak JWT).
-func (h *Handler) AckIncident(w http.ResponseWriter, r *http.Request) {
-	h.transitionIncident(w, r, "open", "acknowledged")
-}
-
 // ResolveIncident handles POST /v1/incidents/{id}/resolve (Keycloak JWT).
 func (h *Handler) ResolveIncident(w http.ResponseWriter, r *http.Request) {
-	// Allow resolving both open and acknowledged incidents.
+	// Allow resolving open, in_progress and acknowledged incidents.
 	id := chi.URLParam(r, "id")
 	i, err := scanIncident(h.db.QueryRow(r.Context(), `
 		UPDATE infra.incidents SET status = 'resolved'
-		WHERE id = $1 AND status IN ('open','acknowledged')
+		WHERE id = $1 AND status IN ('open','in_progress','acknowledged')
 		RETURNING `+incidentCols, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "incident not found or already resolved"})
@@ -147,6 +146,11 @@ func (h *Handler) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internal(w, "resolve incident", err)
 		return
+	}
+	// Signal the workflow so it closes.
+	if err := h.wf.Signal(r.Context(), "incident-"+id, "incident-resolved",
+		map[string]any{"incident_id": id}); err != nil {
+		h.log.Error("failed to signal incident resolution", zap.String("incident", id), zap.Error(err))
 	}
 	writeJSON(w, http.StatusOK, i)
 }

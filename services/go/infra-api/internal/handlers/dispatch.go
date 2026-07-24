@@ -25,6 +25,15 @@ type DispatchJob struct {
 
 const dispatchJobCols = `id, driver_sub, vehicle_id, route, starts_at, status, created_at, accepted_at`
 
+// timeValue formats a nullable timestamp as RFC3339 for event payloads
+// (nil → null).
+func timeValue(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // ListDispatchJobs handles GET /v1/dispatch/jobs?status=.
 func (h *Handler) ListDispatchJobs(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT ` + dispatchJobCols + ` FROM infra.dispatch_jobs`
@@ -85,12 +94,18 @@ func (h *Handler) CreateDispatchJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// dispatch.job.assigned payload per
+	// packages/events/schemas/dispatch.job.assigned.json: driver_id (from the
+	// driver subject), bus_id (from vehicle_id), route_id (from route),
+	// shift_start (from starts_at). shift_end has no source column yet and is
+	// published as null (schema: optional).
 	event := map[string]any{
-		"job_id":     j.ID,
-		"driver_sub": j.DriverSub,
-		"vehicle_id": j.VehicleID,
-		"route":      j.Route,
-		"starts_at":  j.StartsAt,
+		"job_id":      j.ID,
+		"driver_id":   j.DriverSub,
+		"bus_id":      j.VehicleID,
+		"route_id":    j.Route,
+		"shift_start": timeValue(j.StartsAt),
+		"shift_end":   nil,
 	}
 	if err := h.pub.Publish(r.Context(), "dispatch.job.assigned", event); err != nil {
 		h.log.Error("failed to publish dispatch.job.assigned", zap.Error(err))
@@ -120,6 +135,11 @@ func (h *Handler) AcceptDispatchJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internal(w, "accept dispatch job", err)
 		return
+	}
+	// Signal the dispatch workflow so the accept timeout is cancelled.
+	if err := h.wf.Signal(r.Context(), "dispatch-"+j.ID, "job-accepted",
+		map[string]any{"job_id": j.ID, "driver_id": j.DriverSub}); err != nil {
+		h.log.Error("failed to signal dispatch accept", zap.String("job", j.ID), zap.Error(err))
 	}
 	writeJSON(w, http.StatusOK, j)
 }
