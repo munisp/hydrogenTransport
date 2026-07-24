@@ -1,0 +1,39 @@
+Metadata-Version: 2.4
+Name: h2fleet-toggle-client
+Version: 0.1.0
+Summary: H2Fleet feature-toggle client SDK (Python). Same contract as the Go/TS SDKs: is_enabled(module) with 5s local cache, fail-closed.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx<1.0,>=0.27
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: respx>=0.21; extra == "dev"
+
+# toggle-client (Python)
+
+H2Fleet feature-toggle SDK. Identical contract to the Go/TS SDKs (SPEC.md §3.2).
+
+```python
+from toggle_client import ToggleClient
+
+toggles = ToggleClient("http://toggle-service:8080")  # TOGGLE_URL env var
+if toggles.is_enabled("telematics"):
+    ...
+```
+
+## Semantics
+- `is_enabled(module) -> bool` against `GET /v1/toggles/{module}`.
+- **5s local cache** per module (`cache_ttl` configurable).
+- **Fail-closed** (`fail_open=False`): any network/parse/non-2xx error ⇒ `False`.
+- `ToggleClient` is thread-safe and synchronous; `AsyncToggleClient` provides
+  the same contract for asyncio services.
+- `info(module)` returns `ToggleInfo(module, enabled, domain)` or `None`.
+- `invalidate(module=None)` clears the cache.
+
+## Install / test
+```bash
+pip install -e .          # from this directory
+pip install -e '.[dev]' && pytest
+```
+
+Env var convention across services: `TOGGLE_URL=http://toggle-service:8080`.
