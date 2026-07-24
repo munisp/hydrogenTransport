@@ -123,6 +123,8 @@ async fn apply_update(
         .await
         .context("write twin hot state")?;
 
+    metrics::counter!("digital_twin_tracked_total").increment(1);
+
     let event = OutEnvelope {
         id: Uuid::new_v4(),
         kind: cfg.output_topic.as_str(),
@@ -161,21 +163,26 @@ pub async fn run_snapshots(
             continue;
         }
         match snapshot_once(&pool, &mut redis).await {
-            Ok(n) if n > 0 => tracing::info!(snapshots = n, "twin snapshots written"),
+            Ok(n) if n > 0 => {
+                metrics::counter!("digital_twin_snapshots_total").increment(n as u64);
+                tracing::info!(snapshots = n, "twin snapshots written");
+            }
             Ok(_) => {},
             Err(err) => tracing::error!(error = %err, "twin snapshot failed"),
         }
     }
 }
 
-async fn snapshot_once(pool: &PgPool, redis: &mut MultiplexedConnection) -> anyhow::Result<usize> {
-    let bus_ids: Vec<String> = redis.smembers(TWIN_INDEX_KEY).await.context("smembers twin:buses")?;
-    if bus_ids.is_empty() {
-        return Ok(0);
-    }
-    let keys: Vec<String> = bus_ids.iter().map(|b| format!("{}{}", TWIN_KEY_PREFIX, b)).collect();
-    let values: Vec<Option<String>> = redis.get(keys).await.context("mget twins")?;
-
+/// Split the twin index into (fresh bus ids, fresh states, stale index keys).
+/// An index entry is stale when its hot-state key has TTL-expired (None), the
+/// stored JSON is corrupt, or the index key itself is not a UUID — stale
+/// entries are pruned from `twin:buses` and never snapshotted. Pure function
+/// (extracted from snapshot_once) so the staleness rules are unit-testable
+/// without a live Redis.
+fn partition_states(
+    bus_ids: &[String],
+    values: Vec<Option<String>>,
+) -> (Vec<Uuid>, Vec<serde_json::Value>, Vec<String>) {
     let mut ids: Vec<Uuid> = Vec::new();
     let mut states: Vec<serde_json::Value> = Vec::new();
     let mut stale: Vec<String> = Vec::new();
@@ -191,6 +198,24 @@ async fn snapshot_once(pool: &PgPool, redis: &mut MultiplexedConnection) -> anyh
             None => stale.push(bus.clone()), // TTL expired: prune from index
         }
     }
+    (ids, states, stale)
+}
+
+async fn snapshot_once(pool: &PgPool, redis: &mut MultiplexedConnection) -> anyhow::Result<usize> {
+    let bus_ids: Vec<String> = redis.smembers(TWIN_INDEX_KEY).await.context("smembers twin:buses")?;
+    if bus_ids.is_empty() {
+        return Ok(0);
+    }
+    let keys: Vec<String> = bus_ids.iter().map(|b| format!("{}{}", TWIN_KEY_PREFIX, b)).collect();
+    // MGET: `redis.get(keys)` would emit `GET k1 k2 ...` (a server error), so
+    // issue an explicit MGET; nil entries are TTL-expired twins (pruned below).
+    let values: Vec<Option<String>> = redis::cmd("MGET")
+        .arg(&keys)
+        .query_async(&mut *redis)
+        .await
+        .context("mget twins")?;
+
+    let (ids, states, stale) = partition_states(&bus_ids, values);
     if !stale.is_empty() {
         let _: () = redis.srem(TWIN_INDEX_KEY, stale).await.unwrap_or(());
     }
@@ -212,4 +237,100 @@ async fn snapshot_once(pool: &PgPool, redis: &mut MultiplexedConnection) -> anyh
     .context("insert fleet.twin_snapshots")?
     .rows_affected();
     Ok(rows as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUS_A: &str = "11111111-1111-1111-1111-111111111111";
+    const BUS_B: &str = "22222222-2222-2222-2222-222222222222";
+    const BUS_C: &str = "33333333-3333-3333-3333-333333333333";
+
+    fn state_json(bus: &str) -> String {
+        serde_json::json!({
+            "bus_id": bus,
+            "ts": "2026-07-24T12:00:00Z",
+            "speed_kph": 42.0,
+            "h2_level_pct": 63.5,
+            "fuel_cell_kw": 55.0,
+            "battery_soc_pct": 81.0,
+            "odometer_km": 12345.6,
+            "lat": 52.52,
+            "lon": 13.405,
+            "route_id": "R10",
+            "depot_id": null,
+            "heading_deg": 270.0,
+            "status": "moving",
+            "updated_at": "2026-07-24T12:00:01Z"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn partition_keeps_fresh_states() {
+        let (ids, states, stale) =
+            partition_states(&[BUS_A.to_string()], vec![Some(state_json(BUS_A))]);
+        assert_eq!(ids, vec![Uuid::parse_str(BUS_A).unwrap()]);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0]["status"], serde_json::json!("moving"));
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn partition_marks_ttl_expired_as_stale() {
+        // None = hot-state key gone (TTL expired): prune from the index,
+        // never snapshot.
+        let (ids, states, stale) = partition_states(&[BUS_A.to_string()], vec![None]);
+        assert!(ids.is_empty() && states.is_empty());
+        assert_eq!(stale, vec![BUS_A.to_string()]);
+    }
+
+    #[test]
+    fn partition_marks_corrupt_json_as_stale() {
+        let (ids, _, stale) =
+            partition_states(&[BUS_A.to_string()], vec![Some("{not json".to_string())]);
+        assert!(ids.is_empty());
+        assert_eq!(stale, vec![BUS_A.to_string()]);
+    }
+
+    #[test]
+    fn partition_marks_non_uuid_index_key_as_stale() {
+        let (ids, _, stale) =
+            partition_states(&["not-a-uuid".to_string()], vec![Some(state_json(BUS_A))]);
+        assert!(ids.is_empty());
+        assert_eq!(stale, vec!["not-a-uuid".to_string()]);
+    }
+
+    #[test]
+    fn partition_mixed_batch() {
+        let bus_ids = vec![
+            BUS_A.to_string(),
+            BUS_B.to_string(),
+            BUS_C.to_string(),
+            "garbage".to_string(),
+        ];
+        let values = vec![
+            Some(state_json(BUS_A)),
+            None, // TTL expired
+            Some(state_json(BUS_C)),
+            Some(state_json(BUS_A)), // valid JSON but non-UUID index key
+        ];
+        let (ids, states, stale) = partition_states(&bus_ids, values);
+        assert_eq!(
+            ids,
+            vec![
+                Uuid::parse_str(BUS_A).unwrap(),
+                Uuid::parse_str(BUS_C).unwrap()
+            ]
+        );
+        assert_eq!(states.len(), 2);
+        assert_eq!(stale, vec![BUS_B.to_string(), "garbage".to_string()]);
+    }
+
+    #[test]
+    fn partition_empty_index() {
+        let (ids, states, stale) = partition_states(&[], vec![]);
+        assert!(ids.is_empty() && states.is_empty() && stale.is_empty());
+    }
 }
