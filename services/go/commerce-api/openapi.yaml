@@ -1,0 +1,346 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet commerce-api
+  version: 0.1.0
+  description: >-
+    Domain 4 (Commerce & Finance) API: fare payments (Mojaloop rails +
+    TigerBeetle ledger), loyalty marketplace, energy trading, government KPIs
+    and advertising. Module-gated routes return 404 when their module toggle
+    is OFF (SPEC §3.2).
+servers:
+  - url: http://commerce-api:8084
+tags:
+  - name: fare-payments
+  - name: loyalty-marketplace
+  - name: energy-trading
+  - name: gov-dashboard
+  - name: advertising
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      operationId: healthz
+      responses:
+        '200': { $ref: '#/components/responses/HealthOk' }
+        '503': { $ref: '#/components/responses/HealthDegraded' }
+  /v1/payments:
+    post:
+      tags: [fare-payments]
+      summary: Initiate a fare payment (JWT); publishes fare.payment.initiated
+      operationId: createPayment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number }
+                currency: { type: string, default: USD }
+                payer_ref: { type: string }
+      responses:
+        '201':
+          description: Initiated payment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '502':
+          description: Mojaloop upstream unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [fare-payments]
+      summary: List own payments (JWT)
+      operationId: listPayments
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Payment list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/Payment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/payments/{id}:
+    get:
+      tags: [fare-payments]
+      summary: Get one payment (JWT)
+      operationId: getPayment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Payment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Payment not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/loyalty/balance:
+    get:
+      tags: [loyalty-marketplace]
+      summary: Own loyalty points balance (JWT)
+      operationId: getLoyaltyBalance
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/loyalty/redeem:
+    post:
+      tags: [loyalty-marketplace]
+      summary: Redeem an offer with points (JWT)
+      operationId: redeemOffer
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [offer_id]
+              properties:
+                offer_id: { type: string, format: uuid }
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Insufficient balance or offer unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/marketplace/offers:
+    get:
+      tags: [loyalty-marketplace]
+      summary: List marketplace offers
+      operationId: listOffers
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+    post:
+      tags: [loyalty-marketplace]
+      summary: Create an offer (operator role)
+      operationId: createOffer
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                description: { type: string }
+                points_cost: { type: integer }
+      responses:
+        '201': { $ref: '#/components/responses/JsonOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/energy/trades:
+    get:
+      tags: [energy-trading]
+      summary: List energy trades
+      operationId: listTrades
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+    post:
+      tags: [energy-trading]
+      summary: Execute an energy trade (operator role); publishes energy.trade.executed
+      operationId: createTrade
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kwh, price]
+              properties:
+                kwh: { type: number }
+                price: { type: number }
+                counterparty: { type: string }
+      responses:
+        '201': { $ref: '#/components/responses/JsonOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/gov/kpis:
+    get:
+      tags: [gov-dashboard]
+      summary: City KPI snapshot (cost, emissions, ridership, uptime)
+      operationId: getGovKPIs
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/ads/campaigns:
+    get:
+      tags: [advertising]
+      summary: List ad campaigns
+      operationId: listCampaigns
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+    post:
+      tags: [advertising]
+      summary: Create a campaign (operator role)
+      operationId: createCampaign
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                budget: { type: number }
+                starts_at: { type: string, format: date-time }
+                ends_at: { type: string, format: date-time }
+      responses:
+        '201': { $ref: '#/components/responses/JsonOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/ads/campaigns/{id}:
+    get:
+      tags: [advertising]
+      summary: Get one campaign
+      operationId: getCampaign
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '404':
+          description: Campaign not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      tags: [advertising]
+      summary: Update a campaign (operator role)
+      operationId: updateCampaign
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                budget: { type: number }
+                status: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Campaign not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token.
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        amount: { type: number }
+        currency: { type: string }
+        status: { type: string, enum: [initiated, settled, failed] }
+        created_at: { type: string, format: date-time }
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+  responses:
+    JsonOk:
+      description: Successful JSON response
+      content:
+        application/json:
+          schema: { type: object }
+    HealthOk:
+      description: Service healthy
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Health' }
+    HealthDegraded:
+      description: Postgres unreachable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Health' }
+    BadRequest:
+      description: Invalid request body
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but lacking the required role
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ModuleDisabled:
+      description: The module toggle for this route is OFF (SPEC §3.2)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

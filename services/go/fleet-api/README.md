@@ -35,3 +35,7 @@ go run ./cmd/server
 # container (build context = repo root, toggle-client SDK is COPYed in):
 docker build -f services/go/fleet-api/Dockerfile -t h2fleet/fleet-api .
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

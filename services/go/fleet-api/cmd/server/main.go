@@ -14,11 +14,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
-	"github.com/munisp/hydrogenTransport/services/go/fleet-api/internal/auth"
 	"github.com/munisp/hydrogenTransport/services/go/fleet-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/fleet-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/fleet-api/internal/handlers"
+	"github.com/munisp/hydrogenTransport/services/go/fleet-api/internal/metrics"
 )
 
 func envOr(key, def string) string {
@@ -62,8 +63,9 @@ func main() {
 	)
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Timeout(30*time.Second))
+	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, metrics.Middleware("fleet-api"), middleware.Timeout(30*time.Second))
 	r.Get("/healthz", h.Healthz)
+	r.Handle("/metrics", metrics.Handler())
 
 	// telematics module: vehicles + telemetry queries
 	r.Group(func(r chi.Router) {
