@@ -1,0 +1,57 @@
+# Ingress for the public entrypoints: the APISIX gateway (all /api traffic)
+# and the citizen/operator PWA.
+#
+# TLS: create the `h2fleet-tls` secret from a cert-manager Certificate
+# (recommended: cluster-issuer letsencrypt-prod) or from a manually managed
+# cert. Do NOT commit real certs. Until the secret exists, comment out the
+# `tls:` blocks or terminate TLS at a cloud LB in front of the controller.
+#
+# Assumes an ingress controller whose Service selects pods with the label
+# `app.kubernetes.io/name: ingress-nginx` (used by the NetworkPolicy allows).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: h2fleet-api
+  namespace: h2fleet
+  annotations:
+    # TLS note: nginx.ingress.kubernetes.io/ssl-redirect is "true" by default
+    # once a tls block is present.
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["api.h2fleet.example.com"]
+      secretName: h2fleet-tls
+  rules:
+    - host: api.h2fleet.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: apisix
+                port:
+                  number: 9080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: h2fleet-pwa
+  namespace: h2fleet
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["app.h2fleet.example.com"]
+      secretName: h2fleet-tls
+  rules:
+    - host: app.h2fleet.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pwa
+                port:
+                  number: 80

@@ -1,0 +1,124 @@
+# PodDisruptionBudgets — keep at least one replica serving during voluntary
+# disruptions (node drains, cluster upgrades). Single-replica services use
+# maxUnavailable: 1 so drains are not blocked but stay observable.
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fleet-api
+  namespace: h2fleet
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fleet-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: citizen-api
+  namespace: h2fleet
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: citizen-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pwa
+  namespace: h2fleet
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pwa
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: toggle-service
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: toggle-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: infra-api
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: infra-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: commerce-api
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: commerce-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: telemetry-ingest
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: telemetry-ingest
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: digital-twin
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: digital-twin
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: predictive-maintenance
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: predictive-maintenance
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: route-optimizer
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: route-optimizer
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: carbon-analytics
+  namespace: h2fleet
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: carbon-analytics

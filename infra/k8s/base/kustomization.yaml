@@ -4,9 +4,21 @@ namespace: h2fleet
 resources:
   - namespace.yaml
   - configmap.yaml
+  - secret.yaml
   - toggle-service.yaml
   - fleet-api.yaml
-  # Add the remaining service manifests here as they are promoted to k8s
-  # (same pattern as fleet-api: Deployment + Service + envFrom h2fleet-config).
+  - infra-api.yaml
+  - citizen-api.yaml
+  - commerce-api.yaml
+  - telemetry-ingest.yaml
+  - digital-twin.yaml
+  - predictive-maintenance.yaml
+  - route-optimizer.yaml
+  - carbon-analytics.yaml
+  - pwa.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
 commonLabels:
   app.kubernetes.io/part-of: h2fleet

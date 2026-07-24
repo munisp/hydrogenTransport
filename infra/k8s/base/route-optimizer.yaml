@@ -1,26 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: toggle-service
+  name: route-optimizer
   namespace: h2fleet
   labels:
-    app: toggle-service
+    app: route-optimizer
     app.kubernetes.io/part-of: h2fleet
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: toggle-service
+      app: route-optimizer
   template:
     metadata:
       labels:
-        app: toggle-service
+        app: route-optimizer
     spec:
       containers:
-        - name: toggle-service
-          image: ghcr.io/munisp/h2fleet/toggle-service:latest
+        - name: route-optimizer
+          image: ghcr.io/munisp/h2fleet/route-optimizer:latest
           ports:
-            - containerPort: 8080
+            - containerPort: 8091
           envFrom:
             - configMapRef:
                 name: h2fleet-config
@@ -28,28 +28,28 @@ spec:
                 name: h2fleet-secrets
           env:
             - name: PORT
-              value: "8080"
+              value: "8091"
           readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /healthz, port: 8091 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /healthz, port: 8091 }
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 300m, memory: 256Mi }
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 1, memory: 1Gi }
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: toggle-service
+  name: route-optimizer
   namespace: h2fleet
 spec:
   selector:
-    app: toggle-service
+    app: route-optimizer
   ports:
     - name: http
-      port: 8080
-      targetPort: 8080
+      port: 8091
+      targetPort: 8091

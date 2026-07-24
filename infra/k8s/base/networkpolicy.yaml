@@ -1,0 +1,90 @@
+# NetworkPolicies for the h2fleet namespace.
+#
+# Model: default-deny (ingress + egress) for every pod, then explicit allows:
+#   1. pod-to-pod traffic INSIDE the namespace (services <-> middleware, which
+#      the helm charts below install into the same namespace);
+#   2. DNS egress to kube-dns;
+#   3. ingress to the public entrypoints (apisix:9080, pwa:80) from the
+#      ingress controller namespace;
+#   4. HTTPS egress to the internet for the PWA's public OSM tile fallback.
+#
+# If you install middleware into DIFFERENT namespaces, add egress rules for
+# those namespaces here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: h2fleet
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-in-namespace
+  namespace: h2fleet
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: h2fleet
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller
+  namespace: h2fleet
+spec:
+  # Public entrypoints only: gateway + PWA.
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["apisix", "pwa"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 9080 }
+        - { protocol: TCP, port: 80 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: h2fleet
+spec:
+  # PWA server needs outbound HTTPS for the public OSM tile fallback when
+  # GeoLibre is absent (see compose note). Everything else stays cluster-local.
+  podSelector:
+    matchLabels:
+      app: pwa
+  policyTypes: ["Egress"]
+  egress:
+    - ports:
+        - { protocol: TCP, port: 443 }

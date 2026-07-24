@@ -1,26 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: toggle-service
+  name: predictive-maintenance
   namespace: h2fleet
   labels:
-    app: toggle-service
+    app: predictive-maintenance
     app.kubernetes.io/part-of: h2fleet
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: toggle-service
+      app: predictive-maintenance
   template:
     metadata:
       labels:
-        app: toggle-service
+        app: predictive-maintenance
     spec:
       containers:
-        - name: toggle-service
-          image: ghcr.io/munisp/h2fleet/toggle-service:latest
+        - name: predictive-maintenance
+          image: ghcr.io/munisp/h2fleet/predictive-maintenance:latest
           ports:
-            - containerPort: 8080
+            - containerPort: 8090
           envFrom:
             - configMapRef:
                 name: h2fleet-config
@@ -28,28 +28,28 @@ spec:
                 name: h2fleet-secrets
           env:
             - name: PORT
-              value: "8080"
+              value: "8090"
           readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /healthz, port: 8090 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /healthz, port: 8090 }
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 300m, memory: 256Mi }
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 1, memory: 1Gi }
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: toggle-service
+  name: predictive-maintenance
   namespace: h2fleet
 spec:
   selector:
-    app: toggle-service
+    app: predictive-maintenance
   ports:
     - name: http
-      port: 8080
-      targetPort: 8080
+      port: 8090
+      targetPort: 8090
