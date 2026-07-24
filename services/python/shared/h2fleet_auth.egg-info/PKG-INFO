@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: h2fleet-auth
+Version: 0.1.0
+Summary: Shared Keycloak OIDC JWT (RS256) FastAPI dependency for H2Fleet Python services (SPEC.md §3.5)
+Requires-Python: >=3.11
+Requires-Dist: PyJWT[crypto]<3,>=2.10
+Requires-Dist: httpx<1,>=0.28
+Requires-Dist: fastapi<1,>=0.115
