@@ -1,0 +1,144 @@
+{
+  "realm": "h2fleet",
+  "enabled": true,
+  "displayName": "H2Fleet",
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 3600,
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "platform-admin", "description": "Full platform administration incl. feature toggles (PUT /v1/toggles/*)" },
+      { "name": "operator", "description": "Fleet/infra operations: dispatch, stations, incidents" },
+      { "name": "driver", "description": "Bus driver: assigned jobs, vehicle state" },
+      { "name": "citizen", "description": "Passenger: DRT requests, fares, carbon view" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "pwa-public",
+      "name": "H2Fleet Citizen/Operator PWA",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:9080/*"
+      ],
+      "webOrigins": ["http://localhost:3000", "http://localhost:9080"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "h2fleet-pwa",
+      "name": "H2Fleet PWA (build-time default client id used by apps/pwa)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:9080/*"
+      ],
+      "webOrigins": ["http://localhost:3000", "http://localhost:9080"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "services",
+      "name": "H2Fleet internal services (gateway + service-to-service)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "h2fleet-services-secret-change-me",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@h2fleet.local",
+      "firstName": "Ada",
+      "lastName": "Admin",
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["platform-admin", "operator"]
+    },
+    {
+      "username": "operator",
+      "enabled": true,
+      "email": "operator@h2fleet.local",
+      "firstName": "Otto",
+      "lastName": "Operator",
+      "credentials": [{ "type": "password", "value": "operator123", "temporary": false }],
+      "realmRoles": ["operator"]
+    },
+    {
+      "username": "driver",
+      "enabled": true,
+      "email": "driver@h2fleet.local",
+      "firstName": "Dora",
+      "lastName": "Driver",
+      "credentials": [{ "type": "password", "value": "driver123", "temporary": false }],
+      "realmRoles": ["driver"]
+    },
+    {
+      "username": "citizen",
+      "enabled": true,
+      "email": "citizen@h2fleet.local",
+      "firstName": "Cid",
+      "lastName": "Citizen",
+      "credentials": [{ "type": "password", "value": "citizen123", "temporary": false }],
+      "realmRoles": ["citizen"]
+    }
+  ]
+}

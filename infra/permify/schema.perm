@@ -1,0 +1,62 @@
+// Permify authorization schema (ReBAC) for H2Fleet.
+// Loaded into tenant `t1` by the permify-setup container in docker-compose.
+// Services check permissions on admin routes with
+//   entity: <type>:<id>, permission: <perm>, subject: user:<sub>
+// Keycloak realm roles are mirrored as attributes/relations by the services
+// (platform-admin users are written as admin members of the root module).
+
+entity user {}
+
+// A toggleable platform module (one of the 20, SPEC §3.1). Permissions here
+// gate the Admin console + module management routes.
+entity module {
+    relation admin    @user
+    relation operator @user
+
+    permission manage   = admin
+    // operators can view module state but not flip toggles
+    permission view     = admin or operator
+}
+
+// A hydrogen bus / fleet grouping.
+entity fleet {
+    relation admin    @user
+    relation operator @user
+    relation viewer   @user
+
+    permission edit   = admin
+    permission operate = admin or operator   // dispatch, telemetry ack, twin control
+    permission view   = operate or viewer    // live map, health, maintenance views
+}
+
+// A hydrogen refueling station.
+entity station {
+    relation admin    @user
+    relation operator @user
+    relation viewer   @user
+
+    permission edit    = admin
+    permission operate = admin or operator   // queue mgmt, inventory adjust
+    permission view    = operate or viewer   // station status, leak alarms
+}
+
+// Compliance / incident / gov reports.
+entity report {
+    relation admin  @user
+    relation viewer @user
+
+    permission generate = admin
+    permission view     = admin or viewer
+}
+
+// Payment / ledger resources (fare payments, trades, credits, marketplace).
+entity payment {
+    relation admin    @user
+    relation operator @user
+    relation viewer   @user
+
+    // initiating a payment: the rider themselves (checked in service by sub)
+    permission transact = admin or operator or viewer
+    permission settle   = admin or operator   // settlement reconciliation routes
+    permission audit    = admin or operator   // ledger audit / gov KPI finance routes
+}

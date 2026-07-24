@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/dispatch.job.assigned.json",
+  "title": "dispatch.job.assigned",
+  "description": "Driver/shift assignment from dispatch-workforce Temporal workflow. CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "dispatch.job.assigned"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "driver_id": {
+          "type": "string"
+        },
+        "bus_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "route_id": {
+          "type": "string"
+        },
+        "shift_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "shift_end": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "job_id",
+        "driver_id",
+        "bus_id",
+        "route_id",
+        "shift_start"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/energy.trade.executed.json",
+  "title": "energy.trade.executed",
+  "description": "Surplus H2/energy trade executed (energy-trading). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "energy.trade.executed"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "trade_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "h2_sale",
+            "h2_purchase",
+            "energy_sale",
+            "energy_purchase"
+          ]
+        },
+        "quantity_kg": {
+          "type": "number"
+        },
+        "price_minor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "trade_id",
+        "kind",
+        "quantity_kg",
+        "price_minor",
+        "executed_at"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

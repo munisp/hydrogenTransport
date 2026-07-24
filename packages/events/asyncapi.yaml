@@ -1,0 +1,250 @@
+asyncapi: "3.0.0"
+info:
+  title: H2Fleet Event Catalog
+  version: "1.0.0"
+  description: |
+    Kafka event backbone for the H2Fleet hydrogen-bus platform (SPEC.md §3.3).
+    All topics use the CloudEvents-ish JSON envelope:
+    `{ "id": uuid, "type": "<topic>", "source": "<service>", "time": rfc3339, "data": {...} }`.
+    Message keys are the relevant entity id (bus_id / station_id / payment_id) as a UTF-8 string.
+    Payload JSON Schemas live in `./schemas/<topic>.json`.
+  license:
+    name: Proprietary
+defaultContentType: application/json
+
+servers:
+  kafka:
+    host: kafka:9092
+    protocol: kafka
+    description: Platform event backbone (env KAFKA_BROKERS, comma-separated).
+  fluvio-edge:
+    host: fluvio:9003
+    protocol: fluvio
+    description: Edge telemetry stream from bus gateways; bridged into Kafka telemetry.raw by telemetry-ingest.
+
+channels:
+  telemetryRaw:
+    address: telemetry.raw
+    description: Raw bus telemetry from edge gateways (bridge from Fluvio).
+    messages:
+      telemetryRaw: { $ref: "#/components/messages/TelemetryRaw" }
+  telemetryEnriched:
+    address: telemetry.enriched
+    description: Validated telemetry enriched with route/depot lookup (telemetry-ingest).
+    messages:
+      telemetryEnriched: { $ref: "#/components/messages/TelemetryEnriched" }
+  twinUpdated:
+    address: twin.updated
+    description: Digital-twin state change notification (digital-twin).
+    messages:
+      twinUpdated: { $ref: "#/components/messages/TwinUpdated" }
+  maintenancePredicted:
+    address: maintenance.predicted
+    description: High-risk component predictions (predictive-maintenance).
+    messages:
+      maintenancePredicted: { $ref: "#/components/messages/MaintenancePredicted" }
+  fuelReading:
+    address: fuel.reading
+    description: H2 tank level / consumption readings (fuel-monitoring).
+    messages:
+      fuelReading: { $ref: "#/components/messages/FuelReading" }
+  safetyLeakDetected:
+    address: safety.leak.detected
+    description: H2 leak alarms (leak-detection).
+    messages:
+      safetyLeakDetected: { $ref: "#/components/messages/SafetyLeakDetected" }
+  dispatchJobAssigned:
+    address: dispatch.job.assigned
+    description: Driver/shift assignments (dispatch-workforce, Temporal).
+    messages:
+      dispatchJobAssigned: { $ref: "#/components/messages/DispatchJobAssigned" }
+  drtRequested:
+    address: drt.requested
+    description: On-demand shuttle requests (demand-responsive).
+    messages:
+      drtRequested: { $ref: "#/components/messages/DrtRequested" }
+  farePaymentInitiated:
+    address: fare.payment.initiated
+    description: Fare payment started on Mojaloop rails (fare-payments).
+    messages:
+      farePaymentInitiated: { $ref: "#/components/messages/FarePaymentInitiated" }
+  farePaymentSettled:
+    address: fare.payment.settled
+    description: Fare payment settled; TigerBeetle ledger posted.
+    messages:
+      farePaymentSettled: { $ref: "#/components/messages/FarePaymentSettled" }
+  carbonCreditIssued:
+    address: carbon.credit.issued
+    description: CO2-avoidance credits issued (carbon-credits).
+    messages:
+      carbonCreditIssued: { $ref: "#/components/messages/CarbonCreditIssued" }
+  energyTradeExecuted:
+    address: energy.trade.executed
+    description: Surplus H2/energy trades executed (energy-trading).
+    messages:
+      energyTradeExecuted: { $ref: "#/components/messages/EnergyTradeExecuted" }
+  toggleChanged:
+    address: toggle.changed
+    description: Feature toggle flips (toggle-service); consumers refresh caches.
+    messages:
+      toggleChanged: { $ref: "#/components/messages/ToggleChanged" }
+  stationStatusChanged:
+    address: station.status.changed
+    description: Refueling station status/inventory changes (refueling-stations).
+    messages:
+      stationStatusChanged: { $ref: "#/components/messages/StationStatusChanged" }
+
+operations:
+  publishTelemetryRaw:
+    action: send
+    channel: { $ref: "#/channels/telemetryRaw" }
+    title: Edge gateways / Fluvio bridge publish raw telemetry
+  consumeTelemetryRaw:
+    action: receive
+    channel: { $ref: "#/channels/telemetryRaw" }
+    title: telemetry-ingest consumes raw telemetry
+  publishTelemetryEnriched:
+    action: send
+    channel: { $ref: "#/channels/telemetryEnriched" }
+    title: telemetry-ingest republishes enriched telemetry
+  consumeTelemetryEnriched:
+    action: receive
+    channel: { $ref: "#/channels/telemetryEnriched" }
+    title: digital-twin / fleet-api / OpenSearch sink consume enriched telemetry
+  publishTwinUpdated:
+    action: send
+    channel: { $ref: "#/channels/twinUpdated" }
+    title: digital-twin announces twin state changes
+  publishMaintenancePredicted:
+    action: send
+    channel: { $ref: "#/channels/maintenancePredicted" }
+    title: predictive-maintenance emits high-risk predictions
+  publishFuelReading:
+    action: send
+    channel: { $ref: "#/channels/fuelReading" }
+    title: fuel-monitoring emits tank readings
+  publishSafetyLeakDetected:
+    action: send
+    channel: { $ref: "#/channels/safetyLeakDetected" }
+    title: leak-detection raises alarms
+  publishDispatchJobAssigned:
+    action: send
+    channel: { $ref: "#/channels/dispatchJobAssigned" }
+    title: dispatch-workforce assigns jobs
+  publishDrtRequested:
+    action: send
+    channel: { $ref: "#/channels/drtRequested" }
+    title: demand-responsive receives ride requests
+  publishFarePaymentInitiated:
+    action: send
+    channel: { $ref: "#/channels/farePaymentInitiated" }
+    title: fare-payments initiates a payment
+  publishFarePaymentSettled:
+    action: send
+    channel: { $ref: "#/channels/farePaymentSettled" }
+    title: fare-payments settles a payment
+  publishCarbonCreditIssued:
+    action: send
+    channel: { $ref: "#/channels/carbonCreditIssued" }
+    title: carbon-analytics issues credits
+  publishEnergyTradeExecuted:
+    action: send
+    channel: { $ref: "#/channels/energyTradeExecuted" }
+    title: energy-trading executes trades
+  publishToggleChanged:
+    action: send
+    channel: { $ref: "#/channels/toggleChanged" }
+    title: toggle-service broadcasts toggle flips
+  publishStationStatusChanged:
+    action: send
+    channel: { $ref: "#/channels/stationStatusChanged" }
+    title: refueling-stations reports status changes
+
+components:
+  messages:
+    TelemetryRaw:
+      name: TelemetryRaw
+      title: telemetry.raw
+      contentType: application/json
+      payload: { $ref: "./schemas/telemetry.raw.json" }
+      examples:
+        - payload:
+            id: "b7c2f6a2-0f4a-4c6b-9a3b-2d1c8f0e5a11"
+            type: telemetry.raw
+            source: fluvio-edge-bridge
+            time: "2025-01-15T08:30:00Z"
+            data:
+              bus_id: "3f6b1c90-1d2a-4e5b-8c7d-9e0f1a2b3c4d"
+              ts: "2025-01-15T08:29:58Z"
+              speed_kph: 32.4
+              h2_level_pct: 61.2
+              fuel_cell_kw: 84.0
+              battery_soc_pct: 73.5
+              odometer_km: 41230.7
+              lat: 52.5200
+              lon: 13.4050
+    TelemetryEnriched:
+      name: TelemetryEnriched
+      title: telemetry.enriched
+      contentType: application/json
+      payload: { $ref: "./schemas/telemetry.enriched.json" }
+    TwinUpdated:
+      name: TwinUpdated
+      title: twin.updated
+      contentType: application/json
+      payload: { $ref: "./schemas/twin.updated.json" }
+    MaintenancePredicted:
+      name: MaintenancePredicted
+      title: maintenance.predicted
+      contentType: application/json
+      payload: { $ref: "./schemas/maintenance.predicted.json" }
+    FuelReading:
+      name: FuelReading
+      title: fuel.reading
+      contentType: application/json
+      payload: { $ref: "./schemas/fuel.reading.json" }
+    SafetyLeakDetected:
+      name: SafetyLeakDetected
+      title: safety.leak.detected
+      contentType: application/json
+      payload: { $ref: "./schemas/safety.leak.detected.json" }
+    DispatchJobAssigned:
+      name: DispatchJobAssigned
+      title: dispatch.job.assigned
+      contentType: application/json
+      payload: { $ref: "./schemas/dispatch.job.assigned.json" }
+    DrtRequested:
+      name: DrtRequested
+      title: drt.requested
+      contentType: application/json
+      payload: { $ref: "./schemas/drt.requested.json" }
+    FarePaymentInitiated:
+      name: FarePaymentInitiated
+      title: fare.payment.initiated
+      contentType: application/json
+      payload: { $ref: "./schemas/fare.payment.initiated.json" }
+    FarePaymentSettled:
+      name: FarePaymentSettled
+      title: fare.payment.settled
+      contentType: application/json
+      payload: { $ref: "./schemas/fare.payment.settled.json" }
+    CarbonCreditIssued:
+      name: CarbonCreditIssued
+      title: carbon.credit.issued
+      contentType: application/json
+      payload: { $ref: "./schemas/carbon.credit.issued.json" }
+    EnergyTradeExecuted:
+      name: EnergyTradeExecuted
+      title: energy.trade.executed
+      contentType: application/json
+      payload: { $ref: "./schemas/energy.trade.executed.json" }
+    ToggleChanged:
+      name: ToggleChanged
+      title: toggle.changed
+      contentType: application/json
+      payload: { $ref: "./schemas/toggle.changed.json" }
+    StationStatusChanged:
+      name: StationStatusChanged
+      title: station.status.changed
+      contentType: application/json
+      payload: { $ref: "./schemas/station.status.changed.json" }
