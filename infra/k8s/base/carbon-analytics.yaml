@@ -1,26 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fleet-api
+  name: carbon-analytics
   namespace: h2fleet
   labels:
-    app: fleet-api
+    app: carbon-analytics
     app.kubernetes.io/part-of: h2fleet
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: fleet-api
+      app: carbon-analytics
   template:
     metadata:
       labels:
-        app: fleet-api
+        app: carbon-analytics
     spec:
       containers:
-        - name: fleet-api
-          image: ghcr.io/munisp/h2fleet/fleet-api:latest
+        - name: carbon-analytics
+          image: ghcr.io/munisp/h2fleet/carbon-analytics:latest
           ports:
-            - containerPort: 8081
+            - containerPort: 8094
           envFrom:
             - configMapRef:
                 name: h2fleet-config
@@ -28,28 +28,28 @@ spec:
                 name: h2fleet-secrets
           env:
             - name: PORT
-              value: "8081"
+              value: "8094"
           readinessProbe:
-            httpGet: { path: /healthz, port: 8081 }
+            httpGet: { path: /healthz, port: 8094 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: 8081 }
+            httpGet: { path: /healthz, port: 8094 }
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:
-            requests: { cpu: 100m, memory: 128Mi }
-            limits: { cpu: 500m, memory: 512Mi }
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 1, memory: 1Gi }
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: fleet-api
+  name: carbon-analytics
   namespace: h2fleet
 spec:
   selector:
-    app: fleet-api
+    app: carbon-analytics
   ports:
     - name: http
-      port: 8081
-      targetPort: 8081
+      port: 8094
+      targetPort: 8094

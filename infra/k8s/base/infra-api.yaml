@@ -1,26 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fleet-api
+  name: infra-api
   namespace: h2fleet
   labels:
-    app: fleet-api
+    app: infra-api
     app.kubernetes.io/part-of: h2fleet
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: fleet-api
+      app: infra-api
   template:
     metadata:
       labels:
-        app: fleet-api
+        app: infra-api
     spec:
       containers:
-        - name: fleet-api
-          image: ghcr.io/munisp/h2fleet/fleet-api:latest
+        - name: infra-api
+          image: ghcr.io/munisp/h2fleet/infra-api:latest
           ports:
-            - containerPort: 8081
+            - containerPort: 8082
           envFrom:
             - configMapRef:
                 name: h2fleet-config
@@ -28,13 +28,13 @@ spec:
                 name: h2fleet-secrets
           env:
             - name: PORT
-              value: "8081"
+              value: "8082"
           readinessProbe:
-            httpGet: { path: /healthz, port: 8081 }
+            httpGet: { path: /healthz, port: 8082 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: 8081 }
+            httpGet: { path: /healthz, port: 8082 }
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:
@@ -44,12 +44,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: fleet-api
+  name: infra-api
   namespace: h2fleet
 spec:
   selector:
-    app: fleet-api
+    app: infra-api
   ports:
     - name: http
-      port: 8081
-      targetPort: 8081
+      port: 8082
+      targetPort: 8082

@@ -1,13 +1,16 @@
 # =============================================================================
-# H2Fleet — full local stack (middleware + platform services)
+# H2Fleet — full local stack (middleware + platform services + observability)
 #
 # Profiles:
-#   (default / middleware)  all middleware containers only
-#   apps                    + the 9 platform services (services/go, /rust, /python, apps/pwa)
+#   (default / middleware)  all middleware + observability + backup containers
+#   apps                    + the 10 platform services (incl. telemetry-simulator) + PWA
 #   all                     + apps + fluvio + etl helpers
 #   fluvio                  optional edge streaming (alternative telemetry stream path)
 #   etl                     one-shot lakehouse ETL runner
 #   waf                     openappsec agent sidecar for APISIX (experimental)
+#
+# Secrets: every credential below uses ${VAR:-dev-default} interpolation.
+# Copy .env.example (repo root) to .env to override; the defaults are DEV ONLY.
 #
 # Usage:
 #   docker compose -f infra/docker-compose.yml up -d                  # middleware only
@@ -27,19 +30,23 @@ volumes:
   redis_data:
   kafka_data:
   zk_data:
-  etcd_data:
   opensearch_data:
   minio_data:
   tigerbeetle_data:
   keycloak_data:
-  permify_data:
+  keycloak_realm:        # rendered (secret-substituted) Keycloak realm import
+  prometheus_data:
+  grafana_data:
 
 x-h2-env: &h2-env
-  DATABASE_URL: postgres://h2:h2pass@postgres:5432/h2fleet?sslmode=disable
+  DATABASE_URL: postgres://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/h2fleet?sslmode=disable
   KAFKA_BROKERS: kafka:9092
   REDIS_ADDR: redis:6379
   TOGGLE_URL: http://toggle-service:8080
   KEYCLOAK_ISSUER: http://keycloak:8080/realms/h2fleet
+  # JWT audience check (go-auth validates `aud` only when set): the
+  # confidential `services` client id from the realm.
+  KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-services}
 
 services:
 
@@ -89,11 +96,11 @@ services:
       start_period: 40s
 
   # ---------------------------------------------------------------------------
-  # Fluvio — OPTIONAL edge telemetry streaming from bus gateways (profile: fluvio)
-  # In production the bus gateways publish to a Fluvio cluster at the edge and
-  # telemetry-ingest (Rust) bridges Fluvio -> telemetry.raw on Kafka. Locally we
-  # publish straight to Kafka, so Fluvio is not required for the default stack.
-  # Image: infinyon/fluvio (SC + SPU in one dev container).
+  # Fluvio — OPTIONAL edge telemetry streaming from bus gateways (profile: fluvio).
+  # Documented edge bridge: in production bus gateways publish to a Fluvio
+  # cluster at the edge and telemetry-ingest bridges Fluvio -> telemetry.raw.
+  # This bridge is a documented design, not yet implemented; locally the
+  # telemetry-simulator publishes straight to Kafka (profile: apps).
   # ---------------------------------------------------------------------------
   fluvio:
     image: infinyon/fluvio:0.11.11
@@ -119,7 +126,7 @@ services:
     networks: [h2net]
     environment:
       POSTGRES_USER: temporal
-      POSTGRES_PASSWORD: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
       POSTGRES_DB: temporal
     volumes:
       - pg_temporal_data:/var/lib/postgresql/data
@@ -134,12 +141,12 @@ services:
     container_name: h2-temporal
     networks: [h2net]
     ports:
-      - "7233:7233"
+      - "127.0.0.1:7233:7233"
     environment:
       DB: postgres12
       DB_PORT: "5432"
       POSTGRES_USER: temporal
-      POSTGRES_PWD: temporal
+      POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
       POSTGRES_SEEDS: postgres-temporal
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
       ENABLE_ES: "false"
@@ -158,7 +165,7 @@ services:
     container_name: h2-temporal-ui
     networks: [h2net]
     ports:
-      - "8233:8080"
+      - "127.0.0.1:8233:8080"
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_CORS_ORIGINS: http://localhost:3000
@@ -169,16 +176,19 @@ services:
   # ---------------------------------------------------------------------------
   # Main database: Postgres 16 + TimescaleDB (+ PostGIS via timescaledb-ha image)
   # timescale/timescaledb-ha ships postgis + timescaledb extensions preinstalled.
+  # Bootstrap runs infra/sql/001_init.sql + 002_seed.sql on FIRST boot only;
+  # forward schema changes go through the goose `migrator` one-shot below
+  # (infra/sql/migrations). Both paths are idempotent.
   # ---------------------------------------------------------------------------
   postgres:
     image: timescale/timescaledb-ha:pg16.4-ts2.17.2-all
     container_name: h2-postgres
     networks: [h2net]
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: h2
-      POSTGRES_PASSWORD: h2pass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
       POSTGRES_DB: h2fleet
     volumes:
       - pg_data:/home/postgres/pgdata/data
@@ -191,8 +201,50 @@ services:
       retries: 8
 
   # ---------------------------------------------------------------------------
-  # IAM: Keycloak (realm auto-imported from infra/keycloak/realm-h2fleet.json)
+  # Goose migrator (one-shot). Applies infra/sql/migrations/*.sql (goose format)
+  # and exits; all platform services depend_on its successful completion.
+  # Image: ghcr.io/kukymbr/goose-docker (thin wrapper around pressly/goose).
   # ---------------------------------------------------------------------------
+  migrator:
+    image: ghcr.io/kukymbr/goose-docker:3.27.1
+    container_name: h2-migrator
+    networks: [h2net]
+    environment:
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: host=postgres port=5432 user=h2 password=${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env} dbname=h2fleet sslmode=disable
+      GOOSE_COMMAND: up
+      GOOSE_VERBOSE: "true"
+    volumes:
+      - ../infra/sql/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # IAM: Keycloak. The realm template (infra/keycloak/realm-h2fleet.json) uses
+  # ${VAR} placeholders for user passwords and the `services` client secret;
+  # keycloak-realm-init renders it into the shared `keycloak_realm` volume with
+  # sed before Keycloak imports it (--import-realm). See infra/keycloak/README
+  # note in docs/SECRETS.md.
+  # ---------------------------------------------------------------------------
+  keycloak-realm-init:
+    image: alpine:3.20
+    container_name: h2-keycloak-realm-init
+    networks: [h2net]
+    environment:
+      KEYCLOAK_SERVICES_CLIENT_SECRET: ${KEYCLOAK_SERVICES_CLIENT_SECRET:-h2fleet-services-secret-change-me}
+      KEYCLOAK_ADMIN_USER_PASSWORD: ${KEYCLOAK_ADMIN_USER_PASSWORD:?set_in_.env}
+      KEYCLOAK_OPERATOR_PASSWORD: ${KEYCLOAK_OPERATOR_PASSWORD:-operator123}
+      KEYCLOAK_DRIVER_PASSWORD: ${KEYCLOAK_DRIVER_PASSWORD:-driver123}
+      KEYCLOAK_CITIZEN_PASSWORD: ${KEYCLOAK_CITIZEN_PASSWORD:-citizen123}
+    volumes:
+      - ../infra/keycloak/realm-h2fleet.json:/template/realm-h2fleet.json:ro
+      - ../infra/keycloak/substitute-realm.sh:/usr/local/bin/substitute-realm.sh:ro
+      - keycloak_realm:/out
+    entrypoint: ["/bin/sh", "/usr/local/bin/substitute-realm.sh"]
+    restart: "no"
+
   keycloak:
     image: quay.io/keycloak/keycloak:25.0
     container_name: h2-keycloak
@@ -201,8 +253,8 @@ services:
       - "8180:8080"   # primary (docs/tooling)
       - "8088:8080"   # matches the PWA build-time default VITE_KEYCLOAK_URL
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_DB: dev-file                    # dev-file keeps it dependency-free; swap for postgres in prod
       KC_HOSTNAME: http://localhost:8180
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
@@ -210,8 +262,11 @@ services:
       KC_HEALTH_ENABLED: "true"
     command: ["start-dev", "--import-realm"]
     volumes:
-      - ../infra/keycloak/realm-h2fleet.json:/opt/keycloak/data/import/realm-h2fleet.json:ro
+      - keycloak_realm:/opt/keycloak/data/import:ro
       - keycloak_data:/opt/keycloak/data/h2
+    depends_on:
+      keycloak-realm-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\n\r\n' >&3 && head -1 <&3 | grep 200"]
       interval: 15s
@@ -220,19 +275,56 @@ services:
       start_period: 45s
 
   # ---------------------------------------------------------------------------
-  # ReBAC: Permify (schema in infra/permify/schema.perm, loaded on first boot
-  # by permify-setup one-shot container)
+  # ReBAC: Permify, persisted to its own `permify` database on the main
+  # Postgres (choice documented: we cannot edit infra/sql/001_init.sql from
+  # this workstream, so permify-db-init creates the database idempotently
+  # instead of relying on the init script; permify-migrate then applies
+  # Permify's own schema migrations before `serve` starts).
+  # Schema (authorization model) is loaded by permify-setup from
+  # infra/permify/schema.perm.
   # ---------------------------------------------------------------------------
+  permify-db-init:
+    image: postgres:16-alpine
+    container_name: h2-permify-db-init
+    networks: [h2net]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+    entrypoint: >
+      sh -c "psql -h postgres -U h2 -d h2fleet -tc
+             \"SELECT 1 FROM pg_database WHERE datname='permify'\" | grep -q 1
+             || psql -h postgres -U h2 -d h2fleet -c 'CREATE DATABASE permify'"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  permify-migrate:
+    image: ghcr.io/permify/permify:v1.2.4
+    container_name: h2-permify-migrate
+    networks: [h2net]
+    command: ["migrate"]
+    environment:
+      PERMIFY_DATABASE_ENGINE: postgres
+      PERMIFY_DATABASE_URI: postgres://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/permify?sslmode=disable
+    depends_on:
+      permify-db-init:
+        condition: service_completed_successfully
+    restart: "no"
+
   permify:
     image: ghcr.io/permify/permify:v1.2.4
     container_name: h2-permify
     networks: [h2net]
     ports:
-      - "3476:3476"   # gRPC (services use PERMIFY_GRPC=permify:3476)
-      - "3478:3478"   # HTTP/REST
+      - "127.0.0.1:3476:3476"   # gRPC (services use PERMIFY_GRPC=permify:3476)
+      - "127.0.0.1:3478:3478"   # HTTP/REST
     command: ["serve"]
     environment:
-      PERMIFY_DATABASE_ENGINE: memory    # swap to postgres for persistence in prod
+      PERMIFY_DATABASE_ENGINE: postgres
+      PERMIFY_DATABASE_URI: postgres://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/permify?sslmode=disable
+    depends_on:
+      permify-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3478/healthz >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -242,7 +334,6 @@ services:
   permify-setup:
     image: ghcr.io/permify/permify:v1.2.4
     container_name: h2-permify-setup
-    profiles: ["middleware"]
     networks: [h2net]
     volumes:
       - ../infra/permify/schema.perm:/schema.perm:ro
@@ -259,14 +350,14 @@ services:
     restart: "no"
 
   # ---------------------------------------------------------------------------
-  # Redis — toggle cache, twin hot state, sessions
+  # Redis — toggle cache, twin hot state, sessions, simulator bus:meta hashes
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7.4-alpine
     container_name: h2-redis
     networks: [h2net]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -277,14 +368,16 @@ services:
       retries: 6
 
   # ---------------------------------------------------------------------------
-  # OpenSearch + Dashboards — open-data portal + telemetry search
+  # OpenSearch + Dashboards — open-data portal + telemetry search.
+  # opensearch-bootstrap (one-shot) creates the indexes/mappings used by
+  # citizen-api (OPENSEARCH_INDEX=h2fleet-open) and the open-data portal.
   # ---------------------------------------------------------------------------
   opensearch:
     image: opensearchproject/opensearch:2.17.1
     container_name: h2-opensearch
     networks: [h2net]
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
     environment:
       discovery.type: single-node
       plugins.security.disabled: "true"   # dev only
@@ -306,7 +399,7 @@ services:
     container_name: h2-opensearch-dashboards
     networks: [h2net]
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     environment:
       OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
       DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
@@ -314,44 +407,52 @@ services:
       opensearch:
         condition: service_healthy
 
-  # ---------------------------------------------------------------------------
-  # Gateway: APISIX (standalone/etcd-backed) + etcd.
-  # Standalone routes file mounted for reference: infra/apisix/apisix.yaml
-  # (to run APISIX in pure standalone mode set APISIX deployment-mode and
-  #  mount apisix.yaml as /usr/local/apisix/conf/apisix.yaml).
-  # OpenAppSec WAF: enable profile `waf` to attach the openappsec agent as a
-  # sidecar; see note on the `openappsec-agent` service below.
-  # ---------------------------------------------------------------------------
-  etcd:
-    image: bitnami/etcd:3.5
-    container_name: h2-etcd
+  # NOTE: the Dockerfile is delivered by a parallel workstream; profile-scoped
+  # so plain `make up` (middleware) does not require it to exist yet.
+  opensearch-bootstrap:
+    build:
+      context: ..
+      dockerfile: services/python/opensearch-bootstrap/Dockerfile
+    container_name: h2-opensearch-bootstrap
+    profiles: ["apps", "all"]
     networks: [h2net]
     environment:
-      ALLOW_NONE_AUTHENTICATION: "yes"
-      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
-    volumes:
-      - etcd_data:/bitnami/etcd
-    healthcheck:
-      test: ["CMD-SHELL", "etcdctl endpoint health"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: h2fleet-open
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: "no"
 
+  # ---------------------------------------------------------------------------
+  # Gateway: APISIX in STANDALONE mode — routes are loaded directly from the
+  # mounted infra/apisix/apisix.yaml (no etcd needed; config.yaml uses
+  # ${{APISIX_ADMIN_KEY:=default}} env substitution, fed by APISIX_ADMIN_KEY).
+  # Optional TLS: uncomment the 9443 port + cert mounts (see docs/GATEWAY.md).
+  #
+  # Security notes:
+  #  * the admin API (:9180) is NOT published to the host — reach it
+  #    in-network or via `docker exec h2-apisix curl localhost:9180/...`.
+  #  * :9091 is the APISIX prometheus plugin endpoint (plugin enabled in
+  #    infra/apisix/config.yaml); scraped by infra/observability/prometheus.yml.
+  # OpenAppSec WAF: enable profile `waf` to attach the openappsec agent.
+  # ---------------------------------------------------------------------------
   apisix:
     image: apache/apisix:3.10.0-debian
     container_name: h2-apisix
     networks: [h2net]
     ports:
-      - "9080:9080"   # data plane (gateway entrypoint per SPEC §3.6)
-      - "9180:9180"   # admin API
+      - "9080:9080"              # data plane (gateway entrypoint per SPEC §3.6)
+      - "127.0.0.1:9091:9091"    # prometheus plugin metrics
+      # - "9443:9443"            # optional TLS data plane (docs/GATEWAY.md)
     environment:
-      APISIX_ADMIN_KEY: h2fleet-admin-key-change-me
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:-h2fleet-admin-key-change-me}
+      PWA_ORIGIN: http://localhost:3000   # CORS allow-origin for the PWA
     volumes:
       - ../infra/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
       - ../infra/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
-    depends_on:
-      etcd:
-        condition: service_healthy
+      # TLS (optional): mount certs per docs/GATEWAY.md, e.g.
+      # - ../infra/apisix/certs:/usr/local/apisix/conf/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9080/apisix/status >/dev/null"]
       interval: 10s
@@ -407,6 +508,8 @@ services:
   # TigerBeetle — double-entry financial ledger
   # Accounts: RIDER_WALLET=1xxx, OPERATOR_REVENUE=2xxx, ENERGY_TRADE=3xxx,
   #           CARBON_FUND=4xxx  (SPEC §3.4)
+  # Backup: the `backup` service copies /data/0_0.tigerbeetle (crash-consistent
+  # single-file snapshot) to MinIO — see docs/DR.md.
   # ---------------------------------------------------------------------------
   tigerbeetle:
     image: ghcr.io/tigerbeetle/tigerbeetle:0.16.13
@@ -436,16 +539,16 @@ services:
     container_name: h2-minio
     networks: [h2net]
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # console
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # console
     environment:
-      MINIO_ROOT_USER: h2admin
-      MINIO_ROOT_PASSWORD: h2adminpass
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-h2admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-h2adminpass}
     command: ["server", "/data", "--console-address", ":9001"]
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "mc alias set local http://localhost:9000 h2admin h2adminpass >/dev/null && mc ready local"]
+      test: ["CMD-SHELL", "mc alias set local http://localhost:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD >/dev/null && mc ready local"]
       interval: 10s
       timeout: 5s
       retries: 8
@@ -454,10 +557,14 @@ services:
     image: minio/mc:RELEASE.2024-10-08T09-37-26Z
     container_name: h2-minio-init
     networks: [h2net]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-h2admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-h2adminpass}
     entrypoint: >
-      sh -c "mc alias set local http://minio:9000 h2admin h2adminpass &&
-             mc mb -p local/h2-lakehouse || true &&
-             mc mb -p local/h2-open-data || true"
+      sh -c "mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+             mc mb -p local/h2-lakehouse || true;
+             mc mb -p local/h2-open-data || true;
+             mc mb -p local/h2-backups || true"
     depends_on:
       minio:
         condition: service_healthy
@@ -470,8 +577,8 @@ services:
     ports:
       - "8181:8181"
     environment:
-      AWS_ACCESS_KEY_ID: h2admin
-      AWS_SECRET_ACCESS_KEY: h2adminpass
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-h2admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-h2adminpass}
       AWS_REGION: us-east-1
       CATALOG_WAREHOUSE: s3://h2-lakehouse/warehouse
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
@@ -534,6 +641,96 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
+  # Observability: Prometheus + Alertmanager + Grafana.
+  # Config: infra/observability/{prometheus.yml,alertmanager.yml,alerts.yml}
+  # Grafana provisioning: infra/observability/grafana/**
+  # NOTE: the per-service scrape jobs are pre-provisioned, but most services do
+  # not expose /metrics yet (follow-up workstream) — until then those targets
+  # simply show as DOWN in Prometheus.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: h2-prometheus
+    networks: [h2net]
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ../infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: h2-alertmanager
+    networks: [h2net]
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ../infra/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: h2-grafana
+    networks: [h2net]
+    ports:
+      - "127.0.0.1:3001:3000"   # http://localhost:3001 (admin/admin, change on login)
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../infra/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # ---------------------------------------------------------------------------
+  # Backup: scheduled pg_dump of BOTH postgres instances (h2fleet + temporal)
+  # plus a crash-consistent TigerBeetle data-file snapshot, uploaded to MinIO
+  # bucket h2-backups via mc. Loops every BACKUP_INTERVAL_SECONDS (default 24h);
+  # run a one-off backup with `make backup`. Restore drill: docs/DR.md.
+  # ---------------------------------------------------------------------------
+  backup:
+    build: ../infra/backup
+    container_name: h2-backup
+    networks: [h2net]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+      TEMPORAL_POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-h2admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-h2adminpass}
+      BACKUP_BUCKET: h2-backups
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - tigerbeetle_data:/tigerbeetle:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      postgres-temporal: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # GeoLibre — map tiling / geodata server.
   # NOTE: GeoLibre does not publish an official pre-built container image.
   # Manual step (one-time):
@@ -555,6 +752,7 @@ services:
   # PLATFORM SERVICES (profile: apps) — built from ../services/* and ../apps/pwa
   # Internal ports per SPEC §3.6. Host ports are 18xxx for direct debugging;
   # the supported entrypoint is APISIX on :9080.
+  # All services wait for the goose `migrator` one-shot (schema is ready).
   # ===========================================================================
 
   toggle-service:
@@ -568,10 +766,13 @@ services:
     environment:
       <<: *h2-env
       PORT: "8080"
+      PERMIFY_GRPC: permify:3476
+      PERMIFY_TENANT: t1
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -593,6 +794,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -611,11 +813,17 @@ services:
       <<: *h2-env
       PORT: "8082"
       PERMIFY_GRPC: permify:3476
-      TEMPORAL_ADDR: temporal:7233
+      PERMIFY_TENANT: t1
+      # Go service reads TEMPORAL_HOST (Temporal frontend address).
+      TEMPORAL_HOST: temporal:7233
+      # Shared-secret token for the H2 leak sensor ingest endpoint
+      # (machine-to-machine; not a Keycloak flow).
+      LEAK_INGEST_TOKEN: ${LEAK_INGEST_TOKEN:-dev-leak-token-change-me}
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
       temporal: { condition: service_started }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8082/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -634,17 +842,47 @@ services:
       <<: *h2-env
       PORT: "8083"
       PERMIFY_GRPC: permify:3476
-      OPENSEARCH_ADDR: http://opensearch:9200
-      DAPR_ENABLED: "true"           # pubsub/state via Dapr components (infra/dapr/components)
+      # Go service reads OPENSEARCH_URL (full base URL, not host:port).
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: h2fleet-open
+      DAPR_ENABLED: "true"           # pubsub/state via Dapr sidecar (citizen-api-daprd)
       DAPR_HTTP_PORT: "3500"
+      DAPR_GRPC_PORT: "50001"        # sidecar shares this container's netns
+      DAPR_PUBSUB_NAME: h2pubsub
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
+      migrator: { condition: service_completed_successfully }
+      opensearch-bootstrap: { condition: service_completed_successfully }
+      citizen-api-daprd: { condition: service_started }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8083/healthz >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 6
+
+  # Dapr sidecar for citizen-api. Shares the app's network namespace
+  # (network_mode: service:…) so the Go dapr SDK default dial 127.0.0.1:50001
+  # works exactly like the k8s sidecar; no placement service needed (no actors).
+  citizen-api-daprd:
+    image: daprio/daprd:latest
+    container_name: h2-citizen-api-daprd
+    profiles: ["apps", "all"]
+    network_mode: service:citizen-api
+    command:
+      - ./daprd
+      - --app-id=citizen-api
+      - --app-port=8083
+      - --dapr-http-port=3500
+      - --dapr-grpc-port=50001
+      - --components-path=/components
+      - --log-level=warn
+    volumes:
+      - ../infra/dapr/components:/components:ro
+    depends_on:
+      citizen-api: { condition: service_started }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   commerce-api:
     build:
@@ -662,15 +900,39 @@ services:
       MOJALOOP_ENDPOINT: http://mojaloop-simulator:8444
       DAPR_ENABLED: "true"
       DAPR_HTTP_PORT: "3500"
+      DAPR_GRPC_PORT: "50001"
+      DAPR_PUBSUB_NAME: h2pubsub
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
       tigerbeetle: { condition: service_started }
+      migrator: { condition: service_completed_successfully }
+      commerce-api-daprd: { condition: service_started }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8084/healthz >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 6
+
+  commerce-api-daprd:
+    image: daprio/daprd:latest
+    container_name: h2-commerce-api-daprd
+    profiles: ["apps", "all"]
+    network_mode: service:commerce-api
+    command:
+      - ./daprd
+      - --app-id=commerce-api
+      - --app-port=8084
+      - --dapr-http-port=3500
+      - --dapr-grpc-port=50001
+      - --components-path=/components
+      - --log-level=warn
+    volumes:
+      - ../infra/dapr/components:/components:ro
+    depends_on:
+      commerce-api: { condition: service_started }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   telemetry-ingest:
     build: ../services/rust/telemetry-ingest
@@ -689,6 +951,7 @@ services:
       kafka: { condition: service_healthy }
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8093/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -711,6 +974,7 @@ services:
       kafka: { condition: service_healthy }
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8092/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -732,6 +996,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8090/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -752,6 +1017,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8091/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -773,11 +1039,32 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8094/healthz >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 6
+
+  # Telemetry simulator — stands in for the 50 physical buses (and for the
+  # documented Fluvio edge bridge, which is not implemented). Loads
+  # fleet.vehicles, writes Redis bus:meta:* enrichment hashes and publishes
+  # SPEC §3.3 envelopes to telemetry.raw every SIM_INTERVAL_SECONDS.
+  telemetry-simulator:
+    build:
+      context: ..
+      dockerfile: services/python/telemetry-simulator/Dockerfile
+    container_name: h2-telemetry-simulator
+    profiles: ["apps", "all"]
+    networks: [h2net]
+    environment:
+      <<: *h2-env
+      SIM_INTERVAL_SECONDS: "5"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
 
   # One-shot ETL runner (profile: etl). Submits the Sedona/Spark job that moves
   # Postgres telemetry -> Iceberg tables on MinIO. Run manually:
@@ -794,8 +1081,8 @@ services:
       SPARK_MASTER: spark://spark-master:7077
       ICEBERG_REST: http://iceberg-rest:8181
       S3_ENDPOINT: http://minio:9000
-      AWS_ACCESS_KEY_ID: h2admin
-      AWS_SECRET_ACCESS_KEY: h2adminpass
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-h2admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-h2adminpass}
     depends_on:
       spark-master: { condition: service_healthy }
       iceberg-rest: { condition: service_healthy }

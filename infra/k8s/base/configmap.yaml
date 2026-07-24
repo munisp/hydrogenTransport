@@ -2,6 +2,9 @@
 # TOGGLE_DOMAINS is the bootstrap domain filter consumed by toggle-service:
 # only modules of the listed domains are seeded/enabled in this deployment.
 # Valid domains: fleet,infra,citizen,commerce  (comma-separated, or "all").
+#
+# NOTE: DATABASE_URL moved to the h2fleet-secrets Secret (secret.yaml) —
+# credentials do not belong in a ConfigMap.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +14,11 @@ data:
   TOGGLE_DOMAINS: "all"
   KAFKA_BROKERS: "kafka.h2fleet.svc:9092"
   REDIS_ADDR: "redis.h2fleet.svc:6379"
-  DATABASE_URL: "postgres://h2:h2pass@postgres.h2fleet.svc:5432/h2fleet?sslmode=disable"
   TOGGLE_URL: "http://toggle-service.h2fleet.svc:8080"
   KEYCLOAK_ISSUER: "http://keycloak.h2fleet.svc:8080/realms/h2fleet"
+  OPENSEARCH_URL: "http://opensearch.h2fleet.svc:9200"
+  OPENSEARCH_INDEX: "h2fleet-open"
+  TEMPORAL_HOST: "temporal-frontend.h2fleet.svc:7233"
+  PERMIFY_GRPC: "permify.h2fleet.svc:3476"
+  TIGERBEETLE_ADDR: "tigerbeetle.h2fleet.svc:3000"
+  MOJALOOP_ENDPOINT: "http://mojaloop-simulator.h2fleet.svc:8444"
