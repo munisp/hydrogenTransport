@@ -1,0 +1,75 @@
+# H2Fleet Prometheus configuration.
+#
+# Scrape topology (compose network `h2net`):
+#   * apisix:9091          — APISIX prometheus plugin. Requires the plugin
+#                            enabled in infra/apisix/config.yaml (owned by the
+#                            gateway workstream); target is DOWN until then.
+#   * all platform services — /metrics handlers are implemented in every service
+#                            services (follow-up workstream adds promhttp /
+#                            prometheus-client handlers on the same port as
+#                            each service's /healthz). Jobs are provisioned
+#                            NOW so dashboards/alerts light up automatically
+#                            once the handlers ship; until then targets show
+#                            as DOWN and the ServiceDown alert will fire —
+#                            silence the `h2fleet-services` job group if that
+#                            is noisy during development.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: h2fleet
+    env: local
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # --- Gateway --------------------------------------------------------------
+  - job_name: apisix
+    metrics_path: /apisix/prometheus/metrics
+    static_configs:
+      - targets: ["apisix:9091"]
+        labels:
+          service: apisix
+
+  # --- Platform services (SPEC §3.6 port map) -------------------------------
+  # /metrics handlers implemented — see header note.
+  - job_name: h2fleet-services
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["toggle-service:8080"]
+        labels: { service: toggle-service }
+      - targets: ["fleet-api:8081"]
+        labels: { service: fleet-api }
+      - targets: ["infra-api:8082"]
+        labels: { service: infra-api }
+      - targets: ["citizen-api:8083"]
+        labels: { service: citizen-api }
+      - targets: ["commerce-api:8084"]
+        labels: { service: commerce-api }
+      - targets: ["telemetry-ingest:8093"]
+        labels: { service: telemetry-ingest }
+      - targets: ["digital-twin:8092"]
+        labels: { service: digital-twin }
+      - targets: ["predictive-maintenance:8090"]
+        labels: { service: predictive-maintenance }
+      - targets: ["route-optimizer:8091"]
+        labels: { service: route-optimizer }
+      - targets: ["carbon-analytics:8094"]
+        labels: { service: carbon-analytics }
+
+  # --- Kafka consumer lag (PLACEHOLDER) --------------------------------------
+  # Requires a kafka exporter sidecar (e.g. danielqsj/kafka-exporter) which is
+  # not part of the compose stack yet. Uncomment when added:
+  # - job_name: kafka-exporter
+  #   static_configs:
+  #     - targets: ["kafka-exporter:9308"]

@@ -15,7 +15,7 @@ patches:
       - op: replace
         path: /data/TOGGLE_DOMAINS
         value: "fleet,infra"
-  # dev: single replica of everything
+  # dev: single replica of everything, no autoscalers
   - target:
       kind: Deployment
       name: fleet-api
@@ -23,8 +23,58 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 1
+  - target:
+      kind: Deployment
+      name: citizen-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: Deployment
+      name: pwa
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: fleet-api
+    patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: fleet-api
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: citizen-api
+    patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: citizen-api
 images:
   - name: ghcr.io/munisp/h2fleet/toggle-service
     newTag: dev
   - name: ghcr.io/munisp/h2fleet/fleet-api
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/infra-api
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/citizen-api
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/commerce-api
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/telemetry-ingest
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/digital-twin
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/predictive-maintenance
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/route-optimizer
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/carbon-analytics
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/pwa
     newTag: dev

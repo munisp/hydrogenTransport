@@ -1,0 +1,27 @@
+# H2Fleet Alertmanager configuration.
+# Dev default: a single null receiver (alerts visible in the Alertmanager UI
+# at http://127.0.0.1:9093 and in Grafana). Point the webhook receiver at the
+# ops channel / incident workflow endpoint for any shared environment —
+# the H2 leak alarm path is documented end-to-end in docs/INCIDENT_RESPONSE.md.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: null
+  group_by: ["alertname", "service"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Safety-critical alerts repeat aggressively.
+    - matchers:
+        - severity = "critical"
+      repeat_interval: 15m
+      receiver: null
+
+receivers:
+  - name: "null"
+  # Example for a wired environment (infra-api incident webhook):
+  # - name: incident-webhook
+  #   webhook_configs:
+  #     - url: http://infra-api:8082/v1/incidents/alertmanager

@@ -1,0 +1,67 @@
+# H2Fleet alert rules.
+#
+# Metric-name assumptions (must match the /metrics handlers when they ship):
+#   up{job="h2fleet-services"}                       — standard target health
+#   http_requests_total{service,code}                — request counter per service
+#   twin_last_update_timestamp_seconds{bus_id}       — digital-twin freshness gauge
+#   kafka_consumergroup_lag{group,topic}             — kafka exporter (pending)
+# Until the exporters/handlers exist, the ServiceDown rule fires on missing
+# targets and the rest evaluate to no-data (never fire) — that is intentional.
+groups:
+  - name: h2fleet-availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"h2fleet-services|apisix"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "H2Fleet target {{ $labels.service }} is down"
+          description: "Prometheus cannot scrape {{ $labels.service }} ({{ $labels.instance }}) for >2m. Note: services without a /metrics handler yet also report down — see infra/observability/prometheus.yml header."
+          runbook: docs/RUNBOOK.md
+
+  - name: h2fleet-pipeline
+    rules:
+      # PLACEHOLDER — needs a kafka exporter (see prometheus.yml). Expression
+      # is final; it stays inert until kafka_consumergroup_lag exists.
+      - alert: KafkaConsumerLagHigh
+        expr: max_over_time(kafka_consumergroup_lag{topic=~"telemetry.raw|telemetry.enriched"}[10m]) > 1000
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Kafka consumer lag high on {{ $labels.topic }} (group {{ $labels.group }})"
+          description: "Lag > 1000 messages for 10m — telemetry pipeline is falling behind."
+          runbook: docs/RUNBOOK.md
+
+      - alert: TwinStale
+        # No twin update for a bus in >2 minutes while telemetry is flowing.
+        expr: time() - twin_last_update_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+          team: fleet
+        annotations:
+          summary: "Digital twin stale for bus {{ $labels.bus_id }}"
+          description: "digital-twin has not refreshed bus {{ $labels.bus_id }} in >2m. Check telemetry-ingest and digital-twin consumers."
+          runbook: docs/RUNBOOK.md
+
+  - name: h2fleet-commerce
+    rules:
+      - alert: PaymentFailureRateHigh
+        # 5xx share of commerce-api payment endpoints over 15m.
+        expr: |
+          sum(rate(http_requests_total{service="commerce-api",code=~"5.."}[15m]))
+            /
+          sum(rate(http_requests_total{service="commerce-api"}[15m]))
+            > 0.05
+        for: 15m
+        labels:
+          severity: critical
+          team: commerce
+        annotations:
+          summary: "commerce-api payment failure rate above 5%"
+          description: "More than 5% of commerce-api requests are failing over 15m — check TigerBeetle ledger and Mojaloop simulator/switch connectivity."
+          runbook: docs/RUNBOOK.md
