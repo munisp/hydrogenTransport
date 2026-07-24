@@ -47,3 +47,7 @@ from `infra/sql` migrations.
 go run ./cmd/server
 docker build -f services/go/infra-api/Dockerfile -t h2fleet/infra-api .   # context = repo root
 ```
+
+## API contract
+
+The HTTP API is specified in [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0), hand-maintained from the actual route registrations.

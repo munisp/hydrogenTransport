@@ -15,7 +15,7 @@ import (
 
 // Handler serves the fleet endpoints.
 type Handler struct {
-	db  *pgxpool.Pool
+	db  DB
 	log *zap.Logger
 }
 
