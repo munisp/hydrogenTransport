@@ -15,13 +15,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
-	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/auth"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/handlers"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/workflow"
+	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/metrics"
 )
 
 func main() {
@@ -50,10 +51,24 @@ func main() {
 
 	tc := toggle.New(cfg.ToggleURL)
 	jwtmw := auth.New(cfg.KeycloakIssuer, log)
+	// Permify ReBAC checks on admin routes (SPEC §3.5). When PERMIFY_GRPC is
+	// unset the checks fall back to role-only (warned once); see packages/go-auth.
+	perm := auth.NewPermify(os.Getenv("PERMIFY_GRPC"), os.Getenv("PERMIFY_TENANT"), log)
+	defer perm.Close()
 	pub := events.NewPublisher(cfg.KafkaBrokers, "infra-api", log)
 	defer pub.Close()
-	wf := workflow.NewSignaler(os.Getenv("TEMPORAL_HOST"), log)
+	temporalHost := os.Getenv("TEMPORAL_HOST")
+	wf := workflow.NewSignaler(temporalHost, log)
 	defer wf.Close()
+	// Temporal worker for the incident-response and dispatch workflows
+	// (SPEC §3.8). Skipped gracefully when TEMPORAL_HOST is unset or the
+	// server is unreachable — the HTTP API still serves either way.
+	stopWorker, err := workflow.StartWorker(temporalHost, pool, log)
+	if err != nil {
+		log.Warn("temporal worker not started; continuing without workflows", zap.Error(err))
+	} else {
+		defer stopWorker()
+	}
 
 	h := handlers.New(pool, pub, wf, log)
 	if err := h.EnsureSchema(ctx); err != nil {
@@ -77,47 +92,51 @@ func main() {
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Timeout(30*time.Second))
+	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, metrics.Middleware("infra-api"), middleware.Timeout(30*time.Second))
 	r.Get("/healthz", h.Healthz)
+	r.Handle("/metrics", metrics.Handler())
 
 	// refueling-stations module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "refueling-stations"))
 		r.Get("/v1/stations", h.ListStations)
 		r.Get("/v1/stations/{id}", h.GetStation)
-		r.With(jwtmw.RequireAuth).Post("/v1/stations", h.CreateStation)
-		r.With(jwtmw.RequireAuth).Patch("/v1/stations/{id}/status", h.UpdateStationStatus)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/stations", h.CreateStation)
+		r.With(jwtmw.RequireRole("operator")).Patch("/v1/stations/{id}/status", h.UpdateStationStatus)
 	})
 	// leak-detection module: incidents + sensor webhook
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "leak-detection"))
 		r.Get("/v1/incidents", h.ListIncidents)
 		r.With(jwtmw.RequireAuth).Post("/v1/incidents", h.OpenIncident)
-		r.With(jwtmw.RequireAuth).Post("/v1/incidents/{id}/ack", h.AckIncident)
-		r.With(jwtmw.RequireAuth).Post("/v1/incidents/{id}/resolve", h.ResolveIncident)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/incidents/{id}/ack", h.AckIncident)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/incidents/{id}/resolve", h.ResolveIncident)
 		r.With(leakAuth).Post("/v1/safety/leak", h.IngestLeak)
 	})
 	// dispatch-workforce module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "dispatch-workforce"))
 		r.Get("/v1/dispatch/jobs", h.ListDispatchJobs)
-		r.With(jwtmw.RequireAuth).Post("/v1/dispatch/jobs", h.CreateDispatchJob)
-		r.With(jwtmw.RequireAuth).Post("/v1/dispatch/jobs/{id}/accept", h.AcceptDispatchJob)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs", h.CreateDispatchJob)
+		r.With(jwtmw.RequireRole("driver")).Post("/v1/dispatch/jobs/{id}/accept", h.AcceptDispatchJob)
 	})
 	// compliance-reporting module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "compliance-reporting"))
 		r.Get("/v1/compliance/reports", h.ListComplianceReports)
 		r.Get("/v1/compliance/reports/{id}", h.GetComplianceReport)
-		r.With(jwtmw.RequireAuth).Post("/v1/compliance/reports/generate", h.GenerateComplianceReport)
+		r.With(
+			jwtmw.RequireRole("operator"),
+			perm.Require("report", "generate", func(*http.Request) string { return "compliance" }),
+		).Post("/v1/compliance/reports/generate", h.GenerateComplianceReport)
 	})
 	// depot-management module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "depot-management"))
 		r.Get("/v1/depot/bays", h.ListDepotBays)
 		r.Get("/v1/depot/work-orders", h.ListWorkOrders)
-		r.With(jwtmw.RequireAuth).Post("/v1/depot/work-orders", h.CreateWorkOrder)
-		r.With(jwtmw.RequireAuth).Post("/v1/depot/work-orders/{id}/close", h.CloseWorkOrder)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders", h.CreateWorkOrder)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders/{id}/close", h.CloseWorkOrder)
 	})
 
 	srv := &http.Server{
