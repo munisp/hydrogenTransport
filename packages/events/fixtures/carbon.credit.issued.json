@@ -1,0 +1,13 @@
+{
+  "id": "1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a",
+  "type": "carbon.credit.issued",
+  "source": "carbon-analytics",
+  "time": "2025-02-02T06:00:00Z",
+  "data": {
+    "credit_id": "c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+    "period": "2025-01",
+    "kg_co2_avoided": 47210.4,
+    "credits": 47.2104,
+    "issued_at": "2025-02-02T06:00:00Z"
+  }
+}

@@ -23,16 +23,22 @@ Every message is a CloudEvents-ish JSON object:
 | safety.leak.detected | leak-detection | infra-api, incident workflow |
 | dispatch.job.assigned | dispatch-workforce | fleet-api |
 | drt.requested | demand-responsive | citizen-api |
-| fare.payment.initiated / fare.payment.settled | fare-payments | commerce-api, TigerBeetle poster |
+| fare.payment.initiated / fare.payment.settled / fare.payment.failed | fare-payments | commerce-api, TigerBeetle poster |
 | carbon.credit.issued | carbon-analytics | citizen-api, gov-dashboard |
 | energy.trade.executed | energy-trading | commerce-api |
 | toggle.changed | toggle-service | all services (cache refresh) |
 | station.status.changed | refueling-stations | infra-api |
 
+## Fixtures
+`fixtures/<topic>.json` holds one valid sample envelope per topic — use them
+for consumer unit tests, Kafka console producers and contract checks.
+
 ## Validation
 ```bash
 pip install check-jsonschema
-check-jsonschema --schemafile schemas/telemetry.enriched.json sample.json
+check-jsonschema --schemafile schemas/telemetry.enriched.json fixtures/telemetry.enriched.json
+# validate every fixture against its schema:
+for f in fixtures/*.json; do check-jsonschema --schemafile "schemas/$(basename "$f")" "$f"; done
 # or lint the catalog:
 npx @asyncapi/cli validate asyncapi.yaml
 ```

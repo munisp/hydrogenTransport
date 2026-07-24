@@ -1,0 +1,14 @@
+{
+  "id": "6e7f8a9b-0c1d-4e2f-3a4b-6c7d8e9f0a1b",
+  "type": "dispatch.job.assigned",
+  "source": "infra-api",
+  "time": "2025-01-15T06:00:00Z",
+  "data": {
+    "job_id": "e6f7a8b9-0c1d-4e2f-3a4b-6c7d8e9f0a1b",
+    "driver_id": "driver-17",
+    "bus_id": "3f6b8f2e-7a1c-4d5b-9e0a-1b2c3d4e5f60",
+    "route_id": "R-12",
+    "shift_start": "2025-01-15T06:30:00Z",
+    "shift_end": "2025-01-15T14:30:00Z"
+  }
+}

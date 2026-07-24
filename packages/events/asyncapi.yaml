@@ -73,6 +73,11 @@ channels:
     description: Fare payment settled; TigerBeetle ledger posted.
     messages:
       farePaymentSettled: { $ref: "#/components/messages/FarePaymentSettled" }
+  farePaymentFailed:
+    address: fare.payment.failed
+    description: Fare payment failed on Mojaloop rails (fare-payments).
+    messages:
+      farePaymentFailed: { $ref: "#/components/messages/FarePaymentFailed" }
   carbonCreditIssued:
     address: carbon.credit.issued
     description: CO2-avoidance credits issued (carbon-credits).
@@ -143,6 +148,10 @@ operations:
     action: send
     channel: { $ref: "#/channels/farePaymentSettled" }
     title: fare-payments settles a payment
+  publishFarePaymentFailed:
+    action: send
+    channel: { $ref: "#/channels/farePaymentFailed" }
+    title: fare-payments reports a failed payment
   publishCarbonCreditIssued:
     action: send
     channel: { $ref: "#/channels/carbonCreditIssued" }
@@ -228,6 +237,11 @@ components:
       title: fare.payment.settled
       contentType: application/json
       payload: { $ref: "./schemas/fare.payment.settled.json" }
+    FarePaymentFailed:
+      name: FarePaymentFailed
+      title: fare.payment.failed
+      contentType: application/json
+      payload: { $ref: "./schemas/fare.payment.failed.json" }
     CarbonCreditIssued:
       name: CarbonCreditIssued
       title: carbon.credit.issued
