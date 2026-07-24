@@ -10,11 +10,11 @@ and one data platform — instead of 20 siloed builds.
 |---|---|---|
 | **Apache Kafka** | Event backbone; all domain events (SPEC §3.3 topics) | `kafka:9092` (host `localhost:9094`) |
 | **Dapr** | Pub/sub + state abstraction for citizen & commerce services; cron bindings | components in `infra/dapr/components/` |
-| **Fluvio** | Optional edge telemetry stream from bus gateways (bridged to `telemetry.raw`) | compose profile `fluvio` |
-| **Temporal** | Long-running workflows: dispatch, incident response, fare settlement | `temporal:7233`, UI `:8233` |
+| **Fluvio** | Documented edge bridge design: bus gateways would publish to an edge Fluvio cluster, bridged to `telemetry.raw`. **Not built** — locally the telemetry-simulator publishes to Kafka directly | compose profile `fluvio` (design only) |
+| **Temporal** | Long-running workflows: dispatch, incident response, fare settlement. **Being implemented** — infra-api signals Temporal when `TEMPORAL_HOST` is set, degrading to logged no-ops | `temporal:7233`, UI `:8233` |
 | **Postgres 16 + TimescaleDB + PostGIS** | OLTP for all 4 domain schemas; telemetry hypertable | `postgres:5432` |
 | **Keycloak** | IAM — OIDC RS256 JWTs, realm `h2fleet` | `localhost:8180` |
-| **Permify** | ReBAC authorization on admin routes | gRPC `:3476`, HTTP `:3478` |
+| **Permify** | ReBAC authorization on admin routes — **role+fallback hybrid**: realm-role checks are enforced today; Permify relationship checks are being rolled out behind them (fail-closed fallback to roles) | gRPC `:3476`, HTTP `:3478` |
 | **Redis** | Toggle cache (`toggles:<module>`, 30 s TTL), twin hot state, sessions | `:6379` |
 | **Mojaloop** | Fare payment rails (FSPIOP). Local dev: `mojaloop/simulator` | `:8444` (prod: mojaloop/helm on k8s) |
 | **OpenSearch** | Open-data portal datasets + telemetry search | `:9200`, dashboards `:5601` |
@@ -28,7 +28,8 @@ and one data platform — instead of 20 siloed builds.
 ## 2. Data flow: telemetry → twin → ML → lakehouse
 
 ```
-Bus gateways ──(Fluvio, edge, optional)──▶ Kafka topic telemetry.raw
+telemetry-simulator (local) ──▶ Kafka topic telemetry.raw
+Bus gateways ──(Fluvio edge bridge: documented design, not built)──┘
                                                     │
                               telemetry-ingest (Rust, rdkafka)
                                     ┌───────────────┴────────────────┐
@@ -65,6 +66,10 @@ Nightly/scheduled: lakehouse-etl (Spark + Apache Sedona)
 * **lakehouse-etl** is a Spark/Sedona job that moves curated, geospatially
   indexed copies of operational data into Iceberg tables on MinIO — the
   analytics zone feeding gov-dashboard and the open-data portal.
+* **carbon-analytics** is **internal-only**: batch CO2 accounting and credit
+  issuance (`carbon.credit.issued`). It is intentionally not part of the
+  APISIX prefix map; citizens read results via citizen-api
+  `/api/citizen/v1/carbon/*`.
 
 ## 3. Toggle architecture
 
@@ -87,8 +92,8 @@ Admin PWA ──PUT /api/toggles/v1/toggles/{module}──▶ APISIX ─▶ togg
 1. `platform-admin` flips the switch in the Admin page of the PWA.
 2. PWA calls `PUT /api/toggles/v1/toggles/advertising {enabled:false}` with its
    Keycloak token. APISIX validates the JWT (openid-connect) and strips the
-   prefix; toggle-service checks the `platform-admin` realm role and Permify
-   `module:advertising#manage`.
+   prefix; toggle-service checks the `platform-admin` realm role (enforced)
+   and, where rolled out, Permify `module:advertising#manage` (hybrid, see §4).
 3. toggle-service updates `public.feature_toggles`, sets
    `toggles:advertising=false` in Redis (TTL 30 s) and publishes a
    CloudEvents-ish envelope to `toggle.changed`.
@@ -133,12 +138,16 @@ a deployment; runtime toggles flip modules within the deployed domains. See
   Realm roles: `platform-admin`, `operator`, `driver`, `citizen`.
 * **AuthN**: JWTs verified at the gateway *and* in each service (defense in
   depth); services accept the same issuer (`KEYCLOAK_ISSUER`).
-* **AuthZ**: coarse-grained via realm roles; fine-grained via Permify
-  relationships (`infra/permify/schema.perm`) on admin routes — e.g. only
-  `module:<id>#manage` may `PUT /v1/toggles/{module}`.
+* **AuthZ** (role+fallback hybrid): coarse-grained realm-role checks are the
+  enforced baseline today; fine-grained Permify relationship checks
+  (`infra/permify/schema.perm`, e.g. only `module:<id>#manage` may
+  `PUT /v1/toggles/{module}`) are being rolled out on admin routes with a
+  fail-closed fallback to role checks when Permify is unavailable.
 * **Ledger integrity**: all money movement is double-entry in TigerBeetle
   (account ranges: RIDER_WALLET 1xxx, OPERATOR_REVENUE 2xxx, ENERGY_TRADE
   3xxx, CARBON_FUND 4xxx); Postgres `commerce.*` tables are the query side.
 * **Dev relaxations** (documented, not for prod): OpenSearch security plugin
-  disabled, Permify in-memory engine, APISIX admin open to `0.0.0.0/0`,
-  Keycloak dev-file storage, demo secrets.
+  disabled, APISIX admin reachable in-network without network policy,
+  Keycloak dev-file storage, demo secrets via `${VAR:-dev-default}` compose
+  interpolation (override in `.env`, see `.env.example` + docs/SECRETS.md).
+  Permify runs on its own Postgres database (no longer the in-memory engine).

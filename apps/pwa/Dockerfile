@@ -10,7 +10,9 @@ COPY packages/toggle-client/ts packages/toggle-client/ts
 COPY apps/pwa apps/pwa
 
 WORKDIR /repo/apps/pwa
-RUN npm install --no-audit --no-fund
+# Reproducible install: package-lock.json is committed, so npm ci is the
+# default; fall back to npm install if the lockfile is ever absent.
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 RUN npm run build
 
 # ---- serve stage -------------------------------------------------------------

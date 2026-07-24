@@ -13,7 +13,7 @@ twin (Rust hot path) · H2 fuel monitoring & range · route/energy optimizer
 
 **Infrastructure & Safety (`infra`)**
 refueling station mgmt · H2 leak detection & incident workflow · driver
-dispatch (Temporal) · compliance reporting · depot management
+dispatch (Temporal workflows — being implemented) · compliance reporting · depot management
 
 **Citizen & Engagement (`citizen`)**
 passenger PWA · Expo mobile apps · demand-responsive transit (DRT) · carbon
@@ -25,9 +25,10 @@ energy/H2 trading · government KPI dashboard · advertising
 
 ## Why one unified platform beats 20 individual builds
 
-* **Shared auth** — one Keycloak realm + Permify ReBAC instead of 20 login
-  systems; roles (`platform-admin`, `operator`, `driver`, `citizen`) work
-  everywhere.
+* **Shared auth** — one Keycloak realm + Permify ReBAC (role+fallback hybrid:
+  realm roles enforced today, Permify relationship checks rolling out on
+  admin routes) instead of 20 login systems; roles (`platform-admin`,
+  `operator`, `driver`, `citizen`) work everywhere.
 * **Shared events** — one Kafka backbone with a fixed topic catalog
   (`telemetry.raw` → `telemetry.enriched` → `twin.updated` →
   `maintenance.predicted` …); modules compose through events, not point-to-point
@@ -54,8 +55,9 @@ energy/H2 trading · government KPI dashboard · advertising
                   toggle  fleet infra citizen comm.  ML   optim.  twin
                   :8080   :8081 :8082 :8083  :8084  :8090 :8091  :8092
                     │  (Go)            (Go, Dapr)  (Python)      (Rust)
-   buses ──(Fluvio)─▶ Kafka: telemetry.raw ─▶ telemetry-ingest (Rust) ─▶ Timescale hypertable
-                                     └─▶ telemetry.enriched ─▶ digital-twin ─▶ Redis hot + twin.updated
+   telemetry-simulator ─▶ Kafka: telemetry.raw ─▶ telemetry-ingest (Rust) ─▶ Timescale hypertable
+   (buses via Fluvio edge bridge:            └─▶ telemetry.enriched ─▶ digital-twin ─▶ Redis hot + twin.updated
+    documented design, not built)
         ┌────────────┬─────────────┬───────────────┬────────────┬─────────────┐
         ▼            ▼             ▼               ▼            ▼             ▼
    Postgres/    Temporal      Mojaloop sim    TigerBeetle   OpenSearch    MinIO+Iceberg
@@ -66,19 +68,25 @@ energy/H2 trading · government KPI dashboard · advertising
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 [docs/MODULES.md](docs/MODULES.md) · [docs/API.md](docs/API.md) ·
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) ·
+[docs/RUNBOOK.md](docs/RUNBOOK.md) · [docs/SLO.md](docs/SLO.md) ·
+[docs/INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md) ·
+[docs/DR.md](docs/DR.md) · [docs/SECRETS.md](docs/SECRETS.md)
 
 ## Quickstart
 
 ```bash
-make up       # middleware stack (Kafka, Temporal, PG/Timescale, Keycloak, APISIX, …)
-make up-all   # + build/run all 9 services and the PWA
+cp .env.example .env   # optional: override dev secrets
+make up       # middleware stack (Kafka, Temporal, PG/Timescale, Keycloak, APISIX,
+              # Prometheus+Grafana, backup, …)
+make up-all   # + build/run all services, the telemetry simulator and the PWA
 make gateway-check
+make observability   # Grafana :3001 · Prometheus :9090 · Alertmanager :9093
 ```
 
 * Gateway: http://localhost:9080 · PWA: http://localhost:3000
-* Login: `admin/admin123` (platform-admin), `operator/operator123`,
-  `driver/driver123`, `citizen/citizen123`
+* Login (dev defaults from `.env.example`): `admin/admin123` (platform-admin),
+  `operator/operator123`, `driver/driver123`, `citizen/citizen123`
 * Flip a module: Admin page in the PWA, or
   `curl -X PUT http://localhost:9080/api/toggles/v1/toggles/advertising \
    -H "Authorization: Bearer $TOKEN" -d '{"enabled":false}'`
@@ -90,6 +98,7 @@ make gateway-check
   go/      toggle-service · fleet-api · infra-api · citizen-api · commerce-api
   rust/    telemetry-ingest · digital-twin
   python/  predictive-maintenance · route-optimizer · carbon-analytics · lakehouse-etl
+           telemetry-simulator (fleet stand-in: publishes telemetry.raw for all 50 buses)
 /apps
   pwa/     React 18 + TS + Vite PWA (4 domain dashboards + citizen app)
   mobile/  Expo skeleton (citizen + driver)
@@ -97,13 +106,20 @@ make gateway-check
   docker-compose.yml (profiles: default middleware, apps, all, fluvio, etl, waf)
   k8s/     kustomize base + overlays/dev (per-deployment domain scoping)
   dapr/    pubsub-kafka, statestore-redis, cron bindings
-  apisix/  gateway routes (SPEC §3.6)  keycloak/ realm  permify/ schema  sql/ init+seed
+  apisix/  gateway routes (SPEC §3.6)  keycloak/ realm template + secret substitution
+  permify/ schema  sql/ init+seed+migrations  backup/ pg_dump→MinIO runner
+  observability/ prometheus · alertmanager · alerts · grafana dashboards
 /packages
-  events/  AsyncAPI event catalog + JSON schemas
+  events/  AsyncAPI event catalog + JSON schemas + fixtures
   toggle-client/  toggle SDK (Go/TS/Python, same contract)
-/docs      ARCHITECTURE · MODULES · API · DEPLOYMENT
-Makefile · SPEC.md · .github/workflows/ci.yml
+/docs      ARCHITECTURE · MODULES · API · DEPLOYMENT · RUNBOOK · SLO ·
+           INCIDENT_RESPONSE · DR · SECRETS
+Makefile · SPEC.md · .env.example · infra/ci/workflow.yml (move to .github/workflows/ci.yml to activate)
 ```
+
+Notes: `carbon-analytics` is internal-only (not routed via APISIX; batch CO2
+accounting). The Fluvio edge bridge from bus gateways is a documented design,
+not implemented — the telemetry simulator feeds `telemetry.raw` locally.
 
 ## Language choices
 

@@ -6,10 +6,25 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 
 * Auth: `Authorization: Bearer <keycloak jwt>` for mutating routes; public GETs
   on toggles/citizen pass through unauthenticated (see `infra/apisix/apisix.yaml`).
+* **Payment and DRT reads also require auth**: unauthenticated calls to
+  `/v1/payments*` and `/v1/drt/requests*` return `401 unauthorized`.
+* **Role-gated mutations**: routes marked `JWT (operator)` / `JWT (driver)`
+  return `403 forbidden` without the realm role.
+* **Downstream failures**: payment routes return `502 bad_gateway` when the
+  TigerBeetle ledger or Mojaloop switch/simulator fails, and publish
+  `fare.payment.failed`. The simulated ledger rejects negative balances, so
+  dev payments without a reachable TigerBeetle fail with 502.
+* **Python mutating endpoints require JWTs too**: `POST /api/ml/v1/predict`,
+  `POST /api/optimize/v1/optimize/route`, `POST /v1/carbon/compute`
+  (carbon-analytics, internal-only).
 * Machine consumers: `apikey: h2fleet-partner-demo-key` on `/api/open-data/*` (demo;
   gateway rewrites to citizen-api `/v1/opendata/*`).
 * Every service exposes `GET /healthz` (unauthenticated).
 * Disabled modules return `404 {"error":"module disabled","module":"<id>"}`.
+* Event topics beyond SPEC §3.3: `fare.payment.failed` (payment failure
+  companion event) and `telemetry.raw.dlq` (dead-letter for malformed raw
+  telemetry — envelope shape in `services/rust/telemetry-ingest/README.md`).
+  Schemas + fixtures live in `packages/events/`.
 
 ## toggle-service — `/api/toggles` → :8080
 
@@ -66,8 +81,8 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 | GET | `/v1/passenger/alerts` | public | Active service alerts |
 | GET | `/v1/mobile/config` | public | Bootstrap config for the Expo apps |
 | POST | `/v1/drt/requests` | JWT (`citizen`) | Book DRT shuttle → `drt.requested` |
-| GET | `/v1/drt/requests` | JWT | Own requests (row owner = `sub`) |
-| GET | `/v1/drt/requests/{id}` | public | One request |
+| GET | `/v1/drt/requests` | JWT | Own requests (row owner = `sub`); 401 unauthenticated |
+| GET | `/v1/drt/requests/{id}` | JWT | One request (owner or `operator`); 401 unauthenticated |
 | POST | `/v1/drt/requests/{id}/cancel` | JWT | Cancel a `requested`/`assigned` request (404 unknown, 409 not cancellable) |
 | GET | `/v1/carbon/credits` | public | Issued credits + kg CO2 avoided |
 | GET | `/v1/carbon/credits/summary` | public | Totals across periods |
@@ -78,9 +93,9 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/v1/payments` | JWT (`citizen`) | Initiate fare: Mojaloop transfer + TB ledger entry → `fare.payment.initiated` |
-| GET | `/v1/payments` | public | List payments |
-| GET | `/v1/payments/{id}` | public | Payment detail |
+| POST | `/v1/payments` | JWT (`citizen`) | Initiate fare: Mojaloop transfer + TB ledger entry → `fare.payment.initiated`; 502 + `fare.payment.failed` on ledger/switch failure |
+| GET | `/v1/payments` | JWT | List payments (own for `citizen`, all for `operator`); 401 unauthenticated |
+| GET | `/v1/payments/{id}` | JWT | Payment detail; 401 unauthenticated |
 | GET | `/v1/loyalty/balance` | JWT | Caller loyalty point balance |
 | POST | `/v1/loyalty/redeem` | JWT (`citizen`) | Redeem an offer, body `{"offer_id": "..."}` → `{redeemed_offer_id, points_spent, remaining_points}` |
 | GET | `/v1/marketplace/offers` | public | Loyalty marketplace offers |
@@ -94,13 +109,19 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/v1/predict` | public | body `{"bus_id": "<uuid>"}` → `{bus_id, model_version, feature_window_hours, predictions: [{component, risk_score, predicted_failure_at}]}` |
+| POST | `/v1/predict` | JWT | body `{"bus_id": "<uuid>"}` → `{bus_id, model_version, feature_window_hours, predictions: [{component, risk_score, predicted_failure_at}]}` |
 
 ## route-optimizer — `/api/optimize` → :8091
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/v1/optimize/route` | public | body `{"bus_ids": [...]?, "date": "YYYY-MM-DD"}` → `{date, data_source, solver_status, unassigned_stops, plans: [BusPlan]}` |
+| POST | `/v1/optimize/route` | JWT | body `{"bus_ids": [...]?, "date": "YYYY-MM-DD"}` → `{date, data_source, solver_status, unassigned_stops, plans: [BusPlan]}` |
+
+## carbon-analytics — internal-only (NOT routed via APISIX)
+
+`carbon-analytics` is an internal batch/service component: it is deliberately
+absent from the gateway prefix map (SPEC §3.6) and reachable only in-network
+on :8094. `POST /v1/carbon/compute` requires a service JWT.
 
 ## digital-twin — `/api/twin` → :8092
 
@@ -113,4 +134,6 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 
 `{"error": "<code>", "message": "<human readable>", "module?": "<id>"}` —
 codes: `unauthorized` (401), `forbidden` (403, role/Permify deny),
-`module disabled` (404), `validation` (400), `not_found` (404), `internal` (500).
+`module disabled` (404), `validation` (400), `not_found` (404),
+`internal` (500), `bad_gateway` (502 — ledger/Mojaloop/OpenSearch downstream
+failure).
