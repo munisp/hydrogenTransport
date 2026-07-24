@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/station.status.changed.json",
+  "title": "station.status.changed",
+  "description": "Refueling station status/inventory change (refueling-stations). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "station.status.changed"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "station_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "online",
+            "offline",
+            "maintenance",
+            "degraded"
+          ]
+        },
+        "available_kg": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "station_id",
+        "status",
+        "available_kg"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/toggle.changed.json",
+  "title": "toggle.changed",
+  "description": "Feature toggle flipped; services refresh local toggle caches. CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "toggle.changed"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string",
+          "enum": [
+            "fleet",
+            "infra",
+            "citizen",
+            "commerce"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "module",
+        "domain",
+        "enabled"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

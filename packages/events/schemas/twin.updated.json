@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/twin.updated.json",
+  "title": "twin.updated",
+  "description": "Digital-twin state change notification (hot state lives in Redis twin:<bus_id>). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "twin.updated"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "bus_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "type": "object",
+          "description": "Full twin state snapshot (see digital-twin service)."
+        }
+      },
+      "required": [
+        "bus_id",
+        "ts",
+        "state"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

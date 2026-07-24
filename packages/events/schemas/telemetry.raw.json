@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/telemetry.raw.json",
+  "title": "telemetry.raw",
+  "description": "Raw bus telemetry as published by edge gateways (Fluvio bridge -> Kafka). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "telemetry.raw"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "bus_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "speed_kph": {
+          "type": "number"
+        },
+        "h2_level_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "fuel_cell_kw": {
+          "type": "number"
+        },
+        "battery_soc_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "odometer_km": {
+          "type": "number"
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "lon": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        }
+      },
+      "required": [
+        "bus_id",
+        "ts",
+        "speed_kph",
+        "h2_level_pct",
+        "fuel_cell_kw",
+        "battery_soc_pct",
+        "odometer_km",
+        "lat",
+        "lon"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

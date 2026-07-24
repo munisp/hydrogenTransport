@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/safety.leak.detected.json",
+  "title": "safety.leak.detected",
+  "description": "H2 leak sensor alarm (leak-detection). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "safety.leak.detected"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "incident_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "bus_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "station_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "sensor_id": {
+          "type": "string"
+        },
+        "h2_ppm": {
+          "type": "number"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "location": {
+          "type": "object",
+          "properties": {
+            "lat": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            },
+            "lon": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            }
+          },
+          "required": [
+            "lat",
+            "lon"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "incident_id",
+        "sensor_id",
+        "h2_ppm",
+        "severity"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}
