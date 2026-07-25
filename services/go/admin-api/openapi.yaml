@@ -1,47 +1,46 @@
 openapi: 3.0.3
 info:
   title: H2Fleet admin-api
-  version: "1.0.0"
+  version: 0.1.0
   description: >-
-    Admin & onboarding backend for H2Fleet (port 8085, gateway prefix
-    /api/admin/*). Stakeholder onboarding (Keycloak provisioning), platform
-    user management, unified cross-service KPI aggregation and the NOC/SOC
-    operations feed. Error envelope everywhere: {"error": "<message>"}.
+    Admin & onboarding backend: stakeholder onboarding with Keycloak
+    provisioning, platform user management, unified cross-service KPI
+    aggregation and the NOC/SOC operations feed. Gateway prefix /api/admin/*
+    (proxy-rewrite strips the prefix). Errors use the shared envelope
+    {"error": "<message>"}.
 servers:
-  - url: http://localhost:8085
+  - url: http://admin-api:8085
+tags:
+  - name: onboarding
+  - name: users
+  - name: admin
+  - name: meta
 paths:
   /healthz:
     get:
-      summary: Liveness probe
-      security: []
+      tags: [meta]
+      summary: Liveness/readiness probe (pings Postgres)
+      operationId: healthz
       responses:
         '200':
-          description: Service healthy
+          description: Healthy
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Status' }
+              schema: { $ref: '#/components/schemas/Health' }
         '503':
           description: Postgres unreachable
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Status' }
-  /metrics:
-    get:
-      summary: Prometheus scrape endpoint
-      security: []
-      responses:
-        '200':
-          description: Prometheus exposition format
-          content:
-            text/plain: {}
+              schema: { $ref: '#/components/schemas/Health' }
   /v1/onboarding/citizen:
     post:
-      summary: Citizen self-serve onboarding (public)
+      tags: [onboarding]
+      summary: Citizen self-serve registration (public)
+      operationId: citizenSelfServe
       description: >-
-        Validates the intake, provisions the Keycloak user immediately with
-        the citizen realm role (temporary password + VERIFY_EMAIL /
-        UPDATE_PASSWORD actions email) and records the request as completed.
-      security: []
+        Validates the intake, provisions the Keycloak user with realm role
+        `citizen`, sets a temporary password, sends the VERIFY_EMAIL +
+        UPDATE_PASSWORD actions email and records status=completed.
       requestBody:
         required: true
         content:
@@ -52,17 +51,14 @@ paths:
           description: Account created
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/OnboardingCreateResponse' }
+              schema: { $ref: '#/components/schemas/OnboardingCreated' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/onboarding/{persona}:
     post:
-      summary: Stakeholder onboarding intake (public)
-      description: >-
-        Records an approval-gated onboarding request (status=pending) for
-        driver, operator, station-staff, advertiser, data-partner or
-        gov-viewer.
-      security: []
+      tags: [onboarding]
+      summary: Public onboarding intake (status=pending)
+      operationId: onboardingIntake
       parameters:
         - name: persona
           in: path
@@ -77,7 +73,7 @@ paths:
             schema: { $ref: '#/components/schemas/OnboardingIntake' }
       responses:
         '201':
-          description: Intake recorded
+          description: Intake recorded with status=pending
           content:
             application/json:
               schema:
@@ -85,21 +81,17 @@ paths:
                 properties:
                   request: { $ref: '#/components/schemas/OnboardingRequest' }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '404':
-          description: Unknown persona
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/onboarding:
     get:
-      summary: List onboarding requests
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+      tags: [onboarding]
+      summary: List onboarding requests (platform-admin or operator)
+      operationId: listOnboarding
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: status
           in: query
-          schema:
-            type: string
-            enum: [pending, approved, rejected, completed]
+          schema: { type: string, enum: [pending, approved, rejected, completed] }
         - name: persona
           in: query
           schema:
@@ -107,7 +99,7 @@ paths:
             enum: [citizen, driver, operator, station-staff, advertiser, data-partner, gov-viewer]
       responses:
         '200':
-          description: Requests (newest first)
+          description: Filtered requests (newest first, max 100)
           content:
             application/json:
               schema:
@@ -121,8 +113,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /v1/onboarding/{id}:
     get:
-      summary: Get one onboarding request
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+      tags: [onboarding]
+      summary: Get one onboarding request (platform-admin or operator)
+      operationId: getOnboarding
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -142,12 +136,19 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/onboarding/{id}/approve:
     post:
-      summary: Approve an onboarding request
+      tags: [onboarding]
+      summary: Approve a pending request (platform-admin ONLY)
+      operationId: approveOnboarding
       description: >-
-        Provisions the Keycloak user (persona-mapped realm role, temporary
-        password, actions email) and marks the request completed. Only
-        pending requests can be approved.
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+        Provisions the Keycloak user with the persona's mapped realm role
+        (citizen->citizen, driver->driver, operator->operator,
+        station-staff->operator, advertiser/data-partner/gov-viewer->citizen),
+        sets a temporary password, sends VERIFY_EMAIL + UPDATE_PASSWORD and
+        marks the request completed.
+        Restricted to platform-admin: operators may list/view requests but can
+        never approve (an operator must not be able to mint further operator
+        accounts — SECURITY_AUDIT F3).
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -155,7 +156,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '200':
-          description: Approved (status=completed)
+          description: Completed request
           content:
             application/json:
               schema:
@@ -165,31 +166,30 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Already decided
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/onboarding/{id}/reject:
     post:
-      summary: Reject an onboarding request
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+      tags: [onboarding]
+      summary: Reject a pending request (platform-admin ONLY)
+      operationId: rejectOnboarding
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }
       requestBody:
+        required: false
         content:
           application/json:
             schema:
               type: object
               properties:
-                reason: { type: string }
+                reason: { type: string, description: Stored in meta.reject_reason }
       responses:
         '200':
-          description: Rejected
+          description: Rejected request
           content:
             application/json:
               schema:
@@ -199,27 +199,23 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Already decided
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /v1/users:
     get:
-      summary: List Keycloak users
-      security: [ { bearerAuth: [platform-admin] } ]
+      tags: [users]
+      summary: List users with realm roles (platform-admin)
+      operationId: listUsers
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: role
           in: query
           schema: { type: string }
-          description: Filter by realm role
         - name: q
           in: query
           schema: { type: string }
-          description: Free-text search (username/email)
       responses:
         '200':
-          description: Users with realm roles
+          description: Users
           content:
             application/json:
               schema:
@@ -227,16 +223,15 @@ paths:
                 properties:
                   users:
                     type: array
-                    items: { $ref: '#/components/schemas/AdminUser' }
+                    items: { $ref: '#/components/schemas/User' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
     post:
-      summary: Create a user
-      description: >-
-        Provisions a Keycloak user with a temporary password and sends the
-        VERIFY_EMAIL + UPDATE_PASSWORD actions email.
-      security: [ { bearerAuth: [platform-admin] } ]
+      tags: [users]
+      summary: Create a user (platform-admin)
+      operationId: createUser
+      security: [{ bearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -252,7 +247,7 @@ paths:
                   items: { type: string }
       responses:
         '201':
-          description: Created
+          description: Created (actions email sent)
           content:
             application/json:
               schema:
@@ -265,8 +260,10 @@ paths:
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/users/{id}/roles:
     put:
-      summary: Assign/revoke realm roles
-      security: [ { bearerAuth: [platform-admin] } ]
+      tags: [users]
+      summary: Replace a user's realm roles (platform-admin)
+      operationId: updateUserRoles
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -278,191 +275,119 @@ paths:
           application/json:
             schema:
               type: object
+              required: [roles]
               properties:
-                add: { type: array, items: { type: string } }
-                remove: { type: array, items: { type: string } }
+                roles:
+                  type: array
+                  items: { type: string }
       responses:
-        '200':
-          description: Roles updated
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  id: { type: string }
-                  added: { type: array, items: { type: string } }
-                  removed: { type: array, items: { type: string } }
+        '204': { description: Roles replaced }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/users/{id}/disable:
     post:
-      summary: Disable a user account
-      security: [ { bearerAuth: [platform-admin] } ]
+      tags: [users]
+      summary: Disable a user (platform-admin)
+      operationId: disableUser
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
           required: true
           schema: { type: string }
       responses:
-        '200':
-          description: Disabled
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  id: { type: string }
-                  enabled: { type: boolean, example: false }
+        '204': { description: Disabled }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/users/{id}/enable:
     post:
-      summary: Enable a user account
-      security: [ { bearerAuth: [platform-admin] } ]
+      tags: [users]
+      summary: Re-enable a user (platform-admin)
+      operationId: enableUser
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
           required: true
           schema: { type: string }
       responses:
-        '200':
-          description: Enabled
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  id: { type: string }
-                  enabled: { type: boolean, example: true }
+        '204': { description: Enabled }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/users/{id}/reset-password:
     post:
-      summary: Send a password-reset actions email
-      security: [ { bearerAuth: [platform-admin] } ]
+      tags: [users]
+      summary: Send a password-reset actions email (platform-admin)
+      operationId: resetUserPassword
+      security: [{ bearerAuth: [] }]
       parameters:
         - name: id
           in: path
           required: true
           schema: { type: string }
       responses:
-        '200':
-          description: Email sent
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  id: { type: string }
-                  message: { type: string }
+        '204': { description: Email sent }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/admin/kpis:
     get:
-      summary: Unified cross-domain KPI aggregation
-      description: >-
-        Server-side fan-out across the four domains (fleet, infra, citizen,
-        commerce) plus toggle counts, with a 3s per-source timeout. Failed
-        sources yield a null section and are named in meta.degraded.
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+      tags: [admin]
+      summary: Unified platform KPIs for the admin console (platform-admin or operator)
+      operationId: unifiedKpis
+      security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: Aggregated KPIs
+          description: >-
+            Cross-service rollup. Failed sources are named in `degraded` and
+            `partial` is true; every section is independently nullable.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Kpis' }
+              schema: { $ref: '#/components/schemas/UnifiedKpis' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-  /v1/admin/health:
+  /v1/admin/ops/health:
     get:
-      summary: NOC/SOC health sweep
+      tags: [admin]
+      summary: NOC/SOC service health matrix (platform-admin or operator)
+      operationId: opsHealth
       description: >-
-        Concurrent /healthz sweep of all 10 platform services plus TCP checks
-        of kafka, postgres, redis, opensearch, temporal and tigerbeetle (2s
-        per-check timeout).
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+        Sweeps every service /healthz in parallel (2s per-service timeout) and
+        joins with the latest Alertmanager alerts. `overall` is `ok` only when
+        every service responds healthy; per-service `degraded` marks DB-ping
+        failures.
+      security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: Health checks
+          description: Health matrix
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/HealthResponse' }
+              schema: { $ref: '#/components/schemas/OpsHealth' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-  /v1/admin/alerts:
+  /v1/admin/ops/alerts:
     get:
-      summary: Active alerts (Alertmanager proxy)
-      description: >-
-        Proxies Alertmanager GET /api/v2/alerts verbatim; returns an empty
-        array (200) gracefully when Alertmanager is down.
-      security: [ { bearerAuth: [operator, platform-admin] } ]
+      tags: [admin]
+      summary: Active Alertmanager alerts, proxy (platform-admin or operator)
+      operationId: opsAlerts
+      security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: Alertmanager v2 alert objects
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { type: object }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-  /v1/admin/toggles:
-    get:
-      summary: Enriched feature-toggle list
-      description: >-
-        Toggle-service state joined with the static module registry (domain +
-        owning services), sorted by domain then module.
-      security: [ { bearerAuth: [operator, platform-admin] } ]
-      responses:
-        '200':
-          description: Enriched toggles
+          description: Active alerts
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  toggles:
+                  alerts:
                     type: array
-                    items: { $ref: '#/components/schemas/AdminToggle' }
+                    items: { $ref: '#/components/schemas/Alert' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '502': { $ref: '#/components/responses/BadGateway' }
-  /v1/admin/toggles/{module}:
-    put:
-      summary: Enable/disable a module (platform-admin)
-      description: >-
-        Proxies to toggle-service PUT /v1/toggles/{module} forwarding the
-        caller's JWT; toggle-service owns feature_toggles and re-enforces the
-        platform-admin role.
-      security: [ { bearerAuth: [platform-admin] } ]
-      parameters:
-        - name: module
-          in: path
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [enabled]
-              properties:
-                enabled: { type: boolean }
-      responses:
-        '200':
-          description: Toggle updated (proxied toggle-service response)
-          content:
-            application/json:
-              schema: { type: object }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
         '502': { $ref: '#/components/responses/BadGateway' }
 components:
   securitySchemes:
@@ -470,20 +395,139 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Keycloak RS256 access token; realm roles in realm_access.roles
+  schemas:
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        service: { type: string, example: admin-api }
+        db: { type: string, example: ok, description: 'ok | degraded (ping failed)' }
+    OnboardingIntake:
+      type: object
+      required: [email, display_name]
+      properties:
+        email: { type: string, format: email }
+        display_name: { type: string }
+        org: { type: string, default: '' }
+        meta: { type: object, additionalProperties: true }
+    OnboardingRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        persona: { type: string }
+        email: { type: string }
+        display_name: { type: string }
+        org: { type: string }
+        status: { type: string, enum: [pending, approved, rejected, completed] }
+        keycloak_sub: { type: string }
+        meta: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time, nullable: true }
+        decided_by: { type: string }
+    OnboardingCreated:
+      type: object
+      properties:
+        id: { type: string, description: Keycloak user id }
+        sub: { type: string, description: Keycloak subject (same as id) }
+        persona: { type: string }
+        email: { type: string }
+        status: { type: string, example: completed }
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        roles:
+          type: array
+          items: { type: string }
+    UnifiedKpis:
+      type: object
+      properties:
+        fleet:
+          type: object
+          nullable: true
+          properties:
+            vehicles_total: { type: integer }
+            vehicles_active: { type: integer }
+        stations:
+          type: object
+          nullable: true
+          properties:
+            stations_total: { type: integer }
+            stations_online: { type: integer }
+            available_kg_total: { type: number }
+        payments:
+          type: object
+          nullable: true
+          properties:
+            payments_30d: { type: integer }
+            settled_minor_30d: { type: integer }
+        carbon:
+          type: object
+          nullable: true
+          properties:
+            kg_co2_avoided_total: { type: number }
+        incidents:
+          type: object
+          nullable: true
+          properties:
+            open: { type: integer }
+            open_critical: { type: integer }
+        compliance:
+          type: object
+          nullable: true
+          properties:
+            reports_total: { type: integer }
+            latest_at: { type: string, format: date-time, nullable: true }
+        toggles:
+          type: object
+          nullable: true
+          properties:
+            toggles_total: { type: integer }
+            toggles_enabled: { type: integer }
+        partial: { type: boolean }
+        degraded:
+          type: array
+          items: { type: string }
+    OpsHealth:
+      type: object
+      properties:
+        overall: { type: string, enum: [ok, degraded] }
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              status: { type: string, enum: [healthy, degraded, down] }
+              db: { type: string, nullable: true }
+              error: { type: string, nullable: true }
+        alerts_active: { type: integer }
+        alerts:
+          type: array
+          items: { $ref: '#/components/schemas/Alert' }
+    Alert:
+      type: object
+      properties:
+        name: { type: string }
+        severity: { type: string }
+        service: { type: string }
+        starts_at: { type: string }
   responses:
     BadRequest:
-      description: Bad request
+      description: Validation error
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Unauthorized:
-      description: Missing/invalid bearer token
+      description: Missing/invalid JWT
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Forbidden:
-      description: Missing required realm role
+      description: Missing realm role
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -492,142 +536,17 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
-    BadGateway:
-      description: Upstream (Keycloak/toggle-service) failure
+    Conflict:
+      description: State conflict (e.g. request already decided)
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
-  schemas:
-    Status:
-      type: object
-      properties:
-        status: { type: string, example: ok }
+    BadGateway:
+      description: Downstream failure (Keycloak Admin API / Alertmanager)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
     Error:
       type: object
       properties:
         error: { type: string }
-    OnboardingIntake:
-      type: object
-      required: [email, display_name]
-      properties:
-        email: { type: string, format: email }
-        display_name: { type: string, maxLength: 120 }
-        org: { type: string, maxLength: 200 }
-        meta:
-          type: object
-          additionalProperties: true
-    OnboardingRequest:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        persona:
-          type: string
-          enum: [citizen, driver, operator, station-staff, advertiser, data-partner, gov-viewer]
-        email: { type: string }
-        display_name: { type: string }
-        org: { type: string }
-        status:
-          type: string
-          enum: [pending, approved, rejected, completed]
-        keycloak_sub: { type: string }
-        meta:
-          type: object
-          additionalProperties: true
-        created_at: { type: string, format: date-time }
-        decided_at: { type: string, format: date-time, nullable: true }
-        decided_by: { type: string }
-    OnboardingCreateResponse:
-      type: object
-      properties:
-        request: { $ref: '#/components/schemas/OnboardingRequest' }
-        message: { type: string }
-    AdminUser:
-      type: object
-      properties:
-        id: { type: string }
-        username: { type: string }
-        email: { type: string }
-        first_name: { type: string }
-        last_name: { type: string }
-        enabled: { type: boolean }
-        roles:
-          type: array
-          items: { type: string }
-    Kpis:
-      type: object
-      properties:
-        generated_at: { type: string, format: date-time }
-        fleet:
-          type: object
-          nullable: true
-          properties:
-            vehicles_total: { type: integer }
-            vehicles_available: { type: integer }
-            telemetry_points_per_min: { type: number }
-        infra:
-          type: object
-          nullable: true
-          properties:
-            open_incidents: { type: integer }
-        citizen:
-          type: object
-          nullable: true
-          properties:
-            drt_requests_today: { type: integer }
-            carbon_kg_co2_total: { type: number }
-        commerce:
-          type: object
-          nullable: true
-          properties:
-            payments_30d: { type: integer }
-            revenue_30d_minor: { type: integer, format: int64 }
-            currency: { type: string }
-        toggles:
-          type: object
-          nullable: true
-          properties:
-            modules_enabled: { type: integer }
-            modules_total: { type: integer }
-            domains:
-              type: object
-              additionalProperties:
-                type: object
-                properties:
-                  enabled: { type: integer }
-                  total: { type: integer }
-        meta:
-          type: object
-          properties:
-            partial: { type: boolean }
-            degraded:
-              type: array
-              items: { type: string }
-    HealthCheck:
-      type: object
-      properties:
-        name: { type: string }
-        kind: { type: string, enum: [http, tcp] }
-        target: { type: string }
-        status: { type: string, enum: [up, down] }
-        latency_ms: { type: integer, format: int64 }
-    HealthResponse:
-      type: object
-      properties:
-        generated_at: { type: string, format: date-time }
-        checks:
-          type: array
-          items: { $ref: '#/components/schemas/HealthCheck' }
-        summary:
-          type: object
-          properties:
-            up: { type: integer }
-            down: { type: integer }
-    AdminToggle:
-      type: object
-      properties:
-        module: { type: string }
-        domain: { type: string }
-        enabled: { type: boolean }
-        owning_services:
-          type: array
-          items: { type: string }
