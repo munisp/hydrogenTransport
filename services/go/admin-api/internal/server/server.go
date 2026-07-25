@@ -17,11 +17,14 @@ import (
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/onboarding"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/ops"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/users"
+	"github.com/munisp/hydrogenTransport/services/go/audit-log/pkg/auditclient"
 )
 
 // RoleGate notes:
 //   - onboarding intake + citizen self-serve: public (no JWT)
-//   - onboarding list/get/approve/reject: Keycloak role platform-admin OR operator
+//   - onboarding list/get: Keycloak role platform-admin OR operator
+//   - onboarding approve/reject: platform-admin ONLY (F3 — operators must not
+//     be able to mint further operator accounts)
 //   - user management: platform-admin only
 //   - admin KPI/health/alerts/toggles feed: platform-admin OR operator ("operator+")
 //   - toggle mutation (proxied to toggle-service): platform-admin only
@@ -35,6 +38,9 @@ type Deps struct {
 	Users      *users.Handler
 	KPIs       *kpi.Aggregator
 	Ops        *ops.Handler
+	// Audit emits sensitive mutations to audit-log (nil = disabled; see
+	// docs/INSIDER_THREAT.md). Best-effort — never blocks business logic.
+	Audit *auditclient.Client
 }
 
 // NewRouter builds the admin-api chi router.
@@ -54,19 +60,33 @@ func NewRouter(d Deps) http.Handler {
 		r.Use(d.JWT.RequireAuth, operatorOrAdmin)
 		r.Get("/v1/onboarding", d.Onboarding.List)
 		r.Get("/v1/onboarding/{key}", d.Onboarding.Get)
-		r.Post("/v1/onboarding/{key}/approve", d.Onboarding.Approve)
-		r.Post("/v1/onboarding/{key}/reject", d.Onboarding.Reject)
+	})
+	// Approve/reject provisions (or refuses) Keycloak accounts — including
+	// new operator accounts. Restricted to platform-admin only so a single
+	// operator credential cannot mint further operators (SECURITY_AUDIT F3);
+	// the handler re-checks HasRole("platform-admin") as defense in depth.
+	r.Group(func(r chi.Router) {
+		r.Use(d.JWT.RequireRole("platform-admin"))
+		r.With(d.Audit.Middleware("onboarding.approve", "onboarding_request", "key", false)).
+			Post("/v1/onboarding/{key}/approve", d.Onboarding.Approve)
+		r.With(d.Audit.Middleware("onboarding.reject", "onboarding_request", "key", false)).
+			Post("/v1/onboarding/{key}/reject", d.Onboarding.Reject)
 	})
 
 	// ----------------------------------------------------- user management --
 	r.Group(func(r chi.Router) {
 		r.Use(d.JWT.RequireRole("platform-admin"))
 		r.Get("/v1/users", d.Users.List)
-		r.Post("/v1/users", d.Users.Create)
-		r.Put("/v1/users/{id}/roles", d.Users.UpdateRoles)
-		r.Post("/v1/users/{id}/disable", d.Users.Disable)
-		r.Post("/v1/users/{id}/enable", d.Users.Enable)
-		r.Post("/v1/users/{id}/reset-password", d.Users.ResetPassword)
+		r.With(d.Audit.Middleware("user.create", "user", "", true)).
+			Post("/v1/users", d.Users.Create)
+		r.With(d.Audit.Middleware("user.update_roles", "user", "id", true)).
+			Put("/v1/users/{id}/roles", d.Users.UpdateRoles)
+		r.With(d.Audit.Middleware("user.disable", "user", "id", false)).
+			Post("/v1/users/{id}/disable", d.Users.Disable)
+		r.With(d.Audit.Middleware("user.enable", "user", "id", false)).
+			Post("/v1/users/{id}/enable", d.Users.Enable)
+		r.With(d.Audit.Middleware("user.reset_password", "user", "id", false)).
+			Post("/v1/users/{id}/reset-password", d.Users.ResetPassword)
 	})
 
 	// --------------------------------------------------- admin ops surface --
@@ -79,7 +99,9 @@ func NewRouter(d Deps) http.Handler {
 	})
 	// toggle-service owns feature_toggles; the mutation is proxied with the
 	// caller's JWT and additionally gated to platform-admin here.
-	r.With(d.JWT.RequireRole("platform-admin")).Put("/v1/admin/toggles/{module}", d.Ops.UpdateToggle)
+	r.With(d.JWT.RequireRole("platform-admin"),
+		d.Audit.Middleware("toggle.update", "feature_toggle", "module", true)).
+		Put("/v1/admin/toggles/{module}", d.Ops.UpdateToggle)
 
 	return r
 }

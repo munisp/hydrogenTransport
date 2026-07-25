@@ -242,10 +242,18 @@ func TestApproveGateAndFlow(t *testing.T) {
 	if rec := call(t, router, "POST", "/v1/onboarding/"+id+"/approve", "", env.token(t, "c", "citizen")); rec.Code != http.StatusForbidden {
 		t.Fatalf("citizen approve got %d want 403", rec.Code)
 	}
-	// operator CAN approve.
-	rec = call(t, router, "POST", "/v1/onboarding/"+id+"/approve", "", env.token(t, "o", "operator"))
+	// operator CANNOT approve either (F3): onboarding decisions are
+	// platform-admin only, even though operators may list/view the queue.
+	if rec := call(t, router, "POST", "/v1/onboarding/"+id+"/approve", "", env.token(t, "o", "operator")); rec.Code != http.StatusForbidden {
+		t.Fatalf("operator approve got %d want 403", rec.Code)
+	}
+	if rec := call(t, router, "POST", "/v1/onboarding/"+id+"/reject", `{"reason":"x"}`, env.token(t, "o", "operator")); rec.Code != http.StatusForbidden {
+		t.Fatalf("operator reject got %d want 403", rec.Code)
+	}
+	// platform-admin CAN approve.
+	rec = call(t, router, "POST", "/v1/onboarding/"+id+"/approve", "", env.token(t, "a", "platform-admin"))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("operator approve got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("platform-admin approve got %d: %s", rec.Code, rec.Body.String())
 	}
 	var decided struct {
 		Request struct {
@@ -259,7 +267,7 @@ func TestApproveGateAndFlow(t *testing.T) {
 	if decided.Request.Status != "completed" {
 		t.Fatalf("status = %q want completed", decided.Request.Status)
 	}
-	if decided.Request.DecidedBy != "o" {
+	if decided.Request.DecidedBy != "a" {
 		t.Fatalf("decided_by should be the token sub, got %q", decided.Request.DecidedBy)
 	}
 }
