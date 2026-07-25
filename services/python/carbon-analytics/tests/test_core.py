@@ -12,7 +12,13 @@ import json
 import pytest
 
 from app.config import settings
-from app.core import PeriodResult, build_envelope, compute_period, period_bounds
+from app.core import (
+    PeriodResult,
+    build_envelope,
+    compute_period,
+    credit_id_for_period,
+    period_bounds,
+)
 
 
 class TestPeriodBounds:
@@ -106,6 +112,20 @@ class _FakePool:
         return _FakeAcquire(self.conn)
 
 
+class TestCreditId:
+    def test_deterministic_per_period(self):
+        # A recompute must reissue the SAME credit identity so downstream
+        # consumers reconcile the event with the replaced issuance.
+        assert credit_id_for_period("2026-06") == credit_id_for_period("2026-06")
+        assert credit_id_for_period("2026-06") != credit_id_for_period("2026-07")
+
+    def test_is_valid_uuid(self):
+        import uuid as _uuid
+
+        parsed = _uuid.UUID(credit_id_for_period("2026-06"))
+        assert parsed.version == 5
+
+
 class TestComputePeriod:
     def test_compute_logic_and_idempotent_write(self):
         # 10_000 fleet-km * 1.2 kg/km = 12_000 kg CO2 avoided = 12 credits.
@@ -116,19 +136,35 @@ class TestComputePeriod:
         assert result.bus_count == 50
         assert result.kg_co2_avoided == pytest.approx(12_000.0)
         assert result.credits == pytest.approx(12.0)
-        assert result.credit_id and not result.event_published
+        assert result.credit_id == credit_id_for_period("2026-06")
+        assert not result.event_published
 
         # The distance query is scoped to the period window.
         start, end = period_bounds("2026-06")
         assert pool.distance_args == (start, end)
 
-        # Idempotent write: delete-then-insert in ONE transaction.
+        # Idempotent write: a SINGLE INSERT ... ON CONFLICT (period) DO
+        # UPDATE — race-safe against the UNIQUE(period) index (0005), so a
+        # concurrent compute can never double-issue.
         stmts = pool.conn.statements
-        assert len(stmts) == 2
-        assert "DELETE FROM citizen.carbon_credits WHERE period" in stmts[0][0]
-        assert stmts[0][1] == ("2026-06",)
-        assert "INSERT INTO citizen.carbon_credits" in stmts[1][0]
-        assert stmts[1][1][1:] == ("2026-06", 12_000.0, 12.0)
+        assert len(stmts) == 1
+        sql = stmts[0][0]
+        assert "INSERT INTO citizen.carbon_credits" in sql
+        assert "ON CONFLICT (period) DO UPDATE" in sql
+        assert "DELETE" not in sql
+        assert stmts[0][1] == (credit_id_for_period("2026-06"), "2026-06", 12_000.0, 12.0)
+
+    def test_recompute_reissues_same_credit_id(self):
+        pool = _FakePool(total_km=5_000.0, bus_count=40)
+        first = asyncio.run(compute_period(pool, "2026-06", publish=False))
+        second = asyncio.run(compute_period(pool, "2026-06", publish=False))
+        assert first.credit_id == second.credit_id
+
+    def test_envelope_carries_reconcilable_credit_id(self):
+        pool = _FakePool(total_km=5_000.0, bus_count=40)
+        result = asyncio.run(compute_period(pool, "2026-06", publish=False))
+        env = json.loads(build_envelope(result))
+        assert env["data"]["credit_id"] == credit_id_for_period("2026-06")
 
     def test_zero_distance_period(self):
         pool = _FakePool(total_km=0.0, bus_count=0)
