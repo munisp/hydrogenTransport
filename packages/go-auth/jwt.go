@@ -187,6 +187,28 @@ func (m *Middleware) RequireRole(role string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireAnyRole rejects requests without a valid JWT carrying at least one
+// of the given realm roles.
+func (m *Middleware) RequireAnyRole(roles ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return m.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := ClaimsFromContext(r.Context())
+			ok := false
+			for _, role := range roles {
+				if hasRole(claims, role) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				writeError(w, http.StatusForbidden, "missing required realm role (any of): "+strings.Join(roles, ", "))
+				return
+			}
+			next.ServeHTTP(w, r)
+		}))
+	}
+}
+
 func (m *Middleware) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m.jwksURL == "" {

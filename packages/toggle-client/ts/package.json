@@ -18,6 +18,9 @@
   },
   "devDependencies": {
     "typescript": "5.4.5",
-    "vitest": "1.6.0"
+    "vitest": "3.0.5"
+  },
+  "overrides": {
+    "esbuild": "0.25.0"
   }
 }
