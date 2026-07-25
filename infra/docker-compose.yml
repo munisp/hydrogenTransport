@@ -8,6 +8,9 @@
 #   fluvio                  optional edge streaming (alternative telemetry stream path)
 #   etl                     one-shot lakehouse ETL runner
 #   waf                     openappsec agent sidecar for APISIX (experimental)
+#   ml                      MLflow tracking server (also in `all`; UI :5000 loopback)
+#   graph                   optional Neo4j graph DB for ml-platform graph features
+#   ray                     optional Ray cluster (head + worker) for distributed ML
 #
 # Secrets: every credential below uses ${VAR:-dev-default} interpolation.
 # Copy .env.example (repo root) to .env to override; the defaults are DEV ONLY.
@@ -37,6 +40,8 @@ volumes:
   keycloak_realm:        # rendered (secret-substituted) Keycloak realm import
   prometheus_data:
   grafana_data:
+  ml_artifacts:          # ml-platform MODEL_ARTIFACTS_DIR (/artifacts)
+  neo4j_data:            # optional `graph` profile
 
 x-h2-env: &h2-env
   DATABASE_URL: postgres://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/h2fleet?sslmode=disable
@@ -564,7 +569,8 @@ services:
       sh -c "mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
              mc mb -p local/h2-lakehouse || true;
              mc mb -p local/h2-open-data || true;
-             mc mb -p local/h2-backups || true"
+             mc mb -p local/h2-backups || true;
+             mc mb -p local/lakehouse || true"   # MLflow default-artifact-root s3://lakehouse/mlflow
     depends_on:
       minio:
         condition: service_healthy
@@ -993,10 +999,14 @@ services:
       <<: *h2-env
       PORT: "8090"
       MODEL_DIR: /app/models
+      MODEL_ARTIFACTS_DIR: /artifacts
+    volumes:
+      - ml_artifacts:/artifacts
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
       migrator: { condition: service_completed_successfully }
+      ml-platform: { condition: service_started }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8090/healthz >/dev/null || exit 1"]
       interval: 15s
@@ -1104,3 +1114,198 @@ services:
     ports: ["3000:80"]
     depends_on:
       apisix: { condition: service_started }
+
+  # ---------------------------------------------------------------------------
+  # admin-api (Go, :8085) — platform admin control plane: organization/user
+  # onboarding via the Keycloak Admin REST API, alert routing via Alertmanager.
+  # Delivered by a parallel workstream; wired here against its env contract
+  # (KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID / KEYCLOAK_ADMIN_CLIENT_SECRET
+  # / ALERTMANAGER_URL + the shared x-h2-env set).
+  # NOTE: the confidential Keycloak client named by KEYCLOAK_ADMIN_CLIENT_ID
+  # (default `h2fleet-admin-api`) must exist in the h2fleet realm with a
+  # service account granted the realm-management roles it needs — the realm
+  # import is owned by another workstream; create the client manually in the
+  # admin console (http://localhost:8180/admin) until then.
+  # ---------------------------------------------------------------------------
+  admin-api:
+    build:
+      context: ..
+      dockerfile: services/go/admin-api/Dockerfile
+    container_name: h2-admin-api
+    profiles: ["apps", "all"]
+    networks: [h2net]
+    ports: ["18085:8085"]
+    environment:
+      <<: *h2-env
+      PORT: "8085"
+      KEYCLOAK_ADMIN_URL: http://keycloak:8080
+      KEYCLOAK_ADMIN_CLIENT_ID: ${KEYCLOAK_ADMIN_CLIENT_ID:-h2fleet-admin-api}
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-h2fleet-admin-api-secret-change-me}
+      ALERTMANAGER_URL: http://alertmanager:9093
+    depends_on:
+      keycloak: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      toggle-service: { condition: service_started }
+      alertmanager: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # ---------------------------------------------------------------------------
+  # ml-platform (Python, :8095) — ML control plane: experiment tracking via
+  # MLflow, model artifacts on a dedicated volume, optional Neo4j graph
+  # features. Delivered by a parallel workstream; wired here against its env
+  # contract (MLFLOW_TRACKING_URI / MODEL_ARTIFACTS_DIR / NEO4J_URI optional +
+  # the shared x-h2-env set).
+  # MLflow itself runs under the `ml` (or `all`) profile — `make ml`; under the
+  # plain `apps` profile the tracking URI simply has nothing to talk to.
+  # ---------------------------------------------------------------------------
+  ml-platform:
+    build:
+      context: ..
+      dockerfile: services/python/ml-platform/Dockerfile
+    container_name: h2-ml-platform
+    profiles: ["apps", "all"]
+    networks: [h2net]
+    ports: ["18095:8095"]
+    environment:
+      <<: *h2-env
+      PORT: "8095"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_ARTIFACTS_DIR: /artifacts
+      # Optional: only resolvable when the `graph` profile (neo4j) is up.
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j-dev-pass-change-me}
+    volumes:
+      - ml_artifacts:/artifacts
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+      # mlflow lives in the ml/all profiles; required:false keeps the `apps`
+      # profile valid when mlflow is not part of the active compose model.
+      mlflow: { condition: service_started, required: false }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8095/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # ===========================================================================
+  # MLflow tracking server (profiles: ml, all) — `make ml`.
+  # Backend store: dedicated `mlflow` database on the MAIN Postgres, created
+  # idempotently by mlflow-db-init (same one-shot pattern as permify-db-init —
+  # infra/sql is owned by another workstream, so we cannot add it to the init
+  # scripts). Artifacts: s3://lakehouse/mlflow on MinIO (bucket created by
+  # minio-init; credentials are the MINIO_ROOT_* pair).
+  # UI: http://127.0.0.1:5000 (loopback only).
+  # ===========================================================================
+  mlflow-db-init:
+    image: postgres:16-alpine
+    container_name: h2-mlflow-db-init
+    profiles: ["ml", "all"]
+    networks: [h2net]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+    entrypoint: >
+      sh -c "psql -h postgres -U h2 -d h2fleet -tc
+             \"SELECT 1 FROM pg_database WHERE datname='mlflow'\" | grep -q 1
+             || psql -h postgres -U h2 -d h2fleet -c 'CREATE DATABASE mlflow'"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    container_name: h2-mlflow
+    profiles: ["ml", "all"]
+    networks: [h2net]
+    ports:
+      - "127.0.0.1:5000:5000"
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/mlflow
+      --default-artifact-root s3://lakehouse/mlflow
+      --host 0.0.0.0 --port 5000
+    environment:
+      # S3-compatible artifact store = MinIO (boto3 picks up the AWS_* pair).
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-h2admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-h2adminpass}
+      AWS_DEFAULT_REGION: us-east-1
+    depends_on:
+      mlflow-db-init: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
+    healthcheck:
+      # /health is MLflow's built-in liveness endpoint (returns 200 "OK").
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health').status == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ===========================================================================
+  # OPTIONAL profile: graph — Neo4j 5 community, backing ml-platform's
+  # optional graph features (NEO4J_URI=bolt://neo4j:7687). `make graph`.
+  # Browser: http://127.0.0.1:7474 (user neo4j / NEO4J_PASSWORD).
+  # ===========================================================================
+  neo4j:
+    image: neo4j:5-community
+    container_name: h2-neo4j
+    profiles: ["graph"]
+    networks: [h2net]
+    ports:
+      - "127.0.0.1:7474:7474"   # browser / HTTP
+      - "127.0.0.1:7687:7687"   # bolt
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j-dev-pass-change-me}
+      NEO4J_server_memory_heap_max__size: 512m
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      # Password is parsed out of NEO4J_AUTH (neo4j/<password>) so we do not
+      # need a second env var (arbitrary NEO4J_* vars are parsed as server
+      # config by the Neo4j entrypoint and unknown ones fail startup).
+      test: ["CMD-SHELL", "pw=$${NEO4J_AUTH#neo4j/}; cypher-shell -a bolt://localhost:7687 -u neo4j -p \"$$pw\" 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 45s
+
+  # ===========================================================================
+  # OPTIONAL profile: ray — small Ray cluster (head + one worker) for
+  # distributed ML workloads complementing ml-platform. `make ray`.
+  # Dashboard: http://127.0.0.1:8265  (GCS on ray-head:6379 in-network)
+  # ===========================================================================
+  ray-head:
+    image: rayproject/ray:2.34.0-py311
+    container_name: h2-ray-head
+    profiles: ["ray"]
+    networks: [h2net]
+    ports:
+      - "127.0.0.1:8265:8265"    # dashboard
+      - "127.0.0.1:10001:10001"  # ray client server
+    command: ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0", "--block"]
+    shm_size: "1gb"   # Ray object store lives in /dev/shm
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8265/api/version').status == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  ray-worker:
+    image: rayproject/ray:2.34.0-py311
+    container_name: h2-ray-worker
+    profiles: ["ray"]
+    networks: [h2net]
+    command: ["ray", "start", "--address=ray-head:6379", "--block"]
+    shm_size: "1gb"
+    depends_on:
+      ray-head: { condition: service_healthy }
