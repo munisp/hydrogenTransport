@@ -23,6 +23,7 @@ import (
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/ops"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/server"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/users"
+	"github.com/munisp/hydrogenTransport/services/go/audit-log/pkg/auditclient"
 )
 
 func main() {
@@ -81,6 +82,9 @@ func main() {
 		Users:      users.NewHandler(kc, log),
 		KPIs:       agg,
 		Ops:        opsHandler,
+		// Insider-threat audit emission (docs/INSIDER_THREAT.md). Disabled
+		// (noop) unless AUDIT_LOG_URL is set.
+		Audit: auditclient.FromEnv("admin-api", log, os.Getenv),
 	})
 
 	srv := &http.Server{
