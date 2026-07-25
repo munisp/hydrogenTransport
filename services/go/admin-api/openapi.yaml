@@ -261,7 +261,7 @@ paths:
   /v1/users/{id}/roles:
     put:
       tags: [users]
-      summary: Replace a user's realm roles (platform-admin)
+      summary: Assign/revoke realm roles (platform-admin)
       operationId: updateUserRoles
       security: [{ bearerAuth: [] }]
       parameters:
@@ -275,13 +275,24 @@ paths:
           application/json:
             schema:
               type: object
-              required: [roles]
               properties:
-                roles:
+                add:
+                  type: array
+                  items: { type: string }
+                remove:
                   type: array
                   items: { type: string }
       responses:
-        '204': { description: Roles replaced }
+        '200':
+          description: Roles updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  added: { type: array, items: { type: string } }
+                  removed: { type: array, items: { type: string } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -292,102 +303,175 @@ paths:
       summary: Disable a user (platform-admin)
       operationId: disableUser
       security: [{ bearerAuth: [] }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       responses:
-        '204': { description: Disabled }
+        '200':
+          description: Disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  enabled: { type: boolean, enum: [false] }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/users/{id}/enable:
     post:
       tags: [users]
-      summary: Re-enable a user (platform-admin)
+      summary: Enable a user (platform-admin)
       operationId: enableUser
       security: [{ bearerAuth: [] }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       responses:
-        '204': { description: Enabled }
+        '200':
+          description: Enabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  enabled: { type: boolean, enum: [true] }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/users/{id}/reset-password:
     post:
       tags: [users]
-      summary: Send a password-reset actions email (platform-admin)
-      operationId: resetUserPassword
+      summary: Send password-reset actions email (platform-admin)
+      operationId: resetPassword
       security: [{ bearerAuth: [] }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       responses:
-        '204': { description: Email sent }
+        '200':
+          description: Email sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  message: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '502': { $ref: '#/components/responses/BadGateway' }
   /v1/admin/kpis:
     get:
       tags: [admin]
-      summary: Unified platform KPIs for the admin console (platform-admin or operator)
-      operationId: unifiedKpis
-      security: [{ bearerAuth: [] }]
-      responses:
-        '200':
-          description: >-
-            Cross-service rollup. Failed sources are named in `degraded` and
-            `partial` is true; every section is independently nullable.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/UnifiedKpis' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-  /v1/admin/ops/health:
-    get:
-      tags: [admin]
-      summary: NOC/SOC service health matrix (platform-admin or operator)
-      operationId: opsHealth
+      summary: Unified cross-service KPI aggregation (platform-admin or operator)
+      operationId: getKpis
       description: >-
-        Sweeps every service /healthz in parallel (2s per-service timeout) and
-        joins with the latest Alertmanager alerts. `overall` is `ok` only when
-        every service responds healthy; per-service `degraded` marks DB-ping
-        failures.
+        Server-side fan-out (3s per-source timeout). Failed sources degrade
+        partially: their section is null and named in meta.degraded.
       security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: Health matrix
+          description: Aggregated KPIs
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/OpsHealth' }
+              schema: { $ref: '#/components/schemas/KpiResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-  /v1/admin/ops/alerts:
+  /v1/admin/health:
     get:
       tags: [admin]
-      summary: Active Alertmanager alerts, proxy (platform-admin or operator)
-      operationId: opsAlerts
+      summary: Health sweep of all services + middleware (platform-admin or operator)
+      operationId: getHealth
       security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: Active alerts
+          description: Sweep results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthSweep' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/admin/alerts:
+    get:
+      tags: [admin]
+      summary: Active alerts (Alertmanager proxy; explicit degraded envelope on failure)
+      operationId: getAlerts
+      description: >-
+        Proxies Alertmanager /api/v2/alerts verbatim. When Alertmanager is
+        unreachable or errors, returns {"alerts": [], "degraded": true,
+        "source": "alertmanager"} so an outage is never mistaken for "no
+        active alerts".
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Alertmanager /api/v2/alerts payload (verbatim), or the
+            degraded envelope when Alertmanager is unavailable
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: { type: object }
+                  - type: object
+                    properties:
+                      alerts:
+                        type: array
+                        items: { type: object }
+                      degraded: { type: boolean }
+                      source: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/admin/toggles:
+    get:
+      tags: [admin]
+      summary: Enriched feature-toggle list (platform-admin or operator)
+      operationId: listAdminToggles
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Toggles with domain + owning services
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  alerts:
+                  toggles:
                     type: array
-                    items: { $ref: '#/components/schemas/Alert' }
+                    items: { $ref: '#/components/schemas/ToggleView' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+  /v1/admin/toggles/{module}:
+    put:
+      tags: [admin]
+      summary: Flip a module toggle (platform-admin; proxied to toggle-service with caller JWT)
+      operationId: updateAdminToggle
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: module
+          in: path
+          required: true
+          schema: { type: string, description: One of the 20 module ids (SPEC §3.1) }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: toggle-service response (proxied)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  module: { type: string }
+                  enabled: { type: boolean }
+                  domain: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '502': { $ref: '#/components/responses/BadGateway' }
 components:
   securitySchemes:
@@ -399,122 +483,129 @@ components:
     Health:
       type: object
       properties:
-        status: { type: string, example: ok }
-        service: { type: string, example: admin-api }
-        db: { type: string, example: ok, description: 'ok | degraded (ping failed)' }
+        status: { type: string, enum: [ok, unhealthy] }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
     OnboardingIntake:
       type: object
       required: [email, display_name]
       properties:
         email: { type: string, format: email }
-        display_name: { type: string }
-        org: { type: string, default: '' }
-        meta: { type: object, additionalProperties: true }
+        display_name: { type: string, maxLength: 120 }
+        org: { type: string, maxLength: 200 }
+        meta: { type: object }
     OnboardingRequest:
       type: object
       properties:
         id: { type: string, format: uuid }
-        persona: { type: string }
+        persona:
+          type: string
+          enum: [citizen, driver, operator, station-staff, advertiser, data-partner, gov-viewer]
         email: { type: string }
         display_name: { type: string }
         org: { type: string }
         status: { type: string, enum: [pending, approved, rejected, completed] }
-        keycloak_sub: { type: string }
-        meta: { type: object, additionalProperties: true }
+        keycloak_sub: { type: string, description: Keycloak user id once provisioned }
+        meta: { type: object }
         created_at: { type: string, format: date-time }
         decided_at: { type: string, format: date-time, nullable: true }
-        decided_by: { type: string }
+        decided_by: { type: string, description: JWT sub of the approver, or "self-service" }
     OnboardingCreated:
       type: object
       properties:
-        id: { type: string, description: Keycloak user id }
-        sub: { type: string, description: Keycloak subject (same as id) }
-        persona: { type: string }
-        email: { type: string }
-        status: { type: string, example: completed }
+        request: { $ref: '#/components/schemas/OnboardingRequest' }
+        message: { type: string }
     User:
       type: object
       properties:
         id: { type: string }
+        username: { type: string }
         email: { type: string }
-        name: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
         enabled: { type: boolean }
         roles:
           type: array
           items: { type: string }
-    UnifiedKpis:
+    KpiResponse:
       type: object
       properties:
+        generated_at: { type: string, format: date-time }
         fleet:
-          type: object
           nullable: true
+          type: object
           properties:
             vehicles_total: { type: integer }
-            vehicles_active: { type: integer }
-        stations:
-          type: object
+            vehicles_available: { type: integer }
+            telemetry_points_per_min: { type: number }
+        infra:
           nullable: true
+          type: object
           properties:
-            stations_total: { type: integer }
-            stations_online: { type: integer }
-            available_kg_total: { type: number }
-        payments:
-          type: object
+            open_incidents: { type: integer }
+        citizen:
           nullable: true
+          type: object
+          properties:
+            drt_requests_today: { type: integer }
+            carbon_kg_co2_total: { type: number }
+        commerce:
+          nullable: true
+          type: object
           properties:
             payments_30d: { type: integer }
-            settled_minor_30d: { type: integer }
-        carbon:
-          type: object
-          nullable: true
-          properties:
-            kg_co2_avoided_total: { type: number }
-        incidents:
-          type: object
-          nullable: true
-          properties:
-            open: { type: integer }
-            open_critical: { type: integer }
-        compliance:
-          type: object
-          nullable: true
-          properties:
-            reports_total: { type: integer }
-            latest_at: { type: string, format: date-time, nullable: true }
+            revenue_30d_minor: { type: integer, format: int64 }
+            currency: { type: string }
         toggles:
-          type: object
           nullable: true
+          type: object
           properties:
-            toggles_total: { type: integer }
-            toggles_enabled: { type: integer }
-        partial: { type: boolean }
-        degraded:
-          type: array
-          items: { type: string }
-    OpsHealth:
+            modules_enabled: { type: integer }
+            modules_total: { type: integer }
+            domains:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  enabled: { type: integer }
+                  total: { type: integer }
+        meta:
+          type: object
+          properties:
+            partial: { type: boolean }
+            degraded:
+              type: array
+              items: { type: string, enum: [fleet, infra, citizen, commerce, toggles] }
+    HealthSweep:
       type: object
       properties:
-        overall: { type: string, enum: [ok, degraded] }
-        services:
+        generated_at: { type: string, format: date-time }
+        checks:
           type: array
           items:
             type: object
             properties:
               name: { type: string }
-              status: { type: string, enum: [healthy, degraded, down] }
-              db: { type: string, nullable: true }
-              error: { type: string, nullable: true }
-        alerts_active: { type: integer }
-        alerts:
-          type: array
-          items: { $ref: '#/components/schemas/Alert' }
-    Alert:
+              kind: { type: string, enum: [http, tcp] }
+              target: { type: string }
+              status: { type: string, enum: [up, down] }
+              latency_ms: { type: integer, format: int64 }
+        summary:
+          type: object
+          properties:
+            up: { type: integer }
+            down: { type: integer }
+    ToggleView:
       type: object
       properties:
-        name: { type: string }
-        severity: { type: string }
-        service: { type: string }
-        starts_at: { type: string }
+        module: { type: string }
+        domain: { type: string, enum: [fleet, infra, citizen, commerce, unknown] }
+        enabled: { type: boolean }
+        owning_services:
+          type: array
+          items: { type: string }
   responses:
     BadRequest:
       description: Validation error
@@ -522,12 +613,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Unauthorized:
-      description: Missing/invalid JWT
+      description: Missing/invalid bearer token
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Forbidden:
-      description: Missing realm role
+      description: Missing required realm role
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -537,16 +628,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Conflict:
-      description: State conflict (e.g. request already decided)
+      description: Request already decided
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     BadGateway:
-      description: Downstream failure (Keycloak Admin API / Alertmanager)
+      description: Upstream (Keycloak / toggle-service) failure
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
-    Error:
-      type: object
-      properties:
-        error: { type: string }
