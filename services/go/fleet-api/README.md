@@ -9,13 +9,16 @@ a disabled module returns **404** (fail-closed via the toggle-client SDK).
 | Method | Path | Module gate | Auth |
 |--------|------|-------------|------|
 | GET  | `/v1/vehicles` | `telematics` | — |
-| GET  | `/v1/vehicles/{id}` | `telematics` | — |
-| GET  | `/v1/vehicles/{id}/telemetry?from&to` (RFC3339, default last 24h) | `telematics` | — |
-| GET  | `/v1/vehicles/{id}/twin` (proxy → digital-twin) | `digital-twin` | — |
-| GET  | `/v1/maintenance/predictions?bus_id=` | `predictive-maintenance` | — |
+| GET  | `/v1/telemetry/latest` (latest reading per bus) | `telematics` | — |
+| GET  | `/v1/maintenance/predictions?bus_id=&min_risk=` | `predictive-maintenance` | — |
 | GET  | `/v1/fuel/levels` (latest H2 % + rule-based range estimate, 8 kg/100 km) | `fuel-monitoring` | — |
-| POST | `/v1/optimize/route` (proxy → route-optimizer) | `route-energy-optimizer` | Keycloak JWT |
 | GET  | `/healthz` | — | — |
+
+Removed orphan routes (docs/BUSINESS_LOGIC_AUDIT.md — zero PWA/mobile
+callers): `GET /v1/vehicles/{id}`, `GET /v1/vehicles/{id}/telemetry`, and
+the digital-twin/route-optimizer proxies (`/v1/vehicles/{id}/twin`,
+`/v1/optimize/route`). Twin and optimizer calls go directly to those
+services via APISIX (`/api/twin/*`, `/api/optimize/*`).
 
 ## Configuration (env, SPEC §3.5)
 
@@ -24,9 +27,7 @@ a disabled module returns **404** (fail-closed via the toggle-client SDK).
 | `PORT` | `8081` | |
 | `DATABASE_URL` | — | required (Postgres + PostGIS/TimescaleDB) |
 | `TOGGLE_URL` | — | toggle-service base URL; fail-closed when unset |
-| `KEYCLOAK_ISSUER` | — | required for POST routes |
-| `TWIN_URL` | `http://digital-twin:8092` | digital-twin upstream |
-| `OPTIMIZER_URL` | `http://route-optimizer:8091` | route-optimizer upstream |
+| `KEYCLOAK_ISSUER` | — | reserved (no authenticated routes currently) |
 
 ## Run
 
