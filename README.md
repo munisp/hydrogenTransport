@@ -132,3 +132,9 @@ not implemented — the telemetry simulator feeds `telemetry.raw` locally.
 
 All contracts (module ids, toggle API, topics, schemas, ports, gateway map) are
 pinned in [SPEC.md](SPEC.md) — the single source of truth.
+
+
+> **Note — JS lockfiles:** `package-lock.json` files for `apps/pwa`, `apps/mobile` and
+> `packages/toggle-client/ts` are intentionally not committed (generated artifacts).
+> Regenerate with `npm install --package-lock-only` in each directory; builds and CI
+> fall back to `npm install` when no lockfile is present.

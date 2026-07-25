@@ -150,3 +150,9 @@ across all profiles. CI intentionally does not push images — see
 - Restrict APISIX `allow_admin` CIDR; put OpenAppSec in `prevent` mode.
 - Replace Mojaloop simulator with the real switch (mojaloop/helm).
 - Replace k8s `base/secret.yaml` with an external secrets source.
+
+
+> **Note — JS lockfiles:** `package-lock.json` files for `apps/pwa`, `apps/mobile` and
+> `packages/toggle-client/ts` are intentionally not committed (generated artifacts).
+> Regenerate with `npm install --package-lock-only` in each directory; builds and CI
+> fall back to `npm install` when no lockfile is present.
