@@ -7,6 +7,7 @@ package ledger
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -14,6 +15,11 @@ import (
 	tb_types "github.com/tigerbeetle/tigerbeetle-go/pkg/types"
 	"go.uber.org/zap"
 )
+
+// ErrInsufficientFunds is returned (wrapped) by Transfer when the debit
+// account does not hold enough funds. Handlers map it to 402; it is never a
+// panic and never produces a negative balance.
+var ErrInsufficientFunds = errors.New("insufficient funds")
 
 // LedgerID is the single TigerBeetle ledger used by H2Fleet.
 const LedgerID uint32 = 1
@@ -28,9 +34,17 @@ const (
 // Well-known platform accounts (SPEC §3.4).
 const (
 	OperatorRevenueAccount uint64 = 2001
-	EnergyTradeAccount     uint64 = 3001
-	CarbonFundAccount      uint64 = 4001
+	// RiderFundingAccount is the platform cash-in source for wallet top-ups
+	// (dev/simulated funding path; a real Mojaloop cash-in flow will replace
+	// it). It intentionally has no balance cap.
+	RiderFundingAccount uint64 = 2002
+	EnergyTradeAccount  uint64 = 3001
+	CarbonFundAccount   uint64 = 4001
 )
+
+// isRiderWallet reports whether id belongs to the per-rider wallet range
+// (1xxx, allocated sequentially from 1001 via commerce.rider_accounts).
+func isRiderWallet(id uint64) bool { return id >= 1001 && id < 2000 }
 
 // Rider wallet accounts (1xxx) are assigned per rider via the persisted
 // commerce.rider_accounts mapping (see handlers.riderAccount) — never derived
@@ -81,6 +95,7 @@ func New(addr string, log *zap.Logger) (Ledger, error) {
 		code uint16
 	}{
 		{OperatorRevenueAccount, CodeFare},
+		{RiderFundingAccount, CodeFare},
 		{EnergyTradeAccount, CodeEnergy},
 		{CarbonFundAccount, CodeCarbon},
 	} {
@@ -99,10 +114,22 @@ type tbLedger struct {
 }
 
 func (l *tbLedger) EnsureAccount(id uint64, code uint16) error {
+	// Rider wallets are created with debits_must_not_exceed_credits so an
+	// unfunded wallet cannot spend: TigerBeetle rejects the overdraft
+	// (TransferExceedsCredits) instead of letting the balance go negative.
+	// The energy-trade clearing account gets the same flag: revenue may not
+	// be conjured from an unfunded clearing account — it must be pre-funded
+	// by an external buyer settlement (SPEC §3.8 workflow); until then an
+	// unfunded trade is rejected and mapped to 402 by the handler.
+	var flags uint16
+	if isRiderWallet(id) || id == EnergyTradeAccount {
+		flags = tb_types.AccountFlags{DebitsMustNotExceedCredits: true}.ToUint16()
+	}
 	results, err := l.client.CreateAccounts([]tb_types.Account{{
 		ID:     tb_types.ToUint128(id),
 		Ledger: LedgerID,
 		Code:   code,
+		Flags:  flags,
 	}})
 	if err != nil {
 		return err
@@ -136,9 +163,14 @@ func (l *tbLedger) Transfer(id tb_types.Uint128, debit, credit, amount uint64, c
 	for _, res := range results {
 		// TransferExists means an identical transfer was already posted
 		// (retry-safe); treat as success with the same ID.
-		if res.Result != tb_types.TransferExists {
-			return "", fmt.Errorf("transfer failed: %s", res.Result.String())
+		if res.Result == tb_types.TransferExists {
+			continue
 		}
+		if res.Result == tb_types.TransferExceedsCredits {
+			// Overdraft rejection on a debits_must_not_exceed_credits wallet.
+			return "", fmt.Errorf("debit account %d: %w", debit, ErrInsufficientFunds)
+		}
+		return "", fmt.Errorf("transfer failed: %s", res.Result.String())
 	}
 	return id.String(), nil
 }
@@ -185,8 +217,8 @@ func (s *simulated) Transfer(id tb_types.Uint128, debit, credit, amount uint64, 
 		s.balances[credit] = 0
 	}
 	if s.balances[debit]-int64(amount) < 0 {
-		return "", fmt.Errorf("transfer rejected: debit account %d would go negative (balance %d, amount %d)",
-			debit, s.balances[debit], amount)
+		return "", fmt.Errorf("debit account %d (balance %d, amount %d): %w",
+			debit, s.balances[debit], amount, ErrInsufficientFunds)
 	}
 	s.balances[debit] -= int64(amount)
 	s.balances[credit] += int64(amount)
