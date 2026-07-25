@@ -1,0 +1,129 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet audit-log
+  version: 0.1.0
+  description: >-
+    Append-only, SHA-256 hash-chained audit trail (insider-threat program).
+    Ingest is service-to-service (X-Audit-Token shared secret or JWT); reads
+    and chain verification require the platform-admin realm role. Gateway
+    prefix /api/audit/* (proxy-rewrite strips the prefix). Errors use the
+    shared envelope {"error": "<message>"}.
+servers:
+  - url: http://audit-log:8086
+tags:
+  - name: audit
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe (pings Postgres)
+      operationId: healthz
+      responses:
+        '200': { description: Healthy }
+        '503': { description: Postgres unreachable }
+  /v1/audit:
+    post:
+      tags: [audit]
+      summary: Append one audit entry (service-to-service)
+      operationId: ingestAudit
+      description: >-
+        Authenticate with the X-Audit-Token shared secret
+        (LEAK-ingest-style) or a Keycloak JWT. The entry is appended to the
+        hash chain (prev_hash/hash assigned by the service), counted by the
+        anomaly detector and mirrored best-effort to OpenSearch.
+      parameters:
+        - name: X-Audit-Token
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuditInput' }
+      responses:
+        '201':
+          description: Entry appended
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEntry' }
+        '400': { description: 'Missing actor_sub/action/entity or invalid JSON' }
+        '401': { description: No valid token or JWT }
+    get:
+      tags: [audit]
+      summary: Search audit entries (platform-admin only)
+      operationId: listAudit
+      parameters:
+        - name: actor
+          in: query
+          schema: { type: string }
+        - name: entity
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: Newest-first entries
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditList' }
+        '400': { description: Bad from/limit parameter }
+        '403': { description: Missing platform-admin role }
+  /v1/audit/verify:
+    get:
+      tags: [audit]
+      summary: Hash-chain integrity check (platform-admin only)
+      operationId: verifyAudit
+      responses:
+        '200':
+          description: Chain intact
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerifyResult' }
+        '409':
+          description: Chain broken (tamper evidence)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerifyResult' }
+components:
+  schemas:
+    AuditInput:
+      type: object
+      required: [actor_sub, action, entity]
+      properties:
+        actor_sub: { type: string }
+        actor_roles: { type: array, items: { type: string } }
+        action: { type: string, example: toggle.update }
+        entity: { type: string, example: feature_toggle }
+        entity_id: { type: string }
+        before: { type: object, nullable: true }
+        after: { type: object, nullable: true }
+        ip: { type: string }
+        ua: { type: string }
+        ts: { type: string, format: date-time }
+    AuditEntry:
+      allOf:
+        - $ref: '#/components/schemas/AuditInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            prev_hash: { type: string }
+            hash: { type: string }
+    AuditList:
+      type: object
+      properties:
+        entries: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
+        count: { type: integer }
+    VerifyResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        checked: { type: integer }
+        first_bad_id: { type: integer, format: int64 }
+        checked_at: { type: string, format: date-time }
