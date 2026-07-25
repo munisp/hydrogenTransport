@@ -1,0 +1,24 @@
+# ml-platform pinned dependencies (Python 3.12).
+# torch must come from the CPU wheel index (see README/Dockerfile):
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+numpy==2.2.1
+pandas==2.2.3
+pyarrow==18.1.0
+scikit-learn==1.6.1
+torch==2.5.1
+httpx==0.28.1
+PyJWT[crypto]==2.10.1
+prometheus-fastapi-instrumentator==7.0.0
+prometheus-client==0.21.1
+psycopg[binary]==3.2.3
+joblib==1.4.2
+# --- optional integrations (graceful no-op when absent) --------------------
+# mlflow==2.20.2        # MLFLOW_TRACKING_URI set -> experiment logging/registry
+# ray[train]==2.41.0    # --ray flag on training/train.py
+# neo4j==5.27.0         # training/export_graph.py Neo4j bridge (NEO4J_URI)
+# --- dev -------------------------------------------------------------------
+# pytest==8.3.4
