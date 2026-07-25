@@ -153,6 +153,10 @@ paths:
     post:
       tags: [demand-responsive]
       summary: Cancel a DRT request (JWT)
+      description: Only the rider who created the request may cancel it;
+        callers with the operator or platform-admin realm role may cancel any
+        request. Non-owners receive 404 (not 403) so request existence is not
+        leaked.
       operationId: cancelDRTRequest
       security:
         - bearerAuth: []
@@ -165,9 +169,13 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DRTRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '404':
+          description: Request not found, owned by another rider, or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: Request not found or not cancellable
+          description: Request not cancellable in its current status
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -62,7 +61,7 @@ func (h *Handler) CreateDRTRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req createDRTRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -155,15 +154,24 @@ func (h *Handler) CancelDRTRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 
-	var status string
+	var status, userSub string
 	err := h.db.QueryRow(r.Context(),
-		`SELECT status FROM citizen.drt_requests WHERE id = $1`, id).Scan(&status)
+		`SELECT status, user_sub FROM citizen.drt_requests WHERE id = $1`, id).Scan(&status, &userSub)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
 		return
 	}
 	if err != nil {
 		h.internal(w, "load drt request", err)
+		return
+	}
+	// Ownership enforcement (mirrors GetDRTRequest): only the rider who
+	// created the request may cancel it, unless the caller carries the
+	// operator or platform-admin realm role. 404 (not 403/409) so request
+	// existence and status are not leaked to non-owners.
+	if userSub != auth.Subject(r.Context()) &&
+		!auth.HasAnyRole(r.Context(), "operator", "platform-admin") {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
 		return
 	}
 	if status != "requested" && status != "assigned" {
