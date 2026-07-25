@@ -63,3 +63,58 @@ async def fetch_features(pool, bus_id: str, window_hours: int) -> dict[str, floa
 def feature_vector(features: dict[str, float]) -> list[float]:
     """Ordered numeric vector matching FEATURES."""
     return [float(features.get(name, 0.0)) for name in FEATURES]
+
+
+# ------------------------------------------------------- LSTM sequence input --
+#: Raw per-timestep features consumed by the trained LSTM artifact
+#: (ml-platform models/maintenance_lstm.py — same order).
+SEQ_FEATURES: list[str] = [
+    "h2_level_pct",
+    "fuel_cell_kw",
+    "battery_soc_pct",
+    "speed_kph",
+    "ambient_temp_c",
+]
+
+_SEQUENCE_SQL = """
+SELECT ts, speed_kph, h2_level_pct, fuel_cell_kw, battery_soc_pct
+FROM fleet.telemetry
+WHERE bus_id = $1::uuid AND ts > now() - make_interval(hours => $2)
+ORDER BY ts
+"""
+
+SEQUENCE_STEPS = 48  # resampled window length expected by the LSTM artifact
+
+
+def _seasonal_temp(ts) -> float:
+    """Ambient temperature is not stored in fleet.telemetry (SPEC §3.4);
+    use the same deterministic seasonal estimate as ml-platform training."""
+    import math
+
+    doy = ts.timetuple().tm_yday
+    hour = ts.hour + ts.minute / 60.0
+    return 10.0 + 9.0 * math.sin(2 * math.pi * (doy - 100) / 365.0) \
+        + 4.0 * math.sin(2 * math.pi * (hour - 14) / 24.0)
+
+
+async def fetch_sequence(pool, bus_id: str, window_hours: int,
+                         steps: int = SEQUENCE_STEPS):
+    """Resample the raw telemetry window onto `steps` evenly spaced timesteps
+    (linear interpolation) -> numpy array (steps, 5) in SEQ_FEATURES order,
+    or None when the bus has too little telemetry (< 4 rows)."""
+    import numpy as np
+
+    rows = await pool.fetch(_SEQUENCE_SQL, bus_id, float(window_hours))
+    if len(rows) < 4:
+        return None
+    t0, t1 = rows[0]["ts"], rows[-1]["ts"]
+    span = max((t1 - t0).total_seconds(), 1.0)
+    x = np.array([(r["ts"] - t0).total_seconds() / span for r in rows])
+    grid = np.linspace(0.0, 1.0, steps)
+    cols = []
+    for name in ("h2_level_pct", "fuel_cell_kw", "battery_soc_pct", "speed_kph"):
+        y = np.array([float(r[name]) for r in rows])
+        cols.append(np.interp(grid, x, y))
+    temp = np.array([_seasonal_temp(t0 + (t1 - t0) * float(g)) for g in grid])
+    cols.append(temp)
+    return np.stack(cols, axis=1).astype("float32")

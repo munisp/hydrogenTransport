@@ -6,7 +6,10 @@ WORKDIR /build
 COPY packages/toggle-client/python /build/toggle-client
 COPY services/python/shared /build/shared
 COPY services/python/predictive-maintenance/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt \
+# CPU-only torch wheel first (loads the ml-platform LSTM artifact), then the rest.
+RUN pip install --no-cache-dir --prefix=/install torch==2.5.1 \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir --prefix=/install -r requirements.txt \
     && pip install --no-cache-dir --prefix=/install /build/toggle-client \
     && pip install --no-cache-dir --prefix=/install /build/shared
 

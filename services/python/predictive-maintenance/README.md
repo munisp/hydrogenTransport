@@ -15,11 +15,28 @@ ML failure-risk scoring for the H2 fleet (module `predictive-maintenance`, Domai
 
 ## Model
 
-Feature engineering lives in `app/features.py` (24h aggregates over `fleet.telemetry`:
-load volatility, max/avg fuel-cell kW, H2 min/avg, refuel cycles via `LAG`, battery SoC
-stats, km driven). Runtime loads `models/model.joblib` when present
-(`app/model.py::SklearnModel`), otherwise falls back to a deterministic rule-based model
-(`RuleModel`) — the service always runs without a trained artifact (SPEC §3.5).
+Preference order at startup (`app/model.py::load_model`):
+
+1. **Trained LSTM artifact** from the ml-platform
+   (`MODEL_ARTIFACTS_DIR/maintenance_lstm/<champion>/`, champion resolved via
+   `registry.json`) — `app/lstm_model.py::LSTMScorer`. Consumes a resampled
+   48-step raw telemetry window (`app/features.py::fetch_sequence`,
+   5 features: h2 level, fuel-cell kW, battery SoC, speed, seasonal ambient
+   temp estimate) instead of aggregate features. Requires `torch` (CPU wheel;
+   optional — see requirements.txt).
+2. **Legacy sklearn joblib** at `MODEL_PATH` (`SklearnModel`, 24h aggregates
+   from `app/features.py`).
+3. **Deterministic rule-based model** (`RuleModel`) — the service always runs
+   without a trained artifact (SPEC §3.5).
+
+The HTTP API contract is unchanged: `POST /v1/predict` still returns
+per-component `risk_score` + `predicted_failure_at`, and the Kafka loop
+(`maintenance.predicted`) works with any of the three backends. Set
+`MODEL_ARTIFACTS_DIR` to the shared ml-platform artifacts volume to enable (1).
+
+The aggregate feature engineering lives in `app/features.py` (24h aggregates over
+`fleet.telemetry`: load volatility, max/avg fuel-cell kW, H2 min/avg, refuel
+cycles via `LAG`, battery SoC stats, km driven).
 
 ### Training
 
@@ -45,6 +62,7 @@ The artifact's feature list is validated against the runtime at load.
 | `KEYCLOAK_ISSUER` / `KEYCLOAK_ISSUER_ALT` | unset / `http://localhost:8088/realms/h2fleet` | JWKS source + accepted issuers; unset issuer ⇒ guarded routes 503 |
 | `INPUT_TOPIC` / `OUTPUT_TOPIC` | `telemetry.enriched` / `maintenance.predicted` |
 | `MODEL_PATH` | `models/model.joblib` |
+| `MODEL_ARTIFACTS_DIR` | `artifacts` | ml-platform artifact root (shared volume); champion `maintenance_lstm` preferred when present |
 | `FEATURE_WINDOW_HOURS` | `24` |
 | `SCORING_INTERVAL_S` | `300` |
 | `HIGH_RISK_THRESHOLD` | `0.7` |

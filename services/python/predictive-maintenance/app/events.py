@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from .config import settings
-from .features import fetch_features
+from .features import fetch_features, fetch_sequence
 from .model import ComponentRisk
 
 log = logging.getLogger("predictive-maintenance.events")
@@ -62,6 +62,11 @@ async def score_bus(pool, producer, bus_id: str, model) -> list[ComponentRisk]:
     features = await fetch_features(pool, bus_id, settings.feature_window_hours)
     if features is None:
         return []
+    if getattr(model, "needs_sequence", False):
+        seq = await fetch_sequence(pool, bus_id, settings.feature_window_hours)
+        if seq is None:
+            return []
+        features["_sequence"] = seq
     risks = model.predict_all(features)
     await persist_predictions(pool, bus_id, model.version, risks)
     for r in risks:
