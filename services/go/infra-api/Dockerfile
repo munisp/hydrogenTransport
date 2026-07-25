@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build context must be the repo root so the toggle-client SDK and go-auth module are available:
 #   docker build -f services/go/infra-api/Dockerfile .
-FROM golang:1.22-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY packages/toggle-client/go /packages/toggle-client/go
 COPY packages/go-auth /packages/go-auth
