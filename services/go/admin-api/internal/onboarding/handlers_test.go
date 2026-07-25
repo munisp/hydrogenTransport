@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/keycloak"
 )
 
@@ -153,8 +155,25 @@ func (f *fakeKC) SendActionsEmail(_ context.Context, userID string, actions []st
 // harness
 // --------------------------------------------------------------------------
 
-func newTestRouter(h *Handler) *chi.Mux {
+// injectClaims mimics the JWT middleware: it places validated claims for the
+// given subject/roles into the request context so role checks in handlers
+// can be exercised without a JWKS round-trip.
+func injectClaims(sub string, roles ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			roleList := make([]any, len(roles))
+			for i, role := range roles {
+				roleList[i] = role
+			}
+			claims := jwt.MapClaims{"sub": sub, "realm_access": map[string]any{"roles": roleList}}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), auth.ClaimsKey, claims)))
+		})
+	}
+}
+
+func newTestRouter(h *Handler, sub string, roles ...string) *chi.Mux {
 	r := chi.NewRouter()
+	r.Use(injectClaims(sub, roles...))
 	r.Post("/v1/onboarding/citizen", h.CitizenSelfServe)
 	r.Post("/v1/onboarding/{key}", h.Intake)
 	r.Get("/v1/onboarding", h.List)
@@ -164,11 +183,13 @@ func newTestRouter(h *Handler) *chi.Mux {
 	return r
 }
 
+// newTestHandler returns a router whose caller carries the platform-admin
+// role (approve/reject are platform-admin only — SECURITY_AUDIT F3).
 func newTestHandler() (*Handler, *fakeStore, *fakeKC, *chi.Mux) {
 	store := newFakeStore()
 	kc := newFakeKC()
 	h := NewHandler(store, kc, zap.NewNop(), func() string { return "TmpPassw0rd!" })
-	return h, store, kc, newTestRouter(h)
+	return h, store, kc, newTestRouter(h, "admin-1", "platform-admin")
 }
 
 func do(t *testing.T, router http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -356,6 +377,61 @@ func TestApproveProvisionsMappedRole(t *testing.T) {
 	}
 	if got := kc.assignedRoles["kc-1"]; len(got) != 1 || got[0] != "operator" {
 		t.Fatalf("station-staff must map to operator realm role, got %v", got)
+	}
+}
+
+// Operators (and any non-platform-admin) may list/view onboarding requests
+// but must NOT be able to approve or reject them — approving an operator or
+// station-staff intake would let one operator mint further operator accounts
+// (SECURITY_AUDIT F3, privilege self-replication).
+func TestOperatorCannotDecide(t *testing.T) {
+	store := newFakeStore()
+	kc := newFakeKC()
+	h := NewHandler(store, kc, zap.NewNop(), func() string { return "TmpPassw0rd!" })
+	adminRouter := newTestRouter(h, "admin-1", "platform-admin")
+	operatorRouter := newTestRouter(h, "op-1", "operator")
+
+	// Seed a pending operator intake (the most dangerous persona).
+	rec := do(t, adminRouter, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"o@example.com","display_name":"Otto Operator"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("intake failed: %d %s", rec.Code, rec.Body.String())
+	}
+	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
+
+	// Operator can still VIEW the queue.
+	if rec = do(t, operatorRouter, http.MethodGet, "/v1/onboarding", ""); rec.Code != http.StatusOK {
+		t.Fatalf("operator list got %d want 200", rec.Code)
+	}
+
+	// ...but approving is forbidden and must not provision anything.
+	rec = do(t, operatorRouter, http.MethodPost, "/v1/onboarding/"+id+"/approve", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("operator approve got %d want 403 (body: %s)", rec.Code, rec.Body)
+	}
+	if len(kc.created) != 0 {
+		t.Fatalf("forbidden approve must not provision a keycloak user")
+	}
+
+	// Rejecting is likewise forbidden.
+	rec = do(t, operatorRouter, http.MethodPost, "/v1/onboarding/"+id+"/reject", `{"reason":"x"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("operator reject got %d want 403 (body: %s)", rec.Code, rec.Body)
+	}
+
+	// The request is untouched (still pending).
+	stored, err := store.Get(context.Background(), id)
+	if err != nil || stored.Status != StatusPending {
+		t.Fatalf("request must remain pending after forbidden decisions: %v %+v", err, stored)
+	}
+
+	// platform-admin CAN approve, proving the gate is role-specific.
+	rec = do(t, adminRouter, http.MethodPost, "/v1/onboarding/"+id+"/approve", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("platform-admin approve got %d want 200 (body: %s)", rec.Code, rec.Body)
+	}
+	if got := kc.assignedRoles["kc-1"]; len(got) != 1 || got[0] != "operator" {
+		t.Fatalf("operator persona must map to operator realm role, got %v", got)
 	}
 }
 
