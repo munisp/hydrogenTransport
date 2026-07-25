@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 # Build context must be the repo root (consistent with the other Go services):
 #   docker build -f services/go/toggle-service/Dockerfile .
-FROM golang:1.22-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY packages/go-auth /packages/go-auth
+COPY services/go/audit-log /services/go/audit-log
 COPY services/go/toggle-service/go.mod services/go/toggle-service/go.sum ./
 RUN go mod download
 COPY services/go/toggle-service ./

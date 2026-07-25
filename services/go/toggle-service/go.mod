@@ -3,11 +3,11 @@ module github.com/munisp/hydrogenTransport/services/go/toggle-service
 go 1.25.0
 
 require (
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.7.2
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/prometheus/client_golang v1.24.1
-	github.com/redis/go-redis/v9 v9.7.0
+	github.com/redis/go-redis/v9 v9.7.3
 	github.com/twmb/franz-go v1.18.1
 	go.uber.org/zap v1.27.0
 )
@@ -21,8 +21,8 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240604185151-ef581f913117 // indirect
-	google.golang.org/grpc v1.66.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
@@ -34,12 +34,14 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/munisp/hydrogenTransport/packages/go-auth v0.0.0
+	github.com/munisp/hydrogenTransport/services/go/audit-log v0.0.0
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.9.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
 
 replace github.com/munisp/hydrogenTransport/packages/go-auth => ../../../packages/go-auth
+
+replace github.com/munisp/hydrogenTransport/services/go/audit-log => ../../../services/go/audit-log

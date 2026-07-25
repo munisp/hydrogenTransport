@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
+	"github.com/munisp/hydrogenTransport/services/go/audit-log/pkg/auditclient"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/handlers"
@@ -77,6 +78,11 @@ func main() {
 		r.With(
 			jwtmw.RequireRole("platform-admin"),
 			perm.Require("module", "manage", func(r *http.Request) string { return chi.URLParam(r, "module") }),
+			// Insider-threat audit emission (docs/INSIDER_THREAT.md); noop
+			// unless AUDIT_LOG_URL is set. Runs after auth so the actor's
+			// claims are in the request context.
+			auditclient.FromEnv("toggle-service", log, os.Getenv).
+				Middleware("toggle.update", "feature_toggle", "module", true),
 		).Put("/{module}", h.Put)
 	})
 
