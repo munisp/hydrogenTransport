@@ -1,0 +1,128 @@
+# H2Fleet stakeholder scenarios — machine-readable step manifest.
+# Source of truth for `make validate-scenarios` (validate_scenarios.py):
+# every step maps to one openapi operation in the owning service; `body`
+# payloads are validated against the operation's requestBody schema
+# (required properties must be present, unknown properties flagged).
+# Keep in sync with the s*.sh scripts — the validator greps each script for
+# the step path to catch drift.
+
+services:
+  admin-api: { openapi: services/go/admin-api/openapi.yaml, gateway_prefix: /api/admin }
+  audit-log: { openapi: services/go/audit-log/openapi.yaml, gateway_prefix: /api/audit }
+  citizen-api: { openapi: services/go/citizen-api/openapi.yaml, gateway_prefix: /api/citizen }
+  commerce-api: { openapi: services/go/commerce-api/openapi.yaml, gateway_prefix: /api/commerce }
+  fleet-api: { openapi: services/go/fleet-api/openapi.yaml, gateway_prefix: /api/fleet }
+  infra-api: { openapi: services/go/infra-api/openapi.yaml, gateway_prefix: /api/infra }
+  toggle-service: { openapi: services/go/toggle-service/openapi.yaml, gateway_prefix: /api/toggles }
+  predictive-maintenance: { openapi: services/python/predictive-maintenance/openapi.yaml, gateway_prefix: /api/ml }
+  carbon-analytics: { openapi: services/python/carbon-analytics/openapi.yaml, gateway_prefix: null }  # internal only
+  digital-twin: { openapi: services/rust/digital-twin/openapi.yaml, gateway_prefix: /api/twin }
+  analytics-bff: { openapi: services/ts/analytics-bff/openapi.yaml, gateway_prefix: /api/analytics }
+
+scenarios:
+  s01:
+    name: Morning rush telemetry surge
+    script: s01_morning_rush_telemetry_surge.sh
+    steps:
+      - { service: fleet-api, method: GET, path: /healthz }
+      - { service: fleet-api, method: GET, path: /v1/telemetry/latest }
+      - { service: digital-twin, method: GET, path: /v1/twin }
+
+  s02:
+    name: Predictive maintenance -> work order -> depot
+    script: s02_predictive_maintenance_work_order.sh
+    steps:
+      - { service: fleet-api, method: GET, path: /v1/maintenance/predictions }
+      - { service: fleet-api, method: GET, path: /v1/vehicles }
+      - { service: predictive-maintenance, method: POST, path: /v1/predict,
+          body: { bus_id: "<uuid>" } }
+      - { service: infra-api, method: POST, path: /v1/depot/work-orders,
+          body: { title: "compressor inspection", description: "...", asset_ref: "<bus_id>" } }
+      - { service: infra-api, method: POST, path: /v1/dispatch/jobs,
+          body: { driver_sub: "driver", vehicle_id: "<bus_id>", route: "Riverside Depot" } }
+      - { service: infra-api, method: POST, path: "/v1/dispatch/jobs/{id}/accept" }
+
+  s03:
+    name: Leak -> incident -> escalation -> compliance report
+    script: s03_leak_incident_compliance.sh
+    steps:
+      - { service: infra-api, method: GET, path: /v1/stations }
+      - { service: infra-api, method: POST, path: /v1/safety/leak,
+          body: { sensor_id: "s3-scenario-sensor", station_id: "<id>", severity: high, h2_ppm: 950 } }
+      - { service: infra-api, method: GET, path: /v1/incidents }
+      - { service: infra-api, method: POST, path: "/v1/incidents/{id}/ack" }
+      - { service: infra-api, method: POST, path: /v1/compliance/reports/generate, body: {} }
+      - { service: infra-api, method: GET, path: "/v1/compliance/reports/{id}" }
+
+  s04:
+    name: Citizen signup -> journey -> DRT -> driver accept
+    script: s04_citizen_drt.sh
+    steps:
+      - { service: admin-api, method: POST, path: /v1/onboarding/citizen,
+          body: { email: "s4.citizen@example.org", display_name: "S4 Citizen" } }
+      - { service: citizen-api, method: GET, path: /v1/passenger/journey }
+      - { service: citizen-api, method: POST, path: /v1/drt/requests,
+          body: { pickup: "POINT(14.42 50.08)", dropoff: "POINT(14.46 50.10)", pax: 1 } }
+      - { service: citizen-api, method: GET, path: "/v1/drt/requests/{id}" }
+      - { service: infra-api, method: GET, path: /v1/dispatch/jobs }
+      - { service: infra-api, method: POST, path: "/v1/dispatch/jobs/{id}/accept" }
+
+  s05:
+    name: Fare payment (idempotent) -> loyalty -> redeem
+    script: s05_fare_loyalty.sh
+    steps:
+      - { service: commerce-api, method: POST, path: /v1/payments,
+          body: { amount_minor: 250, currency: EUR } }
+      - { service: commerce-api, method: GET, path: /v1/loyalty/balance }
+      - { service: commerce-api, method: GET, path: /v1/marketplace/offers }
+      - { service: commerce-api, method: POST, path: /v1/loyalty/redeem,
+          body: { offer_id: "<uuid>" } }
+      - { service: commerce-api, method: POST, path: /v1/marketplace/offers,
+          body: { title: "S5 free coffee", description: "scenario", cost_points: 1 } }
+
+  s06:
+    name: Carbon period close -> gov dashboard
+    script: s06_carbon_close_gov.sh
+    steps:
+      - { service: carbon-analytics, method: POST, path: /v1/carbon/compute,
+          body: { period: "2025-06", publish: true } }
+      - { service: citizen-api, method: GET, path: /v1/carbon/credits }
+      - { service: citizen-api, method: GET, path: /v1/carbon/credits/summary }
+      - { service: commerce-api, method: GET, path: /v1/gov/kpis }
+
+  s07:
+    name: Toggle advertising OFF -> PWA nav -> ON
+    script: s07_toggle_advertising.sh
+    steps:
+      - { service: admin-api, method: PUT, path: "/v1/admin/toggles/{module}",
+          body: { enabled: false } }
+      - { service: toggle-service, method: GET, path: /v1/toggles }
+      - { service: toggle-service, method: GET, path: "/v1/toggles/{module}" }
+      - { service: commerce-api, method: GET, path: /v1/ads/campaigns }
+      - { service: admin-api, method: PUT, path: "/v1/admin/toggles/{module}",
+          body: { enabled: true } }
+
+  s08:
+    name: NOC wallboard -> alert -> runbook restart -> green
+    script: s08_noc_wallboard_restart.sh
+    steps:
+      - { service: admin-api, method: GET, path: /v1/admin/health }
+      - { service: admin-api, method: GET, path: /v1/admin/alerts }
+
+  s09:
+    name: Advertiser campaign -> KPI revenue
+    script: s09_advertiser_campaign.sh
+    steps:
+      - { service: commerce-api, method: POST, path: /v1/ads/campaigns,
+          body: { name: "S9 campaign", budget_minor: 50000 } }
+      - { service: commerce-api, method: GET, path: /v1/ads/campaigns }
+      - { service: admin-api, method: GET, path: /v1/admin/kpis }
+
+  s10:
+    name: Energy surplus trade -> ledger balanced
+    script: s10_energy_trade.sh
+    steps:
+      - { service: commerce-api, method: POST, path: /v1/energy/trades,
+          body: { kind: h2-sale, quantity_kg: 25, price_minor: 84000 } }
+      - { service: commerce-api, method: GET, path: /v1/energy/trades }
+      - { service: commerce-api, method: GET, path: /v1/gov/kpis }
