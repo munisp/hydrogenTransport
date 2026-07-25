@@ -111,8 +111,17 @@ def _horizon(risk: float) -> int:
     return max(3, int(round(60 * (1.0 - risk))))
 
 
-def load_model(path: str) -> RuleModel | SklearnModel:
-    """Load the trained artifact if present and valid; else rule fallback."""
+def load_model(path: str, artifacts_dir: str | None = None):
+    """Preference order: trained LSTM artifact (ml-platform) -> legacy sklearn
+    joblib -> deterministic rules (SPEC §3.5 — service must run without a
+    trained model). The LSTM scorer consumes raw telemetry sequences; the
+    others consume the aggregate feature dict."""
+    from .lstm_model import load_lstm_scorer
+
+    artifacts_dir = artifacts_dir or os.environ.get("MODEL_ARTIFACTS_DIR", "artifacts")
+    scorer = load_lstm_scorer(artifacts_dir)
+    if scorer is not None:
+        return scorer
     if os.path.exists(path):
         try:
             artifact = joblib.load(path)

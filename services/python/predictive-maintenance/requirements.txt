@@ -7,6 +7,10 @@ aiokafka==0.12.0
 scikit-learn==1.6.1
 joblib==1.4.2
 numpy==2.2.1
+# CPU wheel: pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+# (loads the ml-platform maintenance_lstm artifact; without torch the service
+# falls back to the sklearn joblib / rule model)
+torch==2.5.1
 httpx==0.28.1
 PyJWT[crypto]==2.10.1
 prometheus-fastapi-instrumentator==7.0.0

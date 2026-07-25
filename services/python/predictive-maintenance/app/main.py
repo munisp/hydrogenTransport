@@ -20,7 +20,7 @@ from toggle_client import AsyncToggleClient
 
 from .config import settings
 from .events import persist_predictions, run_consumer_loop
-from .features import fetch_features
+from .features import fetch_features, fetch_sequence
 from .model import ComponentRisk, load_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -52,7 +52,7 @@ class PredictResponse(BaseModel):
 async def lifespan(app: FastAPI):
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=8)
     toggles = AsyncToggleClient(settings.toggle_url)
-    model = load_model(settings.model_path)
+    model = load_model(settings.model_path, settings.model_artifacts_dir)
     app.state.pool = pool
     app.state.toggles = toggles
     app.state.model_holder = {"model": model}
@@ -116,6 +116,14 @@ async def predict(req: PredictRequest, request: Request):
             status_code=404, detail=f"no telemetry for bus {req.bus_id} in the last "
             f"{settings.feature_window_hours}h"
         )
+    if getattr(model, "needs_sequence", False):
+        seq = await fetch_sequence(pool, req.bus_id, settings.feature_window_hours)
+        if seq is None:
+            raise HTTPException(
+                status_code=404, detail=f"insufficient telemetry rows for bus "
+                f"{req.bus_id} to build the LSTM input window"
+            )
+        features["_sequence"] = seq
     risks: list[ComponentRisk] = model.predict_all(features)
     now = datetime.now(timezone.utc)
     try:
