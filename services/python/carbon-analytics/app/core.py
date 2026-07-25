@@ -4,7 +4,14 @@ Method: fleet distance per period is derived from odometer deltas in
 fleet.telemetry (max - min per bus, robust to individual row loss). Diesel
 baseline factor: 1.2 kg CO2 / km (SPEC/mission). H2 fleet tailpipe emissions
 are zero, so avoided = distance * baseline. One credit = `credit_kg_co2` kg.
-Writes are idempotent per period (delete + insert in one transaction).
+
+Idempotency (BUSINESS_LOGIC_AUDIT §14): citizen.carbon_credits has
+UNIQUE(period) (migration 0005), and issuance is a single
+INSERT ... ON CONFLICT (period) DO UPDATE, so concurrent computes for the
+same period can never double-issue. The credit id is deterministic per
+period (UUIDv5), so a recompute reissues the SAME credit identity and the
+republished carbon.credit.issued event stays reconcilable with the row it
+replaces instead of looking like a brand-new credit.
 """
 
 from __future__ import annotations
@@ -24,6 +31,17 @@ log = logging.getLogger("carbon-analytics")
 
 SERVICE_NAME = "carbon-analytics"
 _PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+# UUIDv5 namespace for deterministic per-period credit ids (recompute-safe).
+_CREDIT_NS = uuid.UUID("3f7a2c1e-9b4d-4e6a-8c5f-2d1b0a9e8f7c")
+
+
+def credit_id_for_period(period: str) -> str:
+    """Deterministic credit id for a period: a recompute reissues the same
+    credit identity, so downstream consumers can reconcile the event with
+    the replaced issuance instead of double-counting a new UUID."""
+    return str(uuid.uuid5(_CREDIT_NS, f"carbon-credit:{period}"))
+
 
 _DISTANCE_SQL = """
 SELECT coalesce(sum(km), 0)::float8 AS total_km, count(*)::int AS bus_count
@@ -97,14 +115,19 @@ async def compute_period(pool, period: str, publish: bool = True) -> PeriodResul
         credits=credits,
     )
 
-    credit_id = str(uuid.uuid4())
+    credit_id = credit_id_for_period(period)
     async with pool.acquire() as conn, conn.transaction():
-        # Idempotent per period: recompute replaces the previous issuance.
-        await conn.execute("DELETE FROM citizen.carbon_credits WHERE period = $1", period)
+        # Idempotent per period, race-safe: the UNIQUE(period) index
+        # (migration 0005) serializes concurrent computes; the loser of a
+        # race updates the winner's row instead of double-issuing.
         await conn.execute(
             """
             INSERT INTO citizen.carbon_credits (id, period, kg_co2_avoided, credits, issued_at)
             VALUES ($1::uuid, $2, $3, $4, now())
+            ON CONFLICT (period) DO UPDATE SET
+                kg_co2_avoided = EXCLUDED.kg_co2_avoided,
+                credits        = EXCLUDED.credits,
+                issued_at      = now()
             """,
             credit_id,
             period,
