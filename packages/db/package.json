@@ -1,0 +1,33 @@
+{
+  "name": "@h2fleet/db",
+  "version": "0.1.0",
+  "description": "H2Fleet Drizzle ORM schema — single typed source mirroring infra/sql/migrations (fleet/infra/citizen/commerce/platform/public) for TypeScript edge services.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "drizzle.config.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "drizzle:check": "drizzle-kit check"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.36.4",
+    "pg": "8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.11.10",
+    "@types/node": "20.14.0",
+    "drizzle-kit": "0.28.1",
+    "typescript": "5.4.5",
+    "vitest": "1.6.0"
+  }
+}
