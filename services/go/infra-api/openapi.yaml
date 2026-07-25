@@ -124,8 +124,12 @@ paths:
   /v1/incidents:
     get:
       tags: [leak-detection]
-      summary: List safety incidents
+      summary: List safety incidents (operator / platform-admin / station-staff role)
+      description: The incident feed is restricted to staff realm roles;
+        citizens cannot enumerate all incidents.
       operationId: listIncidents
+      security:
+        - bearerAuth: []
       parameters:
         - name: status
           in: query
@@ -141,6 +145,8 @@ paths:
                   incidents:
                     type: array
                     items: { $ref: '#/components/schemas/Incident' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '500': { $ref: '#/components/responses/InternalError' }
     post:
@@ -304,6 +310,13 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Conflict — the driver already has an active job, or the
+            vehicle is already assigned to an active job (active =
+            assigned/accepted/in_progress)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/dispatch/jobs/{id}/accept:
     post:
       tags: [dispatch-workforce]

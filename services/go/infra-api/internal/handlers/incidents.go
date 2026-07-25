@@ -80,7 +80,7 @@ type createIncidentRequest struct {
 // OpenIncident handles POST /v1/incidents (Keycloak JWT).
 func (h *Handler) OpenIncident(w http.ResponseWriter, r *http.Request) {
 	var req createIncidentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Type == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.Type == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"type\""})
 		return
 	}
@@ -170,7 +170,7 @@ type leakEventRequest struct {
 // the Temporal incident-response workflow.
 func (h *Handler) IngestLeak(w http.ResponseWriter, r *http.Request) {
 	var req leakEventRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SensorID == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.SensorID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"sensor_id\""})
 		return
 	}
