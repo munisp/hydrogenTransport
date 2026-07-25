@@ -1,0 +1,42 @@
+[package]
+name = "fluvio-edge"
+version = "0.1.0"
+edition = "2021"
+description = "H2Fleet edge agent: consumes bus-telemetry from the on-bus Fluvio SPU, batches and forwards to platform Kafka telemetry.raw with a restart-surviving store-and-forward spool"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+fluvio = { version = "=0.21.8", default-features = false, features = ["rustls"] }
+# --- Exact pins: fluvio 0.21.8's crates.io semver ranges resolve inconsistently
+# today (newer fluvio-socket/fluvio-stream-model patch releases switched to
+# fluvio-protocol 0.11 / async-lock while the fluvio lib expects
+# fluvio-protocol 0.10 / async-rwlock). These direct `=` pins force the last
+# mutually-consistent set. See README.md "Dependency resolution".
+fluvio-sc-schema = "=0.23.0"
+fluvio-socket = "=0.14.8"
+fluvio-spu-schema = "=0.14.7"
+fluvio-smartmodule = "=0.7.3"
+# Last fluvio-stream-model built on async-rwlock (0.11.3+ switched to async-lock).
+fluvio-stream-model = "=0.11.2"
+# Last async-std on async-lock 2.x (1.13+ moved to async-lock 3.x, which
+# mismatches fluvio 0.21.8's own async-lock ^2.4 usage: its producer
+# accumulator pairs an async-lock 2.x Mutex with async-std's Condvar).
+async-std = "=1.12.0"
+# rdkafka-sys builds the bundled librdkafka (make/gcc, no cmake) when no
+# linking feature is chosen; ssl/sasl stay off for the plaintext in-cluster
+# uplink — enable `ssl` when the platform Kafka enforces TLS.
+rdkafka = { version = "0.37", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+crc32fast = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
