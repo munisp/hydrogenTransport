@@ -1,0 +1,47 @@
+# OpenAppSec local policy — PROD profile (mounted at
+# /etc/cp/conf/local_policy.yaml on the agent).
+#
+# Posture: PREVENT. The agent additionally needs the APISIX global rule
+# `openappsec.mode: prevent`, which the apisix-etcd-sync job renders from
+# OPENAPPSEC_MODE=prevent (see infra/prod/docker-compose.prod.yml).
+#
+# Rollout guidance: keep LEARNING_MODE=true + mode:detect for 1-2 weeks per
+# environment, review the blocked-would-be log, then flip to prevent. This
+# file documents/enforces the prevent posture once flipped.
+
+version: "1.0"
+
+# Agent attachment mode (openappsec agent local policy schema).
+mode: prevent
+
+# Fail-open vs fail-close when the agent cannot reach its inspection engine:
+# for a city fleet API, availability of fare/leak endpoints wins over WAF
+# coverage — fail open, alert loudly.
+fail_open: true
+
+appsec:
+  # Web Application & API Protection practices.
+  practices:
+    - name: h2fleet-default
+      mode: prevent
+      # Tuning: raise confidence to reduce false positives on GTFS-RT-ish
+      # payloads and long query strings from the open-data API.
+      minimum-confidence: medium
+      # Threat Prevention exclusions observed during learn phase (examples —
+      # confirm against YOUR traffic before prevent):
+      exceptions:
+        - description: "large telemetry batch posts from leak sensors"
+          match:
+            uri: "/api/infra/v1/leaks/batch"
+          action: detect   # keep logging-only on the high-volume ingest path
+        - description: "open-data portal search queries with regex chars"
+          match:
+            uri: "/api/open-data/v1/search"
+          parameter: q
+          action: detect
+
+# Rate/abuse limits at the agent level complement the APISIX limit-count
+# plugin; keep both (defense in depth, docs/GATEWAY.md).
+rate-limit:
+  enabled: true
+  requests-per-minute: 600

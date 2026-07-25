@@ -1,0 +1,588 @@
+# =============================================================================
+# H2Fleet PRODUCTION middleware overlay — high availability.
+#
+# Usage (requires Docker Compose v2.24+ for `!reset`):
+#   cd infra
+#   docker compose -f docker-compose.yml -f prod/docker-compose.prod.yml up -d
+#
+# This file is an OVERLAY on infra/docker-compose.yml (the dev stack stays
+# untouched). Compose merge rules used here:
+#   * `!reset` replaces a mapping/sequence wholesale (kafka/postgres/etc.
+#     environment, depends_on, volumes, command) so dev keys never leak into
+#     prod definitions.
+#   * services not mentioned keep their dev definition.
+#
+# What changes vs dev:
+#   Kafka       dev ZooKeeper single broker  -> 3-node KRaft cluster, rf=3,
+#               min.insync.replicas=2 (zookeeper service parked behind a
+#               never-enabled profile)
+#   Postgres    single primary               -> primary + streaming replica
+#               (WAL + replication slot configured by prod/postgres scripts).
+#               Compose keeps a single WRITER; k8s uses CloudNativePG (see
+#               K8S_NOTES.md).
+#   Redis       single AOF instance          -> master + replica + 3 Sentinels
+#   OpenSearch  single-node, no security     -> 3-node cluster (security plugin
+#               still disabled HERE — prod TLS checklist in K8S_NOTES.md §OS)
+#   Keycloak    start-dev, dev-file store    -> `start` on Postgres, 2 nodes,
+#               hostname + proxy-headers, jdbc-ping cluster cache
+#   APISIX      standalone yaml              -> 2 nodes on etcd config_provider
+#               (config.yaml.prod) behind an HAProxy LB on the same :9080
+#   Temporal    single all-in-one            -> + second FRONTEND node
+#   Permify     single                       -> + second replica (shared PG)
+#   OpenAppSec  learn/detect                 -> prevent-mode profile
+#   TigerBeetle single dev replica           -> prod/tigerbeetle-cluster.sh
+#               formats/starts a 6-replica cluster (replicas 0-5)
+#   MinIO       single drive                 -> distributed 4-drive note below
+#
+# Host ports: only the LB port 9080 and opensearch-dashboards remain
+# published; everything else is network-internal (dev published ports that
+# collide are re-parked with !reset).
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # ZooKeeper: KRaft makes it obsolete. It cannot be REMOVED by an overlay, so
+  # it is parked behind a profile that is never enabled.
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    profiles: ["legacy-zk-never-enabled"]
+
+  # ---------------------------------------------------------------------------
+  # Kafka — 3-node KRaft (combined broker+controller per node, fine at this
+  # scale; dedicated controllers when you outgrow ~100k partitions).
+  # Service name `kafka` is KEPT so every app's KAFKA_BROKERS=kafka:9092 and
+  # the dev depends_on wiring keep working; node 1 answers on kafka:9092.
+  # ---------------------------------------------------------------------------
+  kafka:
+    environment: !reset
+      KAFKA_KRAFT_CLUSTER_ID: h2fleetMkZraftCluster01
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      ALLOW_PLAINTEXT_LISTENER: "yes"   # in-cluster plaintext; TLS overlay in K8S_NOTES.md
+      KAFKA_CFG_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # --- HA + throughput (see infra/tuning/kafka-server.prod.properties) ---
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_NUM_PARTITIONS: "12"
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: "2"
+      KAFKA_CFG_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_CFG_COMPRESSION_TYPE: lz4
+    depends_on: !reset {}
+    healthcheck: !reset
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+
+  kafka-2:
+    image: bitnami/kafka:3.9.1
+    container_name: h2-kafka-2
+    networks: [h2net]
+    environment:
+      KAFKA_KRAFT_CLUSTER_ID: h2fleetMkZraftCluster01
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_NODE_ID: "2"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_NUM_PARTITIONS: "12"
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: "2"
+      KAFKA_CFG_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_CFG_COMPRESSION_TYPE: lz4
+    volumes:
+      - kafka2_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+
+  kafka-3:
+    image: bitnami/kafka:3.9.1
+    container_name: h2-kafka-3
+    networks: [h2net]
+    environment:
+      KAFKA_KRAFT_CLUSTER_ID: h2fleetMkZraftCluster01
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_NODE_ID: "3"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_NUM_PARTITIONS: "12"
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: "2"
+      KAFKA_CFG_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_CFG_COMPRESSION_TYPE: lz4
+    volumes:
+      - kafka3_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Postgres — single WRITER (honest: compose does not give you write HA;
+  # CloudNativePG on k8s does — K8S_NOTES.md) + streaming REPLICA for read
+  # offload, backup source and manual promotion.
+  # prod/postgres/004_replication.sh runs at first initdb (fresh pg_data only)
+  # and enables wal_level=replica, replication slots and the replicator role;
+  # on existing volumes apply those settings manually (docs/RUNBOOK.md).
+  # ---------------------------------------------------------------------------
+  postgres:
+    volumes:
+      - pg_data:/home/postgres/pgdata/data
+      - ../infra/sql/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ../infra/sql/002_seed.sql:/docker-entrypoint-initdb.d/002_seed.sql:ro
+      - ../infra/prod/postgres/004_replication.sh:/docker-entrypoint-initdb.d/004_replication.sh:ro
+      # Fleet-workload tuning reference config (see infra/tuning/README).
+      # Mounted for operators; activate with ALTER SYSTEM or a config include.
+      - ../infra/tuning/postgresql.conf:/etc/postgresql/h2fleet-tuning.conf:ro
+
+  postgres-replica:
+    image: timescale/timescaledb-ha:pg16.10-ts2.22.1-all
+    container_name: h2-postgres-replica
+    networks: [h2net]
+    environment:
+      POSTGRES_USER: h2
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+      POSTGRES_DB: h2fleet
+      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD:?set_REPLICATOR_PASSWORD_in_.env}
+      PGDATA: /home/postgres/pgdata/data
+    volumes:
+      - pg_replica_data:/home/postgres/pgdata
+      - ../infra/prod/postgres/replica-entrypoint.sh:/usr/local/bin/replica-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/replica-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U h2 -d h2fleet"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Redis — master (AOF everysec) + 1 replica + 3 Sentinels.
+  # Services keep REDIS_ADDR=redis:6379; switch clients to Sentinel discovery
+  # (mymaster) for automatic failover — documented in docs/MIDDLEWARE_HARDENING.
+  # ---------------------------------------------------------------------------
+  redis:
+    command: ["redis-server", "/etc/redis/h2fleet.conf"]
+    volumes:
+      - redis_data:/data
+      - ../infra/prod/redis/master.conf:/etc/redis/h2fleet.conf:ro
+
+  redis-replica:
+    image: redis:7.4.6-alpine
+    container_name: h2-redis-replica
+    networks: [h2net]
+    command: ["redis-server", "/etc/redis/h2fleet-replica.conf"]
+    volumes:
+      - redis_replica_data:/data
+      - ../infra/prod/redis/replica.conf:/etc/redis/h2fleet-replica.conf:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  redis-sentinel-1:
+    image: redis:7.4.6-alpine
+    container_name: h2-redis-sentinel-1
+    networks: [h2net]
+    # Sentinel rewrites its config to persist leader state, so run from a
+    # writable copy on the per-sentinel volume (the mounted file is the seed).
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf.src /data/sentinel.conf && redis-sentinel /data/sentinel.conf"]
+    volumes:
+      - ../infra/prod/redis/sentinel.conf:/etc/redis/sentinel.conf.src:ro
+      - sentinel1_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+
+  redis-sentinel-2:
+    image: redis:7.4.6-alpine
+    container_name: h2-redis-sentinel-2
+    networks: [h2net]
+    # Sentinel rewrites its config to persist leader state, so run from a
+    # writable copy on the per-sentinel volume (the mounted file is the seed).
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf.src /data/sentinel.conf && redis-sentinel /data/sentinel.conf"]
+    volumes:
+      - ../infra/prod/redis/sentinel.conf:/etc/redis/sentinel.conf.src:ro
+      - sentinel2_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+
+  redis-sentinel-3:
+    image: redis:7.4.6-alpine
+    container_name: h2-redis-sentinel-3
+    networks: [h2net]
+    # Sentinel rewrites its config to persist leader state, so run from a
+    # writable copy on the per-sentinel volume (the mounted file is the seed).
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf.src /data/sentinel.conf && redis-sentinel /data/sentinel.conf"]
+    volumes:
+      - ../infra/prod/redis/sentinel.conf:/etc/redis/sentinel.conf.src:ro
+      - sentinel3_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # OpenSearch — 3-node cluster. `opensearch` keeps the service name so
+  # OPENSEARCH_URL=http://opensearch:9200 keeps resolving; the other nodes are
+  # added behind the same service discovery via seed hosts.
+  # SECURITY: plugins.security.disabled stays true HERE because this compose
+  # overlay is the *shape* reference. Real production MUST enable the security
+  # plugin with TLS — checklist in K8S_NOTES.md §OpenSearch.
+  # ---------------------------------------------------------------------------
+  opensearch:
+    environment: !reset
+      cluster.name: h2fleet-logs
+      node.name: opensearch
+      discovery.seed_hosts: opensearch,opensearch-2,opensearch-3
+      cluster.initial_master_nodes: opensearch,opensearch-2,opensearch-3
+      plugins.security.disabled: "true"   # DEV-ONLY posture — prod TLS checklist in K8S_NOTES.md
+      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+
+  opensearch-2:
+    image: opensearchproject/opensearch:2.19.2
+    container_name: h2-opensearch-2
+    networks: [h2net]
+    environment:
+      cluster.name: h2fleet-logs
+      node.name: opensearch-2
+      discovery.seed_hosts: opensearch,opensearch-2,opensearch-3
+      cluster.initial_master_nodes: opensearch,opensearch-2,opensearch-3
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - opensearch2_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  opensearch-3:
+    image: opensearchproject/opensearch:2.19.2
+    container_name: h2-opensearch-3
+    networks: [h2net]
+    environment:
+      cluster.name: h2fleet-logs
+      node.name: opensearch-3
+      discovery.seed_hosts: opensearch,opensearch-2,opensearch-3
+      cluster.initial_master_nodes: opensearch,opensearch-2,opensearch-3
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - opensearch3_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Keycloak — real `start` (prod mode) on Postgres, 2 nodes behind the LB.
+  # * KC_DB_URL points at the main postgres; keycloak-db-init creates the db
+  #   idempotently (same pattern as permify-db-init in dev compose).
+  # * KC_PROXY_HEADERS=forwarded: TLS terminates at the LB.
+  # * KC_CACHE_STACK=jdbc-ping: cluster discovery without multicast (compose).
+  # * STICKY SESSIONS: the LB must route a browser session to the same node
+  #   (cookie-based affinity) or login flows with auth sessions degrade to
+  #   extra cache round-trips — see gateway-lb haproxy.cfg `cookie KC_NODE`.
+  # ---------------------------------------------------------------------------
+  keycloak-db-init:
+    image: postgres:16.10-alpine
+    container_name: h2-keycloak-db-init
+    networks: [h2net]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+    entrypoint: >
+      sh -c "psql -h postgres -U h2 -d h2fleet -tc
+             \"SELECT 1 FROM pg_database WHERE datname='keycloak'\" | grep -q 1
+             || psql -h postgres -U h2 -d h2fleet -c 'CREATE DATABASE keycloak'"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  keycloak:
+    environment: !reset
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set_in_.env}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: h2
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+      KC_HOSTNAME: ${KC_HOSTNAME_URL:-https://auth.h2fleet.example.com}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: forwarded
+      KC_HTTP_ENABLED: "true"          # LB terminates TLS; plaintext behind it
+      KC_HEALTH_ENABLED: "true"
+      KC_CACHE_STACK: jdbc-ping        # TCP/JDBC discovery: no multicast in compose
+    command: !reset ["start", "--import-realm"]
+    depends_on:
+      keycloak-realm-init:
+        condition: service_completed_successfully
+      keycloak-db-init:
+        condition: service_completed_successfully
+
+  keycloak-2:
+    image: quay.io/keycloak/keycloak:26.5
+    container_name: h2-keycloak-2
+    networks: [h2net]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set_in_.env}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: h2
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}
+      KC_HOSTNAME: ${KC_HOSTNAME_URL:-https://auth.h2fleet.example.com}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: forwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_CACHE_STACK: jdbc-ping
+    command: ["start"]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\n\r\n' >&3 && head -1 <&3 | grep 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  # ---------------------------------------------------------------------------
+  # APISIX — 2 data-plane nodes on the etcd config provider (prod control
+  # plane: routes pushed via Admin API by apisix-etcd-sync, source of truth
+  # stays infra/apisix/apisix.yaml in git). HAProxy (gateway-lb) publishes the
+  # SAME host port 9080 the dev stack exposed, in front of both nodes.
+  # ---------------------------------------------------------------------------
+  etcd:
+    image: bitnami/etcd:3.5
+    container_name: h2-etcd
+    networks: [h2net]
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"   # in-cluster only; front with auth+TLS in k8s (K8S_NOTES.md)
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+    volumes:
+      - etcd_data:/bitnami/etcd
+    healthcheck:
+      test: ["CMD-SHELL", "etcdctl endpoint health >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  apisix:
+    volumes: !reset
+      - ../infra/prod/apisix/config.yaml.prod:/usr/local/apisix/conf/config.yaml:ro
+    ports: !reset
+      - "127.0.0.1:9091:9091"    # prometheus metrics (scraped in-cluster)
+    depends_on:
+      etcd:
+        condition: service_healthy
+
+  apisix-2:
+    image: apache/apisix:3.17.0-debian
+    container_name: h2-apisix-2
+    networks: [h2net]
+    environment:
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:-h2fleet-admin-key-change-me}
+      PWA_ORIGIN: ${PWA_ORIGIN:-https://app.h2fleet.example.com}
+    volumes:
+      - ../infra/prod/apisix/config.yaml.prod:/usr/local/apisix/conf/config.yaml:ro
+    depends_on:
+      etcd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9080/apisix/status >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # One-shot: push routes/consumers/global rules from infra/apisix/apisix.yaml
+  # into etcd through the Admin API (idempotent PUTs).
+  apisix-etcd-sync:
+    image: python:3.12-alpine
+    container_name: h2-apisix-etcd-sync
+    networks: [h2net]
+    environment:
+      APISIX_ADMIN_URL: http://apisix:9180
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:-h2fleet-admin-key-change-me}
+      PWA_ORIGIN: ${PWA_ORIGIN:-https://app.h2fleet.example.com}
+      OPENAPPSEC_MODE: ${OPENAPPSEC_MODE:-prevent}
+    volumes:
+      - ../infra/apisix/apisix.yaml:/src/apisix.yaml:ro
+      - ../infra/prod/apisix/sync_routes.py:/src/sync_routes.py:ro
+    entrypoint: >
+      sh -c "pip install --quiet pyyaml && python /src/sync_routes.py"
+    depends_on:
+      apisix:
+        condition: service_healthy
+    restart: "no"
+
+  # LB in front of both APISIX nodes; owns the public :9080.
+  gateway-lb:
+    image: haproxy:2.9-alpine
+    container_name: h2-gateway-lb
+    networks: [h2net]
+    ports:
+      - "9080:9080"   # API gateway data plane (SPEC §3.6 entrypoint)
+      - "8180:8180"   # Keycloak browser endpoint (sticky, KC_NODE cookie)
+    volumes:
+      - ../infra/prod/apisix/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      apisix:
+        condition: service_healthy
+      apisix-2:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Temporal — the dev auto-setup container already runs all four roles;
+  # Temporal is clustered-capable by design. This adds a SECOND FRONTEND so
+  # client connections (services on :7233) survive a frontend restart.
+  # Front both frontends with a TCP LB / headless service in k8s
+  # (K8S_NOTES.md §Temporal); in compose, keep :7233 on the primary.
+  # ---------------------------------------------------------------------------
+  temporal-frontend-2:
+    image: temporalio/server:1.29.6
+    container_name: h2-temporal-frontend-2
+    networks: [h2net]
+    environment:
+      # server image role selector: this node serves client RPCs only; the
+      # dev auto-setup node keeps running history/matching/worker/frontend.
+      SERVICES: frontend
+      DB: postgres12                # matches the dev temporal service env
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
+      POSTGRES_SEEDS: postgres-temporal
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      ENABLE_ES: "false"
+    depends_on:
+      postgres-temporal:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Permify — second replica against the same Postgres. Stateless gRPC/HTTP;
+  # services resolve `permify` via round-robin DNS... note: compose DNS returns
+  # only one service name per container, so clients should target BOTH via a
+  # small client-side list (PERMIFY_GRPC=permify:3476,permify-2:3476) or the
+  # k8s Service (K8S_NOTES.md). No ports published for the replica.
+  # ---------------------------------------------------------------------------
+  permify-2:
+    image: ghcr.io/permify/permify:v1.2.4
+    container_name: h2-permify-2
+    networks: [h2net]
+    command: ["serve"]
+    environment:
+      PERMIFY_DATABASE_ENGINE: postgres
+      PERMIFY_DATABASE_URI: postgres://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/permify?sslmode=disable
+    depends_on:
+      permify-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3478/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+  # ---------------------------------------------------------------------------
+  # OpenAppSec — PROD posture: agent leaves learning mode and the APISIX
+  # global rule runs mode: prevent (the apisix-etcd-sync job renders
+  # OPENAPPSEC_MODE=prevent into the global rule it pushes to etcd).
+  # The local policy file pins prevent + tuned appsec settings.
+  # ---------------------------------------------------------------------------
+  openappsec-agent:
+    profiles: ["waf", "prod-waf"]
+    environment:
+      AGENT_TOKEN: ${OPENAPPSEC_AGENT_TOKEN:?set_OPENAPPSEC_AGENT_TOKEN_in_.env}
+      LEARNING_MODE: "false"
+    volumes:
+      - ../infra/prod/openappsec/local_policy.yaml:/etc/cp/conf/local_policy.yaml:ro
+
+  # ---------------------------------------------------------------------------
+  # MinIO — DISTRIBUTED 4-DRIVE NOTE.
+  # Compose on one host cannot give MinIO real failure domains, so distributed
+  # mode is documented, not enabled, here. On 4 hosts / 4 disks:
+  #   command: server http://minio-{1...4}.h2net/data --console-address ":9001"
+  # with MINIO_ROOT_USER/PASSWORD identical on all nodes and at least 4 drives
+  # total (EC:2 default). On k8s use the MinIO Operator with 4+ PVCs per pool
+  # (K8S_NOTES.md §MinIO). The dev single-node `minio` service stays as-is for
+  # the Iceberg REST catalog; switch it to distributed only with real disks.
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # TigerBeetle — the dev single replica stays for local dev. For prod run
+  #   infra/prod/tigerbeetle-cluster.sh format   # one-time, creates 6 volumes
+  #   infra/prod/tigerbeetle-cluster.sh start    # starts replicas 0-5
+  # and point TIGERBEETLE_ADDR at all six (tb-0:3000,tb-1:3000,...). The script
+  # is authoritative; see its header.
+  # ---------------------------------------------------------------------------
+
+volumes:
+  kafka2_data:
+  kafka3_data:
+  pg_replica_data:
+  redis_replica_data:
+  sentinel1_data:
+  sentinel2_data:
+  sentinel3_data:
+  opensearch2_data:
+  opensearch3_data:
+  etcd_data:

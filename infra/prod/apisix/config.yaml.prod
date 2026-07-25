@@ -1,0 +1,68 @@
+# =============================================================================
+# APISIX node configuration — PRODUCTION (etcd config provider).
+#
+# Mounted as /usr/local/apisix/conf/config.yaml on BOTH apisix nodes by
+# infra/prod/docker-compose.prod.yml. Differences vs the dev config:
+#   * deployment.config_provider: etcd — routes/consumers/global rules live in
+#     etcd and are pushed by the apisix-etcd-sync one-shot from the git-managed
+#     source of truth infra/apisix/apisix.yaml.
+#   * admin API bound to 0.0.0.0 (sync job reaches it over the network) but
+#     locked to an allow-list + key; :9180 is never published to the host.
+#   * nginx worker/keepalive sizing for fleet traffic.
+# TLS: terminate at the LB (gateway-lb / cloud LB) or enable the ssl block
+# exactly as documented in the dev config.yaml and docs/GATEWAY.md.
+# =============================================================================
+
+apisix:
+  node_listen: 9080
+  enable_admin: true
+  enable_control: false
+
+nginx_config:
+  # Fleet scale: gateway is NOT the bottleneck (see docs/MIDDLEWARE_HARDENING
+  # §throughput) — default workers are plenty; pin explicitly for capacity math.
+  worker_processes: 4
+  worker_rlimit_nofile: 32768
+  event:
+    worker_connections: 8192
+  http:
+    # Upstream keepalive: cuts TCP/TLS handshakes to backend services ~4x.
+    keepalive: 256
+    keepalive_timeout: 75s
+    keepalive_requests: 10000
+    client_max_body_size: 10m
+    # Gzip for API JSON; the PWA static assets get gzip/brotli at the PWA
+    # nginx (infra/tuning/nginx-pwa.conf), not here.
+    gzip: on
+    gzip_types: application/json application/javascript
+    gzip_min_length: 1k
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  admin:
+    enable_admin: true
+    admin_listen:
+      ip: 0.0.0.0      # reachable by the sync job in-network
+      port: 9180
+    allow_admin:
+      - 10.0.0.0/8
+      - 172.16.0.0/12  # docker bridge ranges only — never publish :9180
+      - 192.168.0.0/16
+    admin_key:
+      - name: admin
+        key: ${{APISIX_ADMIN_KEY:=REPLACE_ME_ROTATE_THIS_ADMIN_KEY}}
+        role: admin
+  etcd:
+    host:
+      - http://etcd:2379
+    prefix: /apisix
+    timeout: 30
+    # k8s: enable watch + TLS here (K8S_NOTES.md §APISIX).
+
+plugin_attr:
+  prometheus:
+    export_addr:
+      ip: 0.0.0.0
+      port: 9091
