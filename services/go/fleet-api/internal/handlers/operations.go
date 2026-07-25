@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,17 +19,32 @@ type Prediction struct {
 	CreatedAt          time.Time  `json:"created_at"`
 }
 
-// ListPredictions handles GET /v1/maintenance/predictions?bus_id=
-// (predictive-maintenance module).
+// ListPredictions handles GET /v1/maintenance/predictions?bus_id=&min_risk=
+// (predictive-maintenance module). min_risk is a 0..1 inclusive lower bound
+// on risk_score; the PWA MaintenancePage sends it (it was previously
+// accepted and silently ignored — BUSINESS_LOGIC_AUDIT dead client calls).
 func (h *Handler) ListPredictions(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT id, bus_id, component, COALESCE(risk_score,0), predicted_failure_at,
 		       COALESCE(model_version,''), created_at
 		FROM fleet.maintenance_predictions`
 	args := []any{}
+	conds := []string{}
 	if busID := r.URL.Query().Get("bus_id"); busID != "" {
-		query += ` WHERE bus_id = $1`
 		args = append(args, busID)
+		conds = append(conds, fmt.Sprintf("bus_id = $%d", len(args)))
+	}
+	if raw := r.URL.Query().Get("min_risk"); raw != "" {
+		minRisk, err := strconv.ParseFloat(raw, 64)
+		if err != nil || minRisk < 0 || minRisk > 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "min_risk must be a number between 0 and 1"})
+			return
+		}
+		args = append(args, minRisk)
+		conds = append(conds, fmt.Sprintf("risk_score >= $%d", len(args)))
+	}
+	if len(conds) > 0 {
+		query += ` WHERE ` + strings.Join(conds, ` AND `)
 	}
 	query += ` ORDER BY risk_score DESC NULLS LAST, created_at DESC LIMIT 200`
 

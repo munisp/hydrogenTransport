@@ -4,17 +4,17 @@ info:
   version: 0.1.0
   description: >-
     Domain 1 (Fleet Operations & Telematics) API: vehicles, telemetry queries,
-    digital-twin proxy, maintenance predictions, fuel levels and route
-    optimization proxy. Module-gated routes return 404 when their module
-    toggle is OFF (SPEC §3.2).
+    maintenance predictions and fuel levels. Module-gated routes return 404
+    when their module toggle is OFF (SPEC §3.2). Digital-twin and
+    route-optimizer calls go directly to those services via APISIX
+    (/api/twin/*, /api/optimize/*) — the former fleet-api proxy routes were
+    removed as orphans (docs/BUSINESS_LOGIC_AUDIT.md).
 servers:
   - url: http://fleet-api:8081
 tags:
   - name: telematics
-  - name: digital-twin
   - name: predictive-maintenance
   - name: fuel-monitoring
-  - name: route-energy-optimizer
   - name: meta
 paths:
   /healthz:
@@ -43,48 +43,6 @@ paths:
                     items: { $ref: '#/components/schemas/Vehicle' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '500': { $ref: '#/components/responses/InternalError' }
-  /v1/vehicles/{id}:
-    get:
-      tags: [telematics]
-      summary: Get one vehicle
-      operationId: getVehicle
-      parameters:
-        - $ref: '#/components/parameters/VehicleId'
-      responses:
-        '200':
-          description: Vehicle
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Vehicle' }
-        '404':
-          description: Vehicle not found or module disabled
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '500': { $ref: '#/components/responses/InternalError' }
-  /v1/vehicles/{id}/telemetry:
-    get:
-      tags: [telematics]
-      summary: Recent telemetry rows for a vehicle
-      operationId: getTelemetry
-      parameters:
-        - $ref: '#/components/parameters/VehicleId'
-        - name: limit
-          in: query
-          schema: { type: integer, default: 100 }
-      responses:
-        '200':
-          description: Telemetry rows (newest first)
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  telemetry:
-                    type: array
-                    items: { $ref: '#/components/schemas/TelemetryRow' }
-        '404': { $ref: '#/components/responses/ModuleDisabled' }
-        '500': { $ref: '#/components/responses/InternalError' }
   /v1/telemetry/latest:
     get:
       tags: [telematics]
@@ -103,35 +61,25 @@ paths:
                     items: { $ref: '#/components/schemas/TelemetryRow' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '500': { $ref: '#/components/responses/InternalError' }
-  /v1/vehicles/{id}/twin:
-    get:
-      tags: [digital-twin]
-      summary: Hot digital-twin state (proxied from the Rust digital-twin service)
-      operationId: getTwin
-      parameters:
-        - $ref: '#/components/parameters/VehicleId'
-      responses:
-        '200':
-          description: Twin state
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TwinState' }
-        '404':
-          description: No twin state or module disabled
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '502':
-          description: digital-twin upstream unreachable
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
   /v1/maintenance/predictions:
     get:
       tags: [predictive-maintenance]
       summary: Latest failure-risk predictions
       operationId: listPredictions
+      parameters:
+        - name: bus_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: min_risk
+          in: query
+          description: Inclusive lower bound on risk_score (0..1)
+          schema: { type: number, minimum: 0, maximum: 1 }
       responses:
+        '400':
+          description: Invalid min_risk
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '200':
           description: Prediction list
           content:
@@ -162,55 +110,7 @@ paths:
                     items: { $ref: '#/components/schemas/FuelLevel' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '500': { $ref: '#/components/responses/InternalError' }
-  /v1/optimize/route:
-    post:
-      tags: [route-energy-optimizer]
-      summary: Optimize routes/refueling (proxied to route-optimizer; JWT required)
-      operationId: optimizeRoute
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                bus_ids:
-                  type: array
-                  items: { type: string, format: uuid }
-                date: { type: string, format: date }
-      responses:
-        '200':
-          description: Optimization result from route-optimizer
-          content:
-            application/json:
-              schema: { type: object }
-        '400':
-          description: Invalid body
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/ModuleDisabled' }
-        '502':
-          description: route-optimizer upstream unreachable
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: Keycloak access token.
-  parameters:
-    VehicleId:
-      name: id
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
   schemas:
     Vehicle:
       type: object
@@ -231,11 +131,6 @@ components:
         fuel_cell_kw: { type: number }
         battery_soc_pct: { type: number }
         odometer_km: { type: number }
-    TwinState:
-      type: object
-      properties:
-        bus_id: { type: string, format: uuid }
-        ts: { type: string, format: date-time }
     Prediction:
       type: object
       properties:
@@ -270,11 +165,6 @@ components:
           schema: { $ref: '#/components/schemas/Health' }
     ModuleDisabled:
       description: The module toggle for this route is OFF (SPEC §3.2)
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Error' }
-    Unauthorized:
-      description: Missing or invalid bearer token
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

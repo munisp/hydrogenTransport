@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"go.uber.org/zap"
@@ -95,24 +94,6 @@ func TestLatestTelemetry_Shape(t *testing.T) {
 	if len(samples) != 1 || samples[0].BusID != "11111111-1111-1111-1111-111111111111" ||
 		samples[0].SpeedKph != 42.5 || samples[0].H2LevelPct != 63.0 {
 		t.Fatalf("sample mapping wrong: %+v", samples)
-	}
-	if err := pool.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet db expectations: %v", err)
-	}
-}
-
-// GET /v1/vehicles/{id} must 404 (not 500) on an unknown id.
-func TestGetVehicle_NotFound(t *testing.T) {
-	h, pool := newMockHandler(t)
-	pool.ExpectQuery(`WHERE id = \$1`).WithArgs("nope").WillReturnError(pgx.ErrNoRows)
-
-	r := chi.NewRouter()
-	r.Get("/v1/vehicles/{id}", h.GetVehicle)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/vehicles/nope", nil))
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("got %d, want 404 (body: %s)", rec.Code, rec.Body)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet db expectations: %v", err)
