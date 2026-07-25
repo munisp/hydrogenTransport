@@ -36,6 +36,13 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS tb_transfer_id text`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS fare_payments_idempotency_key_uq
 			ON commerce.fare_payments (idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		// Trades: tb_transfer_id mirrors migration 0005 (S10); the
+		// idempotency key follows the fare_payments precedent (runtime DDL
+		// until a later migration absorbs it).
+		`ALTER TABLE commerce.trades ADD COLUMN IF NOT EXISTS tb_transfer_id text`,
+		`ALTER TABLE commerce.trades ADD COLUMN IF NOT EXISTS idempotency_key text`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS trades_idempotency_key_uq
+			ON commerce.trades (idempotency_key) WHERE idempotency_key IS NOT NULL`,
 		// Persisted rider → TigerBeetle wallet mapping (replaces hash-derived
 		// account ids; sequential allocation starts at 1001).
 		`CREATE TABLE IF NOT EXISTS commerce.rider_accounts (
@@ -43,10 +50,43 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 			account_id bigint NOT NULL UNIQUE,
 			created_at timestamptz NOT NULL DEFAULT now()
 		)`,
+		// Loyalty tables: identical shape to migration 0005 (rider_sub key).
+		// Migration 0005 renames user_sub → rider_sub on databases created by
+		// migration 0003; the guarded rename below keeps pure-EnsureSchema
+		// dev databases (service started before goose ran) consistent too.
+		`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'commerce' AND table_name = 'loyalty_accounts' AND column_name = 'user_sub'
+			) AND NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'commerce' AND table_name = 'loyalty_accounts' AND column_name = 'rider_sub'
+			) THEN
+				ALTER TABLE commerce.loyalty_accounts RENAME COLUMN user_sub TO rider_sub;
+			END IF;
+		END $$`,
 		`CREATE TABLE IF NOT EXISTS commerce.loyalty_accounts (
-			user_sub   text PRIMARY KEY,
+			rider_sub  text PRIMARY KEY,
 			points     integer NOT NULL DEFAULT 0 CHECK (points >= 0),
 			updated_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS commerce.loyalty_ledger (
+			id         uuid PRIMARY KEY,
+			rider_sub  text NOT NULL,
+			delta      integer NOT NULL,
+			reason     text NOT NULL,
+			ref_id     text NOT NULL UNIQUE,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS commerce.loyalty_redemptions (
+			id              uuid PRIMARY KEY,
+			rider_sub       text NOT NULL,
+			offer_id        uuid NOT NULL,
+			points_spent    integer NOT NULL,
+			idempotency_key text NOT NULL UNIQUE,
+			status          text NOT NULL DEFAULT 'completed',
+			created_at      timestamptz NOT NULL DEFAULT now()
 		)`,
 		`CREATE TABLE IF NOT EXISTS commerce.marketplace_offers (
 			id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
