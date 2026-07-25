@@ -2,99 +2,176 @@ package kpi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
-type stubSource struct {
-	name string
-	val  any
-	err  error
+type fakeSource struct {
+	name  string
+	data  any
+	err   error
 	delay time.Duration
 }
 
-func (s stubSource) Name() string { return s.name }
-func (s stubSource) Collect(ctx context.Context) (any, error) {
-	if s.delay > 0 {
+func (f fakeSource) Name() string { return f.name }
+func (f fakeSource) Collect(ctx context.Context) (any, error) {
+	if f.delay > 0 {
 		select {
-		case <-time.After(s.delay):
+		case <-time.After(f.delay):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
-	return s.val, s.err
+	return f.data, f.err
 }
 
-func TestCollectMergesAllSources(t *testing.T) {
-	agg := NewAggregator([]Source{
-		stubSource{name: "fleet", val: FleetKPIs{VehiclesTotal: 50, VehiclesAvailable: 44, TelemetryPointsPerMin: 120}},
-		stubSource{name: "infra", val: InfraKPIs{OpenIncidents: 2}},
-		stubSource{name: "citizen", val: CitizenKPIs{DRTRequestsToday: 7, CarbonKgCO2Total: 1234.5}},
-		stubSource{name: "commerce", val: CommerceKPIs{Payments30d: 12, Revenue30dMinor: 45600, Currency: "EUR"}},
-		stubSource{name: "toggles", val: ToggleKPIs{ModulesEnabled: 18, ModulesTotal: 20,
-			Domains: map[string]DomainCount{"fleet": {Enabled: 4, Total: 5}}}},
-	}, time.Second)
-
-	k := agg.Collect(context.Background())
-	if k.Fleet == nil || k.Fleet.VehiclesAvailable != 44 {
-		t.Fatalf("fleet section wrong: %+v", k.Fleet)
-	}
-	if k.Infra == nil || k.Infra.OpenIncidents != 2 {
-		t.Fatalf("infra section wrong: %+v", k.Infra)
-	}
-	if k.Citizen == nil || k.Citizen.DRTRequestsToday != 7 {
-		t.Fatalf("citizen section wrong: %+v", k.Citizen)
-	}
-	if k.Commerce == nil || k.Commerce.Revenue30dMinor != 45600 {
-		t.Fatalf("commerce section wrong: %+v", k.Commerce)
-	}
-	if k.Toggles == nil || k.Toggles.ModulesEnabled != 18 {
-		t.Fatalf("toggles section wrong: %+v", k.Toggles)
-	}
-	if k.Meta.Partial || len(k.Meta.Degraded) != 0 {
-		t.Fatalf("no degradation expected: %+v", k.Meta)
-	}
-	if k.GeneratedAt.IsZero() {
-		t.Fatalf("generated_at not stamped")
+func okSources() []Source {
+	return []Source{
+		fakeSource{name: "fleet", data: FleetKPIs{VehiclesTotal: 50, VehiclesAvailable: 44, TelemetryPointsPerMin: 120}},
+		fakeSource{name: "infra", data: InfraKPIs{OpenIncidents: 2}},
+		fakeSource{name: "citizen", data: CitizenKPIs{DRTRequestsToday: 7, CarbonKgCO2Total: 1234.5}},
+		fakeSource{name: "commerce", data: CommerceKPIs{Payments30d: 12, Revenue30dMinor: 45600, Currency: "EUR"}},
+		fakeSource{name: "toggles", data: ToggleKPIs{ModulesEnabled: 20, ModulesTotal: 20}},
 	}
 }
 
-func TestCollectDegradesFailedSource(t *testing.T) {
-	agg := NewAggregator([]Source{
-		stubSource{name: "fleet", val: FleetKPIs{VehiclesTotal: 50}},
-		stubSource{name: "infra", err: errors.New("db down")},
-	}, time.Second)
-
-	k := agg.Collect(context.Background())
-	if k.Fleet == nil {
-		t.Fatalf("healthy source must still be collected")
+func TestAggregateAllSourcesOK(t *testing.T) {
+	agg := NewAggregator(okSources(), time.Second)
+	resp := agg.Collect(context.Background())
+	if resp.Meta.Partial || len(resp.Meta.Degraded) != 0 {
+		t.Fatalf("expected no degradation, got %+v", resp.Meta)
 	}
-	if k.Infra != nil {
-		t.Fatalf("failed source must leave its section nil")
+	for name, section := range map[string]any{
+		"fleet": resp.Fleet, "infra": resp.Infra, "citizen": resp.Citizen,
+		"commerce": resp.Commerce, "toggles": resp.Toggles,
+	} {
+		if section == nil {
+			t.Fatalf("section %s must not be null", name)
+		}
 	}
-	if !k.Meta.Partial || len(k.Meta.Degraded) != 1 || k.Meta.Degraded[0] != "infra" {
-		t.Fatalf("degradation metadata wrong: %+v", k.Meta)
+	fleet := resp.Fleet.(FleetKPIs)
+	if fleet.VehiclesAvailable != 44 {
+		t.Fatalf("unexpected fleet KPIs: %+v", fleet)
+	}
+	// The whole response must marshal to the documented JSON shape.
+	buf, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["generated_at"] == nil || m["meta"] == nil {
+		t.Fatalf("missing top-level keys: %s", buf)
 	}
 }
 
-func TestCollectTimesOutSlowSource(t *testing.T) {
-	agg := NewAggregator([]Source{
-		stubSource{name: "fleet", val: FleetKPIs{VehiclesTotal: 50}},
-		stubSource{name: "commerce", delay: 500 * time.Millisecond},
-	}, 50*time.Millisecond)
+func TestAggregatePartialDegradation(t *testing.T) {
+	sources := okSources()
+	sources[3] = fakeSource{name: "commerce", err: errors.New("postgres down")}
+	agg := NewAggregator(sources, time.Second)
+	resp := agg.Collect(context.Background())
 
+	if !resp.Meta.Partial {
+		t.Fatalf("expected partial response")
+	}
+	if len(resp.Meta.Degraded) != 1 || resp.Meta.Degraded[0] != "commerce" {
+		t.Fatalf("expected degraded=[commerce], got %v", resp.Meta.Degraded)
+	}
+	if resp.Commerce != nil {
+		t.Fatalf("failed section must be null, got %+v", resp.Commerce)
+	}
+	if resp.Fleet == nil || resp.Infra == nil || resp.Citizen == nil || resp.Toggles == nil {
+		t.Fatalf("healthy sections must still be populated")
+	}
+}
+
+// A source that silently returns (nil, nil) must still surface as a null
+// section plus a degraded entry — never as a plausible-looking zero value.
+func TestAggregateNilDataDegrades(t *testing.T) {
+	sources := []Source{
+		fakeSource{name: "fleet", data: FleetKPIs{VehiclesTotal: 50}},
+		fakeSource{name: "infra", data: nil, err: nil}, // silent no-data
+	}
+	agg := NewAggregator(sources, time.Second)
+	resp := agg.Collect(context.Background())
+	if !resp.Meta.Partial || len(resp.Meta.Degraded) != 1 || resp.Meta.Degraded[0] != "infra" {
+		t.Fatalf("nil-data source must degrade: %+v", resp.Meta)
+	}
+	if resp.Infra != nil {
+		t.Fatalf("nil-data section must be null, got %+v", resp.Infra)
+	}
+	if resp.Fleet == nil {
+		t.Fatalf("healthy section must be populated")
+	}
+}
+
+func TestAggregateSourceTimeout(t *testing.T) {
+	sources := []Source{
+		fakeSource{name: "fleet", data: FleetKPIs{VehiclesTotal: 50}},
+		fakeSource{name: "infra", delay: 500 * time.Millisecond}, // exceeds timeout
+	}
+	agg := NewAggregator(sources, 50*time.Millisecond)
 	start := time.Now()
-	k := agg.Collect(context.Background())
-	elapsed := time.Since(start)
+	resp := agg.Collect(context.Background())
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("aggregation blocked past the source timeout: %v", elapsed)
+	}
+	if resp.Infra != nil || len(resp.Meta.Degraded) != 1 || resp.Meta.Degraded[0] != "infra" {
+		t.Fatalf("slow source must degrade: %+v degraded=%v", resp.Infra, resp.Meta.Degraded)
+	}
+	if resp.Fleet == nil {
+		t.Fatalf("fast source must succeed")
+	}
+}
 
-	if k.Commerce != nil {
-		t.Fatalf("timed-out source must leave its section nil")
+func TestToggleSourceCountsPerDomain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/toggles" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"toggles": {
+			"telematics": true, "digital-twin": false,
+			"refueling-stations": true, "leak-detection": true,
+			"fare-payments": true
+		}}`))
+	}))
+	defer srv.Close()
+
+	src := ToggleSource(srv.URL)
+	data, err := src.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
 	}
-	if len(k.Meta.Degraded) != 1 || k.Meta.Degraded[0] != "commerce" {
-		t.Fatalf("timeout must mark the source degraded: %+v", k.Meta)
+	k := data.(ToggleKPIs)
+	if k.ModulesTotal != 5 || k.ModulesEnabled != 4 {
+		t.Fatalf("bad totals: %+v", k)
 	}
-	if elapsed > 400*time.Millisecond {
-		t.Fatalf("aggregation must be bounded by the timeout, took %v", elapsed)
+	if got := k.Domains["fleet"]; got.Total != 2 || got.Enabled != 1 {
+		t.Fatalf("bad fleet domain count: %+v", got)
+	}
+	if got := k.Domains["infra"]; got.Total != 2 || got.Enabled != 2 {
+		t.Fatalf("bad infra domain count: %+v", got)
+	}
+	if got := k.Domains["commerce"]; got.Total != 1 || got.Enabled != 1 {
+		t.Fatalf("bad commerce domain count: %+v", got)
+	}
+	if got := k.Domains["citizen"]; got.Total != 0 {
+		t.Fatalf("citizen domain should be zero-valued: %+v", got)
+	}
+}
+
+func TestToggleSourceFailureDegrades(t *testing.T) {
+	// Unreachable toggle-service -> Collect must return an error so the
+	// aggregator marks the toggles section degraded.
+	src := ToggleSource("http://127.0.0.1:1")
+	if _, err := src.Collect(context.Background()); err == nil {
+		t.Fatalf("expected error for unreachable toggle-service")
 	}
 }

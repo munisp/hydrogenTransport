@@ -105,10 +105,11 @@ ORDER BY created_at DESC LIMIT 1`).Scan(&currency)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("payments currency: %w", err)
 		}
+		// Honest-null rule: when there are no payments there is no observed
+		// currency — leave it empty rather than fabricating a plausible
+		// default like "EUR".
 		if currency != nil {
 			k.Currency = *currency
-		} else {
-			k.Currency = "EUR"
 		}
 		return k, nil
 	}}
