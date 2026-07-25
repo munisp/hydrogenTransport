@@ -1,0 +1,19 @@
+{
+  "model": "maintenance_lstm",
+  "version": "v1.0.0",
+  "trained_at": "2026-07-25T02:35:25.568127+00:00",
+  "auc_mean": 0.7502668578623719,
+  "auc_per_component": {
+    "fuel_cell": 0.8908074809973545,
+    "compressor": 0.6685301616376643,
+    "tank_valve": 0.48779369728695254,
+    "battery": 0.9539360915275163
+  },
+  "mae_days_to_failure": 34.300689697265625,
+  "primary_metric": "auc_mean",
+  "primary_value": 0.7502668578623719,
+  "train_seconds": 36.34,
+  "source": "synth",
+  "data_note": "SYNTHETIC bootstrap data",
+  "n_params": 5256
+}
