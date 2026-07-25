@@ -1,0 +1,33 @@
+# =============================================================================
+# OpenSearch 2.x tuning — h2fleet-logs cluster (open-data + telemetry search).
+# 3-node cluster per infra/prod overlay; see K8S_NOTES.md §OpenSearch for the
+# security/TLS checklist (plugins.security.disabled is DEV-ONLY).
+# =============================================================================
+
+cluster.name: h2fleet-logs
+node.name: ${HOSTNAME}
+network.host: 0.0.0.0
+
+discovery.seed_hosts: ["opensearch", "opensearch-2", "opensearch-3"]
+cluster.initial_master_nodes: ["opensearch", "opensearch-2", "opensearch-3"]
+
+# --- indexing/search balance: telemetry search is write-tilted ----------------
+# Default 5 shards/index is wasteful at this volume; set on index templates:
+#   h2fleet-open: 3 shards / 1 replica
+#   telemetry logs (daily rollover): 2 shards / 1 replica, ISM delete at 30d
+thread_pool.write.queue_size: 1000
+indices.memory.index_buffer_size: 20%      # default 10% starves write-heavy tier
+indices.queries.cache.size: 10%
+
+# --- circuit breakers: protect the cluster from open-data wildcard abuse ------
+indices.breaker.total.limit: 70%
+indices.breaker.request.limit: 40%
+indices.breaker.fielddata.limit: 30%
+
+# --- slow logs: feed tuning loop ----------------------------------------------
+index.search.slowlog.threshold.query.warn: 5s
+index.search.slowlog.threshold.fetch.warn: 1s
+index.indexing.slowlog.threshold.index.warn: 5s
+
+# --- snapshots (MinIO lakehouse bucket) ----------------------------------------
+# path.repo: ["/usr/share/opensearch/snapshots"]   # or repository-s3 to MinIO

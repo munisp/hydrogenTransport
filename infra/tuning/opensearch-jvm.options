@@ -1,0 +1,20 @@
+# OpenSearch jvm.options additions — H2Fleet.
+# Rule: heap = 50% of node RAM, never above ~30GB (compressed oops cliff).
+# For the 4GB-class compose nodes use 1g; production data nodes 4g-8g.
+
+-Xms1g
+-Xmx1g
+
+# G1 is the OpenSearch default; these are the tuned thresholds:
+-XX:+UseG1GC
+-XX:G1ReservePercent=25
+-XX:InitiatingHeapOccupancyPercent=30
+-XX:MaxGCPauseMillis=200
+
+# Always: heap dumps on OOM to a mounted volume for post-mortem.
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:HeapDumpPath=/usr/share/opensearch/data
+
+# Disable JVM DNS caching beyond TTLs (compose/k8s DNS renames on failover).
+-Dnetworkaddress.cache.ttl=30
+-Dnetworkaddress.cache.negative.ttl=10
