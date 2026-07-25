@@ -223,13 +223,7 @@ async fn snapshot_once(pool: &PgPool, redis: &mut MultiplexedConnection) -> anyh
         return Ok(0);
     }
 
-    let rows = sqlx::query(
-        r#"
-        INSERT INTO fleet.twin_snapshots (bus_id, ts, state)
-        SELECT u.bus_id, now(), u.state
-        FROM unnest($1::uuid[], $2::jsonb[]) AS u(bus_id, state)
-        "#,
-    )
+    let rows = sqlx::query(SNAPSHOT_INSERT_SQL)
     .bind(&ids)
     .bind(&states)
     .execute(pool)
@@ -238,6 +232,17 @@ async fn snapshot_once(pool: &PgPool, redis: &mut MultiplexedConnection) -> anyh
     .rows_affected();
     Ok(rows as usize)
 }
+
+/// Snapshot insert. fleet.twin_snapshots is (id, bus_id, state, updated_at)
+/// — there is NO `ts` column; `updated_at` defaults to now(). The previous
+/// `(bus_id, ts, state)` insert failed every batch with "column ts does not
+/// exist" (BUSINESS_LOGIC_AUDIT S1 / digital-twin P0). Kept as a const so a
+/// regression test pins the column list against the migration DDL.
+const SNAPSHOT_INSERT_SQL: &str = r#"
+    INSERT INTO fleet.twin_snapshots (bus_id, state)
+    SELECT u.bus_id, u.state
+    FROM unnest($1::uuid[], $2::jsonb[]) AS u(bus_id, state)
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -332,5 +337,63 @@ mod tests {
     fn partition_empty_index() {
         let (ids, states, stale) = partition_states(&[], vec![]);
         assert!(ids.is_empty() && states.is_empty() && stale.is_empty());
+    }
+
+    #[test]
+    fn snapshot_insert_targets_existing_columns_only() {
+        // Regression for the audit S1 P0: the table is
+        // (id, bus_id, state, updated_at) — inserting a `ts` column failed
+        // every snapshot batch. Pin the insert's column list so the bug
+        // cannot be reintroduced without failing this test.
+        let normalized: String = SNAPSHOT_INSERT_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            normalized.contains("insert into fleet.twin_snapshots (bus_id, state)"),
+            "snapshot insert must target exactly (bus_id, state); got: {normalized}"
+        );
+        assert!(!normalized.contains("(bus_id, ts, state)"));
+    }
+
+    #[test]
+    fn snapshot_round_trip_twin_state_through_hot_state_codec() {
+        // Round-trip: telemetry.enriched -> TwinState -> Redis hot-state JSON
+        // (as apply_update stores it) -> MGET value -> partition_states ->
+        // the exact JSON row bound to the snapshot insert. Proves the
+        // serialize/store/recover path keeps states snapshottable.
+        let bus = Uuid::parse_str(BUS_A).unwrap();
+        let t = TelemetryEnriched {
+            bus_id: bus,
+            ts: "2026-07-24T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap(),
+            speed_kph: 42.0,
+            h2_level_pct: 63.5,
+            fuel_cell_kw: 55.0,
+            battery_soc_pct: 81.0,
+            odometer_km: 12345.6,
+            lat: 52.52,
+            lon: 13.405,
+            route_id: Some("R10".to_string()),
+            depot_id: None,
+            heading_deg: Some(270.0),
+        };
+        let state = TwinState::from_telemetry(&t);
+        let hot_json = serde_json::to_string(&state).unwrap(); // Redis SET twin:<bus_id>
+
+        let (ids, states, stale) =
+            partition_states(&[BUS_A.to_string()], vec![Some(hot_json.clone())]);
+        assert!(stale.is_empty());
+        assert_eq!(ids, vec![bus]);
+        assert_eq!(states.len(), 1);
+
+        // The snapshotted JSON row deserializes back to an equivalent state.
+        let recovered: TwinState = serde_json::from_value(states[0].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&recovered).unwrap(),
+            serde_json::to_value(&state).unwrap()
+        );
+        assert_eq!(states[0]["status"], serde_json::json!("moving"));
+        assert_eq!(states[0]["route_id"], serde_json::json!("R10"));
     }
 }

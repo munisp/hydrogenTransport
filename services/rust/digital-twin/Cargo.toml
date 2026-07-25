@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "H2Fleet per-bus digital twin: telemetry.enriched -> Redis hot state + Postgres snapshots + read API"
 
+# SECURITY (RUSTSEC-2023-0071, rsa 0.9.10 transitive via sqlx/redis TLS): Marvin timing
+# side-channel on RSA decryption. No fix released as of 2026-07-25; NOT exploitable here —
+# this service performs no RSA private-key operations. Resolve via `cargo update` when a fixed rsa lands.
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rdkafka = { version = "0.37", features = ["cmake-build", "tokio"] }
