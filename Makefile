@@ -104,6 +104,12 @@ smoke: ## End-to-end smoke suite (tests/e2e/smoke.sh — delivered by a follow-u
 	  $(MAKE) gateway-check; \
 	fi
 
+validate-scenarios: ## Static-check the 10 stakeholder scenarios against committed OpenAPI specs (no live stack needed)
+	python3 tests/e2e/scenarios/validate_scenarios.py
+
+scenarios: ## Run the 10 stakeholder scenario scripts against a live stack (requires up-all)
+	tests/e2e/scenarios/run_all.sh
+
 build-go: ## go build + vet all Go services locally
 	@for s in $(GO_SERVICES); do \
 	  echo "== services/go/$$s"; \

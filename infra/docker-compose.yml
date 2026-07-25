@@ -73,7 +73,7 @@ services:
       retries: 6
 
   kafka:
-    image: bitnami/kafka:3.7
+    image: bitnami/kafka:3.9.1
     container_name: h2-kafka
     networks: [h2net]
     ports:
@@ -126,7 +126,7 @@ services:
   # Temporal — dispatch / incident / settlement workflows (+ UI + its own PG)
   # ---------------------------------------------------------------------------
   postgres-temporal:
-    image: postgres:16-alpine
+    image: postgres:16.10-alpine
     container_name: h2-postgres-temporal
     networks: [h2net]
     environment:
@@ -142,7 +142,7 @@ services:
       retries: 6
 
   temporal:
-    image: temporalio/auto-setup:1.24.2
+    image: temporalio/auto-setup:1.29.6
     container_name: h2-temporal
     networks: [h2net]
     ports:
@@ -166,7 +166,7 @@ services:
       start_period: 60s
 
   temporal-ui:
-    image: temporalio/ui:2.28.0
+    image: temporalio/ui:2.34.0
     container_name: h2-temporal-ui
     networks: [h2net]
     ports:
@@ -186,7 +186,7 @@ services:
   # (infra/sql/migrations). Both paths are idempotent.
   # ---------------------------------------------------------------------------
   postgres:
-    image: timescale/timescaledb-ha:pg16.4-ts2.17.2-all
+    image: timescale/timescaledb-ha:pg16.10-ts2.22.1-all
     container_name: h2-postgres
     networks: [h2net]
     ports:
@@ -251,7 +251,7 @@ services:
     restart: "no"
 
   keycloak:
-    image: quay.io/keycloak/keycloak:25.0
+    image: quay.io/keycloak/keycloak:26.5
     container_name: h2-keycloak
     networks: [h2net]
     ports:
@@ -289,7 +289,7 @@ services:
   # infra/permify/schema.perm.
   # ---------------------------------------------------------------------------
   permify-db-init:
-    image: postgres:16-alpine
+    image: postgres:16.10-alpine
     container_name: h2-permify-db-init
     networks: [h2net]
     environment:
@@ -347,7 +347,7 @@ services:
              sleep 2;
              curl -sf -X POST http://permify:3478/v1/tenants/t1/schemas
                -H 'Content-Type: application/json'
-               -d '{\"schema\": '\"'$$(cat /schema.perm | sed 's/\"/\\\\\"/g' | sed 's/^/\\n/' | tr -d \"\n\")'\"'}'
+               -d '{\"schema\": '"'$$(cat /schema.perm | sed 's/\"/\\\"/g' | sed 's/^/\n/' | tr -d \"\n\")'\"'}'
              || echo 'schema write best-effort (use Permify UI/CLI to verify)'"
     depends_on:
       permify:
@@ -358,7 +358,9 @@ services:
   # Redis — toggle cache, twin hot state, sessions, simulator bus:meta hashes
   # ---------------------------------------------------------------------------
   redis:
-    image: redis:7.4-alpine
+    # SECURITY: pinned to 7.4.6 (CVE-2025-49844/32023/48367/21605/2024-46981). Audit also
+    # recommends ACL-disabling EVAL/EVALSHA for service users (redis config, owned separately).
+    image: redis:7.4.6-alpine
     container_name: h2-redis
     networks: [h2net]
     ports:
@@ -378,7 +380,7 @@ services:
   # citizen-api (OPENSEARCH_INDEX=h2fleet-open) and the open-data portal.
   # ---------------------------------------------------------------------------
   opensearch:
-    image: opensearchproject/opensearch:2.17.1
+    image: opensearchproject/opensearch:2.19.2
     container_name: h2-opensearch
     networks: [h2net]
     ports:
@@ -400,13 +402,13 @@ services:
       start_period: 60s
 
   opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:2.17.1
+    image: opensearchproject/opensearch-dashboards:2.19.2
     container_name: h2-opensearch-dashboards
     networks: [h2net]
     ports:
       - "127.0.0.1:5601:5601"
     environment:
-      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      OPENSEARCH_HOSTS: '[\"http://opensearch:9200\"]'
       DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
     depends_on:
       opensearch:
@@ -443,7 +445,7 @@ services:
   # OpenAppSec WAF: enable profile `waf` to attach the openappsec agent.
   # ---------------------------------------------------------------------------
   apisix:
-    image: apache/apisix:3.10.0-debian
+    image: apache/apisix:3.17.0-debian
     container_name: h2-apisix
     networks: [h2net]
     ports:
@@ -540,6 +542,9 @@ services:
   # Analytics zone: iceberg tables under s3://h2-lakehouse/
   # ---------------------------------------------------------------------------
   minio:
+    # SECURITY (CVE-2026-41145): audit 2026-07-25 recommends latest RELEASE.2026-xx, but no
+    # verifiable upstream minio/minio 2026 tag exists (upstream image publishing stalled).
+    # Track and bump at the integration gate; rotate default creds (audit F9) in the meantime.
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
     container_name: h2-minio
     networks: [h2net]
@@ -559,6 +564,7 @@ services:
       retries: 8
 
   minio-init:
+    # SECURITY: see minio note above — bump together with minio/minio when a verified tag lands.
     image: minio/mc:RELEASE.2024-10-08T09-37-26Z
     container_name: h2-minio-init
     networks: [h2net]
@@ -607,9 +613,21 @@ services:
   # org.apache.sedona.sql.SedonaSqlExtensions). To run ad-hoc Sedona jobs
   # against this master, mount the same jars via spark-submit --packages
   # org.apache.sedona:sedona-spark-shaded-3.5_2.12:1.7.0.
+  #
+  # SECURITY (CVE-2025-55039): Spark's network crypto (spark.network.crypto.*)
+  # uses AES/CTR with a reused keystream — enabling it WITHOUT the fix leaks
+  # RPC plaintext. Spark 3.5.7 does not yet carry the upstream hardening, so
+  # RPC encryption stays OFF here (SPARK_RPC_ENCRYPTION_ENABLED=no) and the
+  # master submit/UI ports MUST stay internal to h2net (they are published to
+  # the host below only for local dev). If RPC encryption is ever enabled,
+  # the audit's recommended mitigation is:
+  #   spark.network.crypto.enabled=true
+  #   spark.network.crypto.cipher=AES/GCM/NoPadding
+  # (plus spark.authenticate=true with a shared secret) — set via
+  # spark-defaults.conf / SPARK_CONF_DIR, not invented ad-hoc here.
   # ---------------------------------------------------------------------------
   spark-master:
-    image: bitnami/spark:3.5.3
+    image: bitnami/spark:3.5.7
     container_name: h2-spark-master
     networks: [h2net]
     ports:
@@ -628,7 +646,7 @@ services:
       retries: 8
 
   spark-worker:
-    image: bitnami/spark:3.5.3
+    image: bitnami/spark:3.5.7
     container_name: h2-spark-worker
     networks: [h2net]
     ports:
@@ -655,7 +673,7 @@ services:
   # simply show as DOWN in Prometheus.
   # ---------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.55.1
     container_name: h2-prometheus
     networks: [h2net]
     ports:
@@ -674,7 +692,7 @@ services:
       retries: 6
 
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: prom/alertmanager:v0.28.1
     container_name: h2-alertmanager
     networks: [h2net]
     ports:
@@ -688,7 +706,7 @@ services:
       retries: 6
 
   grafana:
-    image: grafana/grafana:11.2.2
+    image: grafana/grafana:11.2.10
     container_name: h2-grafana
     networks: [h2net]
     ports:
@@ -774,6 +792,8 @@ services:
       PORT: "8080"
       PERMIFY_GRPC: permify:3476
       PERMIFY_TENANT: t1
+      AUDIT_LOG_URL: http://audit-log:8086
+      AUDIT_INGEST_TOKEN: ${AUDIT_INGEST_TOKEN:?set_AUDIT_INGEST_TOKEN_in_.env}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -871,7 +891,7 @@ services:
   # (network_mode: service:…) so the Go dapr SDK default dial 127.0.0.1:50001
   # works exactly like the k8s sidecar; no placement service needed (no actors).
   citizen-api-daprd:
-    image: daprio/daprd:latest
+    image: daprio/daprd:1.17.5
     container_name: h2-citizen-api-daprd
     profiles: ["apps", "all"]
     network_mode: service:citizen-api
@@ -908,6 +928,8 @@ services:
       DAPR_HTTP_PORT: "3500"
       DAPR_GRPC_PORT: "50001"
       DAPR_PUBSUB_NAME: h2pubsub
+      AUDIT_LOG_URL: http://audit-log:8086
+      AUDIT_INGEST_TOKEN: ${AUDIT_INGEST_TOKEN:?set_AUDIT_INGEST_TOKEN_in_.env}
     depends_on:
       postgres: { condition: service_healthy }
       toggle-service: { condition: service_started }
@@ -921,7 +943,7 @@ services:
       retries: 6
 
   commerce-api-daprd:
-    image: daprio/daprd:latest
+    image: daprio/daprd:1.17.5
     container_name: h2-commerce-api-daprd
     profiles: ["apps", "all"]
     network_mode: service:commerce-api
@@ -1142,6 +1164,8 @@ services:
       KEYCLOAK_ADMIN_CLIENT_ID: ${KEYCLOAK_ADMIN_CLIENT_ID:-h2fleet-admin-api}
       KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-h2fleet-admin-api-secret-change-me}
       ALERTMANAGER_URL: http://alertmanager:9093
+      AUDIT_LOG_URL: http://audit-log:8086
+      AUDIT_INGEST_TOKEN: ${AUDIT_INGEST_TOKEN:?set_AUDIT_INGEST_TOKEN_in_.env}
     depends_on:
       keycloak: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -1206,7 +1230,7 @@ services:
   # UI: http://127.0.0.1:5000 (loopback only).
   # ===========================================================================
   mlflow-db-init:
-    image: postgres:16-alpine
+    image: postgres:16.10-alpine
     container_name: h2-mlflow-db-init
     profiles: ["ml", "all"]
     networks: [h2net]
@@ -1222,7 +1246,7 @@ services:
     restart: "no"
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.14.1
+    image: ghcr.io/mlflow/mlflow:v3.14.0
     container_name: h2-mlflow
     profiles: ["ml", "all"]
     networks: [h2net]
@@ -1256,7 +1280,7 @@ services:
   # Browser: http://127.0.0.1:7474 (user neo4j / NEO4J_PASSWORD).
   # ===========================================================================
   neo4j:
-    image: neo4j:5-community
+    image: neo4j:5.26.22-community
     container_name: h2-neo4j
     profiles: ["graph"]
     networks: [h2net]
@@ -1284,6 +1308,8 @@ services:
   # Dashboard: http://127.0.0.1:8265  (GCS on ray-head:6379 in-network)
   # ===========================================================================
   ray-head:
+    # SECURITY: Ray Jobs API is unauthenticated by design (audit 2026-07-25). Mitigation:
+    # keep head/dashboard unreachable outside the cluster (NetworkPolicy default-deny). Plan upgrade to 2.4x.
     image: rayproject/ray:2.34.0-py311
     container_name: h2-ray-head
     profiles: ["ray"]
@@ -1301,6 +1327,8 @@ services:
       start_period: 30s
 
   ray-worker:
+    # SECURITY: Ray Jobs API is unauthenticated by design (audit 2026-07-25). Mitigation:
+    # keep head/dashboard unreachable outside the cluster (NetworkPolicy default-deny). Plan upgrade to 2.4x.
     image: rayproject/ray:2.34.0-py311
     container_name: h2-ray-worker
     profiles: ["ray"]
@@ -1309,3 +1337,62 @@ services:
     shm_size: "1gb"
     depends_on:
       ray-head: { condition: service_healthy }
+
+  # ---------------------------------------------------------------------------
+  # audit-log (Go, :8086) — hash-chained, append-only audit trail for insider-
+  # threat forensics. Persists to platform.audit_log (migration 0005), mirrors
+  # to OpenSearch index h2fleet-audit, and raises anomaly alerts to
+  # Alertmanager. Other services emit via AUDIT_LOG_URL/AUDIT_INGEST_TOKEN.
+  # ---------------------------------------------------------------------------
+  audit-log:
+    build:
+      context: ..
+      dockerfile: services/go/audit-log/Dockerfile
+    container_name: h2-audit-log
+    profiles: ["apps", "all"]
+    networks: [h2net]
+    ports: ["18086:8086"]
+    environment:
+      <<: *h2-env
+      PORT: "8086"
+      AUDIT_INGEST_TOKEN: ${AUDIT_INGEST_TOKEN:?set_AUDIT_INGEST_TOKEN_in_.env}
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: h2fleet-audit
+      ALERTMANAGER_URL: http://alertmanager:9093
+    depends_on:
+      postgres: { condition: service_healthy }
+      opensearch: { condition: service_started }
+      alertmanager: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8086/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # ---------------------------------------------------------------------------
+  # analytics-bff (TypeScript/Hono + Drizzle, :8096) — read-only analytics
+  # backend-for-frontend serving the admin console (fleet summary, daily
+  # revenue, daily carbon). Exercises the shared packages/db Drizzle schema.
+  # ---------------------------------------------------------------------------
+  analytics-bff:
+    build:
+      context: ..
+      dockerfile: services/ts/analytics-bff/Dockerfile
+    container_name: h2-analytics-bff
+    profiles: ["apps", "all"]
+    networks: [h2net]
+    ports: ["18096:8096"]
+    environment:
+      PORT: "8096"
+      DATABASE_URL: postgres://h2:${POSTGRES_PASSWORD:?set_POSTGRES_PASSWORD_in_.env}@postgres:5432/h2fleet?sslmode=disable
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/h2fleet
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-services}
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8096/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
