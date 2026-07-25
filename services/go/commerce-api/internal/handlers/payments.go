@@ -1,13 +1,12 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,6 +17,7 @@ import (
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/ledger"
+	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/mojaloop"
 )
 
 // Payment mirrors commerce.fare_payments (fare-payments module).
@@ -46,7 +46,10 @@ func scanPayment(row pgx.Row) (Payment, error) {
 type createPaymentRequest struct {
 	AmountMinor int64  `json:"amount_minor"`
 	Currency    string `json:"currency"`
-	RiderSub    string `json:"rider_sub"` // defaults to the JWT subject
+	// RiderSub is DEPRECATED: the paying rider is always the authenticated
+	// JWT subject. A non-empty value that differs from the JWT subject is
+	// rejected with 403 (P0-1); a matching value is accepted but ignored.
+	RiderSub    string `json:"rider_sub"`
 	UseMojaloop bool   `json:"use_mojaloop"`
 }
 
@@ -64,7 +67,7 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 			return
 		}
 		var req createPaymentRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
@@ -75,13 +78,20 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		if req.Currency == "" {
 			req.Currency = "EUR"
 		}
-		if req.RiderSub == "" {
-			req.RiderSub = auth.Subject(r.Context())
-		}
-		if req.RiderSub == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rider_sub could not be determined"})
+		// SECURITY (P0-1): the paying rider is ALWAYS the authenticated JWT
+		// subject. The body's rider_sub is kept for backwards compatibility
+		// but is never trusted: a value that does not match the JWT subject
+		// is rejected (wallet-spoofing attempt), otherwise it is ignored.
+		subject := auth.Subject(r.Context())
+		if subject == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated subject required"})
 			return
 		}
+		if req.RiderSub != "" && req.RiderSub != subject {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "rider_sub does not match the authenticated subject"})
+			return
+		}
+		req.RiderSub = subject
 
 		paymentID := uuid.NewString()
 		_, err := h.db.Exec(r.Context(), `
@@ -132,25 +142,31 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		}
 		status := "settled"
 		var tbID *string
+		insufficientFunds := false
 		transferID, err := h.ledger.Transfer(
 			ledger.DeterministicTransferID(idemKey), account, ledger.OperatorRevenueAccount,
 			uint64(req.AmountMinor), ledger.CodeFare)
 		if err != nil {
 			h.log.Error("ledger transfer failed", zap.String("payment", paymentID), zap.Error(err))
 			status = "failed"
+			// An unfunded (but provisioned) rider wallet is a client-visible
+			// funding problem, not an upstream failure: mapped to 402 below.
+			insufficientFunds = errors.Is(err, ledger.ErrInsufficientFunds)
 		} else {
 			tbID = &transferID
 		}
 
-		// Optional Mojaloop leg. A Mojaloop failure never fabricates a
-		// transfer id — the payment is marked mojaloop_failed instead.
+		// Optional Mojaloop leg (full parties → quotes → transfers flow via
+		// internal/mojaloop when MOJALOOP_ENDPOINT is set; simulated fallback
+		// otherwise). A Mojaloop failure never fabricates a transfer id — the
+		// payment is marked with the classified mojaloop_* status instead.
 		var mlID *string
 		var mlErr error
 		if req.UseMojaloop && status == "settled" {
-			id, err := h.mojaloopTransfer(r, mojaloopEndpoint, paymentID, req)
+			id, err := h.mojaloopTransfer(r, mojaloopEndpoint, paymentID, idemKey, req)
 			if err != nil {
 				h.log.Error("mojaloop transfer failed", zap.String("payment", paymentID), zap.Error(err))
-				status = "mojaloop_failed"
+				status = mojaloop.PaymentStatus(err)
 				mlErr = err
 			} else {
 				mlID = &id
@@ -171,13 +187,23 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 
 		if status != "settled" {
 			reason := "ledger transfer failed"
-			if status == "mojaloop_failed" {
+			if mlErr != nil {
 				reason = "mojaloop transfer failed: " + mlErr.Error()
 			}
 			event["reason"] = reason
 			event["failed_at"] = time.Now().UTC().Format(time.RFC3339)
 			if err := h.pub.Publish(r.Context(), "fare.payment.failed", event); err != nil {
 				h.log.Error("failed to publish fare.payment.failed", zap.Error(err))
+			}
+			if insufficientFunds {
+				// 402 + machine-readable code: the wallet exists but is not
+				// funded. Never a panic, never a negative balance.
+				writeJSON(w, http.StatusPaymentRequired, map[string]any{
+					"error":   "insufficient_funds",
+					"message": "rider wallet has insufficient funds; top up via POST /v1/wallets/topup",
+					"payment": p,
+				})
+				return
 			}
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": reason, "payment": p})
 			return
@@ -191,6 +217,17 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		if err := h.pub.Publish(r.Context(), "fare.payment.settled", event); err != nil {
 			h.log.Error("failed to publish fare.payment.settled", zap.Error(err))
 		}
+
+		// Loyalty accrual (loyalty-marketplace module): 1 point per full €1
+		// (100 minor units) of settled fare. Idempotent on the payment id via
+		// commerce.loyalty_ledger.ref_id, so payment retries never double
+		// award. Accrual failure must not fail an already-settled payment —
+		// it is logged for reconciliation.
+		if err := h.accrueLoyaltyPoints(r.Context(), paymentID, req.RiderSub, req.AmountMinor); err != nil {
+			h.log.Error("loyalty accrual failed",
+				zap.String("payment", paymentID), zap.Error(err))
+		}
+
 		writeJSON(w, http.StatusCreated, p)
 	}
 }
@@ -235,46 +272,57 @@ func (h *Handler) riderAccount(ctx context.Context, riderSub string) (uint64, er
 }
 
 // mojaloopTransfer performs the Mojaloop leg. With MOJALOOP_ENDPOINT set it
-// POSTs a transfer request and returns the real transfer id (the server
-// echoed id, or the client-generated transferId we submitted when the switch
-// accepts without a body); any transport error or non-2xx response is an
-// error and persists NO id. Without an endpoint it returns a clearly-labelled
-// simulated id (SPEC §4 simulated fallback).
-func (h *Handler) mojaloopTransfer(r *http.Request, endpoint, paymentID string, req createPaymentRequest) (string, error) {
+// runs the full FSPIOP payer flow (GET /parties → POST /quotes →
+// POST /transfers) via internal/mojaloop, idempotent on the request's
+// Idempotency-Key, and returns the real switch transfer id. Without an
+// endpoint it returns a clearly-labelled simulated id (SPEC §4 simulated
+// fallback).
+func (h *Handler) mojaloopTransfer(r *http.Request, endpoint, paymentID, idemKey string, req createPaymentRequest) (string, error) {
 	if endpoint == "" {
 		id := "ml-simulated-" + uuid.NewString()
 		h.log.Info("mojaloop transfer simulated", zap.String("payment", paymentID), zap.String("transfer_id", id))
 		return id, nil
 	}
-	transferID := uuid.NewString()
-	body, _ := json.Marshal(map[string]any{
-		"transferId": transferID,
-		"payer":      map[string]string{"partyId": req.RiderSub},
-		"payee":      map[string]string{"partyId": "h2fleet-operator"},
-		"amount":     map[string]any{"amount": req.AmountMinor, "currency": req.Currency},
+	client, err := mojaloop.New(mojaloop.Config{
+		Endpoint:       endpoint,
+		DFSPID:         envOr("MOJALOOP_DFSP_ID", "h2fleet"),
+		PayeePartyID:   envOr("MOJALOOP_PAYEE_PARTY_ID", "h2fleet-operator"),
+		PayeePartyType: envOr("MOJALOOP_PAYEE_PARTY_TYPE", mojaloop.PartyTypeBusiness),
+		Secret:         os.Getenv("MOJALOOP_ILP_SECRET"),
+		// The mojaloop/simulator does not generate ILP material in quotes;
+		// MOJALOOP_GENERATE_ILP=true (the compose default) makes the client
+		// generate packet/condition itself. Against a real sdk-scheme-adapter
+		// the payee's quote values are forwarded verbatim.
+		GenerateILP:    envOr("MOJALOOP_GENERATE_ILP", "true") == "true",
+		AttemptTimeout: 8 * time.Second,
+		RetryBudget:    20 * time.Second,
 	})
-	resp, err := h.httpClient().Post(endpoint+"/transfers", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("mojaloop transfer request failed: %w", err)
+		return "", err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("mojaloop transfer rejected: status %d: %s", resp.StatusCode, string(respBody))
+	res, err := client.Transfer(r.Context(), mojaloop.PaymentRequest{
+		IdempotencyKey: idemKey,
+		PayerPartyID:   req.RiderSub,
+		PayerPartyType: mojaloop.PartyTypeAlias,
+		AmountMinor:    req.AmountMinor,
+		Currency:       req.Currency,
+	})
+	if err != nil {
+		return "", err
 	}
-	var parsed struct {
-		TransferID string `json:"transferId"`
-	}
-	if err := json.Unmarshal(respBody, &parsed); err == nil && parsed.TransferID != "" {
-		return parsed.TransferID, nil
-	}
-	// Accepted (e.g. 202) without a body: the switch will settle under the
-	// transferId we submitted — that id is genuine, not fabricated.
-	return transferID, nil
+	h.log.Info("mojaloop transfer committed",
+		zap.String("payment", paymentID),
+		zap.String("transfer_id", res.TransferID),
+		zap.String("payee_fsp", res.PayeeFSPID),
+		zap.Bool("fulfilment_verified", res.FulfilmentVerified))
+	return res.TransferID, nil
 }
 
-func (h *Handler) httpClient() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // GetPayment handles GET /v1/payments/{id} (Keycloak JWT, status polling).

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
+	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/ledger"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -127,6 +129,127 @@ func TestCreatePayment_InvalidAmount(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 (body: %s)", rec.Code, rec.Body)
+	}
+}
+
+// --- P0-1: rider identity comes from the JWT, never the body ----------------
+
+// SECURITY (P0-1): a client-supplied rider_sub that does not match the JWT
+// subject is a wallet-spoofing attempt → 403 before any DB/ledger work.
+func TestCreatePayment_RiderSubMismatchRejected(t *testing.T) {
+	h := &Handler{log: zap.NewExample()} // no db/ledger: must not be reached
+	rec := httptest.NewRecorder()
+
+	h.CreatePayment("")(rec, createRequest(t,
+		`{"amount_minor":100000,"currency":"EUR","rider_sub":"victim-sub"}`, "atk-001", "mallory"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403 (body: %s)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "rider_sub") {
+		t.Fatalf("error body should name rider_sub: %s", rec.Body)
+	}
+}
+
+// SECURITY (P0-1): a body rider_sub that MATCHES the JWT subject is accepted
+// (backwards compatibility) and the payment is owned by the caller.
+func TestCreatePayment_RiderSubMatchingSubjectAccepted(t *testing.T) {
+	pool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock.NewPool: %v", err)
+	}
+	defer pool.Close()
+	led, pub := &fakeLedger{}, &fakePublisher{}
+	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
+
+	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), "EUR", "idem-match").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectBegin()
+	pool.ExpectExec(`INSERT INTO commerce\.rider_accounts`).
+		WithArgs("rider-a").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectQuery(`SELECT account_id FROM commerce\.rider_accounts`).
+		WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"account_id"}).AddRow(uint64(1001)))
+	pool.ExpectCommit()
+	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
+		WithArgs(pgxmock.AnyArg(), "settled", pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(paymentRow("pay-new", "rider-a", "idem-match", "settled"))
+	// Loyalty accrual on the settled payment (500 cents → 5 points).
+	pool.ExpectBegin()
+	pool.ExpectExec(`INSERT INTO commerce\.loyalty_ledger`).
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(5), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectExec(`INSERT INTO commerce\.loyalty_accounts`).
+		WithArgs("rider-a", int64(5)).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectCommit()
+
+	rec := httptest.NewRecorder()
+	h.CreatePayment("")(rec, createRequest(t,
+		`{"amount_minor":500,"currency":"EUR","rider_sub":"rider-a"}`, "idem-match", "rider-a"))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d, want 201 (body: %s)", rec.Code, rec.Body)
+	}
+	var p Payment
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if p.RiderSub != "rider-a" {
+		t.Fatalf("payment must be owned by the JWT subject, got %+v", p)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
+	}
+}
+
+// --- unfunded wallet → 402 ---------------------------------------------------
+
+// A payment from a provisioned-but-unfunded wallet fails cleanly: 402 with a
+// machine-readable error code, the row is recorded as failed, and
+// fare.payment.failed is still published (never a panic, never negative).
+func TestCreatePayment_InsufficientFunds(t *testing.T) {
+	pool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock.NewPool: %v", err)
+	}
+	defer pool.Close()
+	pub := &fakePublisher{}
+	led := &fakeLedger{err: fmt.Errorf("debit account 1001: %w", ledger.ErrInsufficientFunds)}
+	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
+
+	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), "EUR", "idem-broke").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectBegin()
+	pool.ExpectExec(`INSERT INTO commerce\.rider_accounts`).
+		WithArgs("rider-a").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectQuery(`SELECT account_id FROM commerce\.rider_accounts`).
+		WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"account_id"}).AddRow(uint64(1001)))
+	pool.ExpectCommit()
+	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
+		WithArgs(pgxmock.AnyArg(), "failed", pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(paymentRow("pay-broke", "rider-a", "idem-broke", "failed"))
+
+	rec := httptest.NewRecorder()
+	h.CreatePayment("")(rec, createRequest(t, `{"amount_minor":500,"currency":"EUR"}`, "idem-broke", "rider-a"))
+
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("got %d, want 402 (body: %s)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "insufficient_funds") {
+		t.Fatalf("error body should carry the insufficient_funds code: %s", rec.Body)
+	}
+	topics := pub.published()
+	if len(topics) != 2 || topics[0] != "fare.payment.initiated" || topics[1] != "fare.payment.failed" {
+		t.Fatalf("published topics %v, want [fare.payment.initiated fare.payment.failed]", topics)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
 	}
 }
 
@@ -293,6 +416,16 @@ func TestCreatePayment_Settled(t *testing.T) {
 	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "settled", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(paymentRow("pay-new", "rider-a", "idem-happy", "settled"))
+	// Loyalty accrual on settle: 500 cents → 5 points, idempotent via
+	// loyalty_ledger.ref_id = payment id.
+	pool.ExpectBegin()
+	pool.ExpectExec(`INSERT INTO commerce\.loyalty_ledger`).
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(5), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectExec(`INSERT INTO commerce\.loyalty_accounts`).
+		WithArgs("rider-a", int64(5)).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectCommit()
 
 	rec := httptest.NewRecorder()
 	h.CreatePayment("")(rec, createRequest(t, `{"amount_minor":500,"currency":"EUR"}`, "idem-happy", "rider-a"))
