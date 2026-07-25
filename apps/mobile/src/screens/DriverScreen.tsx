@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FlatList, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -7,10 +7,10 @@ import {
   Button,
   Card,
   ErrorNotice,
-  Loading,
   Notice,
   Screen,
   ScreenTitle,
+  Skeleton,
   StatusBadge,
   formatDateTime,
 } from "../components/ui";
@@ -28,8 +28,27 @@ export default function DriverScreen() {
 
   const accept = useMutation({
     mutationFn: api.acceptDispatchJob,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["driver", "jobs"] }),
+    // Optimistic: flip the card to "accepted" immediately, roll back on error.
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ["driver", "jobs"] });
+      const previous = queryClient.getQueryData<import("../api/client").DispatchJob[]>(["driver", "jobs"]);
+      queryClient.setQueryData<import("../api/client").DispatchJob[]>(["driver", "jobs"], (cur) =>
+        (cur ?? []).map((j) => (j.id === id ? { ...j, status: "accepted" } : j)),
+      );
+      return { previous };
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(["driver", "jobs"], ctx.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["driver", "jobs"] }),
   });
+
+  // Auto-dismiss the accepted banner.
+  useEffect(() => {
+    if (!accept.isSuccess) return;
+    const t = setTimeout(() => accept.reset(), 4000);
+    return () => clearTimeout(t);
+  }, [accept.isSuccess]);
 
   return (
     <Screen>
@@ -42,8 +61,25 @@ export default function DriverScreen() {
       />
       <View style={{ height: 14 }} />
 
+      {accept.isSuccess ? (
+        <Notice tone="green" title="Job accepted" body="You're on the roster — have a safe shift." />
+      ) : null}
+      {accept.isError ? (
+        <View>
+          <ErrorNotice error={accept.error} />
+        </View>
+      ) : null}
+
       {jobs.isLoading ? (
-        <Loading />
+        <View>
+          {[0, 1, 2].map((i) => (
+            <Card key={i}>
+              <Skeleton height={16} width="60%" />
+              <View style={{ height: 8 }} />
+              <Skeleton height={12} width="40%" />
+            </Card>
+          ))}
+        </View>
       ) : jobs.isError ? (
         <ErrorNotice error={jobs.error} />
       ) : (
@@ -73,6 +109,7 @@ export default function DriverScreen() {
                     label="Accept job"
                     variant="secondary"
                     busy={accept.isPending && accept.variables === item.id}
+                    disabled={accept.isPending}
                     onPress={() => accept.mutate(item.id)}
                   />
                 </View>

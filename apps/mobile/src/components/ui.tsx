@@ -1,6 +1,7 @@
-import React, { type ReactNode } from "react";
+import React, { useEffect, useRef, type ReactNode } from "react";
 import {
   ActivityIndicator,
+  Animated,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -79,6 +80,26 @@ export function Button({
         <Text style={[styles.buttonText, { color: fg }]}>{label}</Text>
       )}
     </TouchableOpacity>
+  );
+}
+
+/** Pulsing placeholder block for loading skeletons. */
+export function Skeleton({ height = 14, width = "100%", style }: { height?: number; width?: number | `${number}%`; style?: object }) {
+  const opacity = useRef(new Animated.Value(0.45)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 650, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.45, duration: 650, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+  return (
+    <Animated.View
+      style={[{ height, width, borderRadius: 8, backgroundColor: colors.border, opacity }, style]}
+    />
   );
 }
 

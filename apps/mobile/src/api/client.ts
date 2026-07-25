@@ -67,6 +67,17 @@ export interface DispatchJob {
   accepted_at?: string | null; // omitempty
 }
 
+/** admin-api — receipt returned for an onboarding intake. */
+export interface OnboardingReceipt {
+  id: string;
+  persona: string;
+  email: string;
+  display_name: string;
+  org: string;
+  status: "pending" | "approved" | "rejected" | "completed";
+  created_at: string;
+}
+
 // ---- HTTP core ----------------------------------------------------------------
 
 export class ApiError extends Error {
@@ -177,6 +188,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  // ---- Onboarding (admin-api, public intake) ----
+  onboardCitizen: (body: { email: string; display_name: string; password: string }) =>
+    apiFetch<{ request: OnboardingReceipt; message?: string }>(
+      "/api/admin/v1/onboarding/citizen",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  submitOnboarding: (
+    persona: string,
+    body: { email: string; display_name: string; org: string; meta?: Record<string, unknown> },
+  ) =>
+    apiFetch<{ request: OnboardingReceipt; message?: string }>(
+      `/api/admin/v1/onboarding/${encodeURIComponent(persona)}`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 
   // ---- Toggle service (fail-closed) ----
   getToggles: async (): Promise<Record<string, boolean>> => {

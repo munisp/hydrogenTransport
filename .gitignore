@@ -24,3 +24,4 @@ models/*.bin
 models/*.pkl
 !models/.gitkeep
 apps/pwa/dev-dist/
+.pytest_cache/

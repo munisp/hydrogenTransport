@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { config } from "../config";
 import { colors } from "../theme";
-import { Card, ErrorNotice, Loading, Screen, ScreenTitle, formatEta } from "../components/ui";
+import { Card, ErrorNotice, Screen, ScreenTitle, Skeleton, formatEta } from "../components/ui";
 
 /** Citizen: live arrivals board for a selected stop. */
 export default function ArrivalsScreen() {
@@ -24,7 +24,14 @@ export default function ArrivalsScreen() {
       <ScreenTitle title="Arrivals" subtitle="Live hydrogen bus departures" />
 
       {stops.isLoading ? (
-        <Loading />
+        <View>
+          <View style={styles.skeletonChipRow}>
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} height={34} width={96} style={{ borderRadius: 999, marginRight: 8 }} />
+            ))}
+          </View>
+          <ArrivalSkeletons />
+        </View>
       ) : stops.isError ? (
         <ErrorNotice error={stops.error} />
       ) : (
@@ -50,7 +57,7 @@ export default function ArrivalsScreen() {
           />
 
           {arrivals.isLoading ? (
-            <Loading />
+            <ArrivalSkeletons />
           ) : arrivals.isError ? (
             <ErrorNotice error={arrivals.error} />
           ) : (
@@ -86,8 +93,27 @@ export default function ArrivalsScreen() {
   );
 }
 
+/** Skeleton rows shown while arrivals load (replaces the bare spinner). */
+function ArrivalSkeletons() {
+  return (
+    <View>
+      {[0, 1, 2].map((i) => (
+        <Card key={i} style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+          <Skeleton height={32} width={48} />
+          <View style={{ flex: 1, gap: 6 }}>
+            <Skeleton height={13} width="70%" />
+            <Skeleton height={10} width="40%" />
+          </View>
+          <Skeleton height={15} width={52} />
+        </Card>
+      ))}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   stopList: { flexGrow: 0, marginBottom: 12 },
+  skeletonChipRow: { flexDirection: "row", marginBottom: 12 },
   stopChip: {
     borderRadius: 999,
     borderWidth: 1,

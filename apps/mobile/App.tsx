@@ -14,6 +14,7 @@ import DrtScreen from "./src/screens/DrtScreen";
 import AlertsScreen from "./src/screens/AlertsScreen";
 import CarbonScreen from "./src/screens/CarbonScreen";
 import DriverScreen from "./src/screens/DriverScreen";
+import OnboardingScreen from "./src/screens/OnboardingScreen";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 10_000 } },
@@ -95,12 +96,20 @@ function Tabs() {
 }
 
 export default function App() {
+  // First-run onboarding (persona select + account request). In-memory for
+  // now — persistence lands with the auth iteration.
+  const [showOnboarding, setShowOnboarding] = React.useState(true);
+
   return (
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
         <NavigationContainer theme={navTheme}>
           <StatusBar style="dark" />
-          <Tabs />
+          {showOnboarding ? (
+            <OnboardingScreen onDone={() => setShowOnboarding(false)} />
+          ) : (
+            <Tabs />
+          )}
         </NavigationContainer>
       </QueryClientProvider>
     </SafeAreaProvider>

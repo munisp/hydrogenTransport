@@ -1,13 +1,17 @@
 import { Suspense, lazy } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
-import { HomeRedirect, RequireModule, RequireRole } from "./components/guards";
-import { Spinner } from "./components/ui";
+import { HomeRedirect, RequireAnyRole, RequireAuth, RequireModule } from "./components/guards";
+import { PageSkeleton, Spinner } from "./components/ui";
 import { MODULES } from "./modules/registry";
 import { useAuth } from "./auth/AuthContext";
 import NotFoundPage from "./pages/NotFoundPage";
 
+const WelcomePage = lazy(() => import("./pages/welcome/WelcomePage"));
 const AdminPage = lazy(() => import("./pages/AdminPage"));
+const NocPage = lazy(() => import("./pages/admin/NocPage"));
+
+const OPERATOR_ROLES = ["operator", "platform-admin"];
 
 export default function App() {
   const { ready, error } = useAuth();
@@ -36,15 +40,31 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <Suspense
-        fallback={
-          <div className="flex min-h-screen items-center justify-center bg-surface">
-            <Spinner />
-          </div>
-        }
-      >
+      <Suspense fallback={<PageSkeleton />}>
         <Routes>
-          <Route element={<Layout />}>
+          {/* Public pre-auth onboarding area (no login required). */}
+          <Route path="/welcome" element={<WelcomePage />} />
+
+          {/* Full-screen NOC wallboard (authenticated, outside the app shell). */}
+          <Route
+            path="/admin/noc"
+            element={
+              <RequireAuth>
+                <RequireAnyRole roles={OPERATOR_ROLES}>
+                  <NocPage />
+                </RequireAnyRole>
+              </RequireAuth>
+            }
+          />
+
+          {/* Authenticated app shell. */}
+          <Route
+            element={
+              <RequireAuth>
+                <Layout />
+              </RequireAuth>
+            }
+          >
             <Route index element={<HomeRedirect />} />
             {MODULES.map((m) => (
               <Route
@@ -58,11 +78,11 @@ export default function App() {
               />
             ))}
             <Route
-              path="/admin"
+              path="/admin/*"
               element={
-                <RequireRole role="platform-admin">
+                <RequireAnyRole roles={OPERATOR_ROLES}>
                   <AdminPage />
-                </RequireRole>
+                </RequireAnyRole>
               }
             />
             <Route path="/home" element={<Navigate to="/" replace />} />
