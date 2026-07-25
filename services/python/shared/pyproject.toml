@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Shared Keycloak OIDC JWT (RS256) FastAPI dependency for H2Fleet Python services (SPEC.md §3.5)"
 requires-python = ">=3.11"
 dependencies = [
-    "PyJWT[crypto]>=2.10,<3",
+    "PyJWT[crypto]>=2.13,<3",
     "httpx>=0.28,<1",
     "fastapi>=0.115,<1",
 ]
