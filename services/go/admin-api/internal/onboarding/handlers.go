@@ -115,8 +115,11 @@ func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 
 	kcID, err := h.provision(r.Context(), PersonaCitizen, body.Email, body.DisplayName)
 	if err != nil {
+		// Never echo the Keycloak error to the client (SECURITY_AUDIT F4):
+		// it would disclose whether the address is already registered and
+		// leak internal details. The detail is logged instead.
 		h.log.Error("citizen self-serve provisioning failed", zap.String("email", body.Email), zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "identity provisioning failed: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "identity provisioning failed")
 		return
 	}
 	final, err := h.store.Decide(r.Context(), req.ID, StatusCompleted, kcID, "self-service", "")
@@ -207,20 +210,28 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"request": req})
 }
 
-// Approve handles POST /v1/onboarding/{key}/approve (roles: platform-admin,
-// operator). It provisions the Keycloak user with the persona's mapped realm
+// Approve handles POST /v1/onboarding/{key}/approve (role: platform-admin
+// ONLY). It provisions the Keycloak user with the persona's mapped realm
 // role and marks the request completed.
 func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 	h.decide(w, r, true)
 }
 
-// Reject handles POST /v1/onboarding/{key}/reject (roles: platform-admin,
-// operator). Optional body: {"reason": "..."}.
+// Reject handles POST /v1/onboarding/{key}/reject (role: platform-admin
+// ONLY). Optional body: {"reason": "..."}.
 func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
 	h.decide(w, r, false)
 }
 
 func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
+	// Defense in depth (SECURITY_AUDIT F3): approving an onboarding request
+	// can provision a new operator account, so decisions are platform-admin
+	// ONLY. Operators may list/view but never decide, regardless of how the
+	// route was registered.
+	if !auth.HasRole(r.Context(), "platform-admin") {
+		httpx.Error(w, http.StatusForbidden, "onboarding decisions require the platform-admin role")
+		return
+	}
 	id := chi.URLParam(r, "key")
 	req, err := h.store.Get(r.Context(), id)
 	if err != nil {
@@ -261,7 +272,9 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 	if err != nil {
 		h.log.Error("approval provisioning failed",
 			zap.String("id", id), zap.String("persona", req.Persona), zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "identity provisioning failed: "+err.Error())
+		// Never echo the Keycloak error to the client (SECURITY_AUDIT F4);
+		// the detail is logged above.
+		httpx.Error(w, http.StatusBadGateway, "identity provisioning failed")
 		return
 	}
 	final, err := h.store.Decide(r.Context(), id, StatusCompleted, kcID, decidedBy, "")

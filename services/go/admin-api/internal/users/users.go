@@ -34,7 +34,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	users, err := h.kc.ListUsers(r.Context(), q, role, 100)
 	if err != nil {
 		h.log.Error("list users", zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "failed to list users: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "failed to list users")
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"users": users})
@@ -72,13 +72,13 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.log.Error("create user", zap.String("email", body.Email), zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "failed to create user: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "failed to create user")
 		return
 	}
 	for _, role := range body.Roles {
 		if err := h.kc.AssignRealmRole(r.Context(), id, role); err != nil {
 			h.log.Error("assign role on create", zap.String("role", role), zap.Error(err))
-			httpx.Error(w, http.StatusBadGateway, "user created but role assignment failed: "+err.Error())
+			httpx.Error(w, http.StatusBadGateway, "user created but role assignment failed")
 			return
 		}
 	}
@@ -111,14 +111,14 @@ func (h *Handler) UpdateRoles(w http.ResponseWriter, r *http.Request) {
 	for _, role := range body.Add {
 		if err := h.kc.AssignRealmRole(r.Context(), id, role); err != nil {
 			h.log.Error("assign role", zap.String("user_id", id), zap.String("role", role), zap.Error(err))
-			httpx.Error(w, http.StatusBadGateway, "failed to assign role "+role+": "+err.Error())
+			httpx.Error(w, http.StatusBadGateway, "failed to assign role "+role)
 			return
 		}
 	}
 	for _, role := range body.Remove {
 		if err := h.kc.RevokeRealmRole(r.Context(), id, role); err != nil {
 			h.log.Error("revoke role", zap.String("user_id", id), zap.String("role", role), zap.Error(err))
-			httpx.Error(w, http.StatusBadGateway, "failed to revoke role "+role+": "+err.Error())
+			httpx.Error(w, http.StatusBadGateway, "failed to revoke role "+role)
 			return
 		}
 	}
@@ -139,7 +139,7 @@ func (h *Handler) setEnabled(w http.ResponseWriter, r *http.Request, enabled boo
 	id := chi.URLParam(r, "id")
 	if err := h.kc.SetEnabled(r.Context(), id, enabled); err != nil {
 		h.log.Error("set user enabled", zap.String("user_id", id), zap.Bool("enabled", enabled), zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "failed to update user: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "failed to update user")
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"id": id, "enabled": enabled})
@@ -151,7 +151,7 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.kc.SendActionsEmail(r.Context(), id, []string{"UPDATE_PASSWORD"}); err != nil {
 		h.log.Error("reset password", zap.String("user_id", id), zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "failed to trigger password reset: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "failed to trigger password reset")
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"id": id, "message": "password-reset email sent"})
