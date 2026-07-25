@@ -28,32 +28,62 @@ paths:
   /v1/payments:
     post:
       tags: [fare-payments]
-      summary: Initiate a fare payment (JWT); publishes fare.payment.initiated
+      summary: >-
+        Initiate a fare payment (JWT); publishes fare.payment.initiated /
+        fare.payment.settled. The paying rider is ALWAYS the authenticated JWT
+        subject. The body's rider_sub is kept for backwards compatibility but
+        is ignored for ledger/account operations; a rider_sub that does not
+        match the JWT subject is rejected with 403.
       operationId: createPayment
       security:
         - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [amount]
+              required: [amount_minor]
               properties:
-                amount: { type: number }
-                currency: { type: string, default: USD }
-                payer_ref: { type: string }
+                amount_minor: { type: integer, minimum: 1, description: Amount in minor units (cents) }
+                currency: { type: string, default: EUR }
+                rider_sub:
+                  type: string
+                  description: >-
+                    DEPRECATED/ignored: the rider is derived from the JWT
+                    subject. A value not matching the JWT subject yields 403.
+                use_mojaloop: { type: boolean, default: false }
       responses:
+        '200':
+          description: Idempotent replay of an existing payment (same Idempotency-Key)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
         '201':
-          description: Initiated payment
+          description: Settled payment
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Payment' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '402':
+          description: >-
+            Rider wallet provisioned but unfunded (error code
+            insufficient_funds). Top up via POST /v1/wallets/topup in
+            dev/simulated environments.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: rider_sub does not match the authenticated JWT subject
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '502':
-          description: Mojaloop upstream unreachable
+          description: Ledger/Mojaloop upstream failure (fare.payment.failed published)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -97,24 +127,70 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/wallets/topup:
+    post:
+      tags: [fare-payments]
+      summary: >-
+        Dev/simulated wallet funding (JWT). Credits the caller's own rider
+        wallet from the platform cash-in account; the wallet
+        (commerce.rider_accounts + TigerBeetle account) is provisioned lazily
+        on first use. Enabled by default only with the simulated ledger
+        (TIGERBEETLE_ADDR unset) or WALLET_TOPUP_ENABLED=true; pending a real
+        Mojaloop cash-in flow.
+      operationId: topUpWallet
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount_minor]
+              properties:
+                amount_minor: { type: integer, minimum: 1, maximum: 1000000 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Top-up disabled (production default) or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/loyalty/balance:
     get:
       tags: [loyalty-marketplace]
-      summary: Own loyalty points balance (JWT)
+      summary: >-
+        Own loyalty points balance (JWT) from commerce.loyalty_accounts;
+        the account is created lazily (0 points) for new riders. Points
+        accrue at 1 point per full €1 of settled fare payment.
       operationId: getLoyaltyBalance
       security:
         - bearerAuth: []
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Loyalty balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoyaltyBalance' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
   /v1/loyalty/redeem:
     post:
       tags: [loyalty-marketplace]
-      summary: Redeem an offer with points (JWT)
+      summary: >-
+        Redeem an offer with points (JWT). One atomic SQL transaction:
+        balance check + decrement + redemption record. Idempotent on the
+        Idempotency-Key header (falling back to offer_id + subject): retries
+        return the original redemption without double-deducting.
       operationId: redeemOffer
       security:
         - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
       requestBody:
         required: true
         content:
@@ -125,12 +201,25 @@ paths:
               properties:
                 offer_id: { type: string, format: uuid }
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Redemption (or its idempotent replay)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Redemption' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '402':
+          description: Insufficient loyalty points
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Offer not found/inactive or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: Insufficient balance or offer unavailable
+          description: Idempotency key already used with different redemption parameters
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -158,7 +247,8 @@ paths:
               properties:
                 title: { type: string }
                 description: { type: string }
-                points_cost: { type: integer }
+                partner: { type: string }
+                cost_points: { type: integer, minimum: 1 }
       responses:
         '201': { $ref: '#/components/responses/JsonOk' }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -171,38 +261,92 @@ paths:
       summary: List energy trades
       operationId: listTrades
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Trade list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trades:
+                    type: array
+                    items: { $ref: '#/components/schemas/Trade' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
     post:
       tags: [energy-trading]
-      summary: Execute an energy trade (operator role); publishes energy.trade.executed
+      summary: >-
+        Execute an energy trade (operator role, Idempotency-Key required).
+        Flow: proposed row (idempotent on the key) → physical backing check
+        (sale kinds draw down infra.stations.available_kg; a trade exceeding
+        the recorded surplus is rejected) → TigerBeetle settlement (energy
+        clearing 3001 → operator revenue 2001, deterministic transfer id).
+        The clearing account is overdraft-protected: an unfunded trade lands
+        in failed with energy.trade.failed (never cleared). On success the
+        trade becomes executed with tb_transfer_id persisted and
+        energy.trade.executed is published.
       operationId: createTrade
       security:
         - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [kwh, price]
+              required: [kind, quantity_kg, price_minor]
               properties:
-                kwh: { type: number }
-                price: { type: number }
-                counterparty: { type: string }
+                kind: { type: string, enum: [h2-sale, h2-purchase, energy-export] }
+                quantity_kg: { type: number, exclusiveMinimum: 0 }
+                price_minor: { type: integer, minimum: 1 }
       responses:
-        '201': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Idempotent replay of an existing trade (same Idempotency-Key)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trade' }
+        '201':
+          description: Executed trade
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trade' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '402':
+          description: Energy clearing account unfunded (error code insufficient_funds; trade marked failed)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Trade quantity exceeds recorded station H2 surplus (error code insufficient_surplus; trade marked failed)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: Ledger upstream failure (trade marked failed, energy.trade.failed published)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/gov/kpis:
     get:
       tags: [gov-dashboard]
-      summary: City KPI snapshot (cost, emissions, ridership, uptime)
+      summary: >-
+        City KPI snapshot (cost, emissions, ridership, fleet, stations,
+        incidents). Honest degradation: each rollup is independent — a
+        failed source leaves its fields null and is named in `degraded`
+        (never a fabricated value). `fleet_uptime_pct` is null until a
+        time-based availability source exists; the static status mix is
+        `fleet_active_ratio_pct`. `open_incidents` includes in_progress.
       operationId: getGovKPIs
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: KPI snapshot (partially null when degraded)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovKPIs' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
   /v1/ads/campaigns:
     get:
@@ -214,7 +358,10 @@ paths:
         '404': { $ref: '#/components/responses/ModuleDisabled' }
     post:
       tags: [advertising]
-      summary: Create a campaign (operator role)
+      summary: >-
+        Create a campaign (operator role). Validated: name required
+        (trimmed, 1-200 chars), budget_minor must not be negative, ends_at
+        must not precede starts_at.
       operationId: createCampaign
       security:
         - bearerAuth: []
@@ -226,8 +373,9 @@ paths:
               type: object
               required: [name]
               properties:
-                name: { type: string }
-                budget: { type: number }
+                name: { type: string, minLength: 1, maxLength: 200 }
+                advertiser: { type: string }
+                budget_minor: { type: integer, minimum: 0 }
                 starts_at: { type: string, format: date-time }
                 ends_at: { type: string, format: date-time }
       responses:
@@ -252,7 +400,10 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
     patch:
       tags: [advertising]
-      summary: Update a campaign (operator role)
+      summary: >-
+        Update a campaign's status (operator role). Lifecycle is enforced:
+        draft → active|ended, active → paused|ended, paused → active|ended,
+        ended is terminal. Illegal transitions (e.g. ended → active) → 409.
       operationId: updateCampaign
       security:
         - bearerAuth: []
@@ -264,10 +415,9 @@ paths:
           application/json:
             schema:
               type: object
+              required: [status]
               properties:
-                name: { type: string }
-                budget: { type: number }
-                status: { type: string }
+                status: { type: string, enum: [draft, active, paused, ended] }
       responses:
         '200': { $ref: '#/components/responses/JsonOk' }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -275,6 +425,11 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Campaign not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Invalid status transition (ended campaigns are terminal)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -291,15 +446,77 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-chosen idempotency key; retries replay the original operation
+      schema: { type: string }
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Idempotency key; defaults to offer_id + authenticated subject
+      schema: { type: string }
   schemas:
     Payment:
       type: object
       properties:
         id: { type: string, format: uuid }
-        amount: { type: number }
+        rider_sub: { type: string, description: Always the authenticated JWT subject }
+        amount_minor: { type: integer }
         currency: { type: string }
-        status: { type: string, enum: [initiated, settled, failed] }
+        mojaloop_transfer_id: { type: string }
+        tb_transfer_id: { type: string }
+        idempotency_key: { type: string }
+        status: { type: string, enum: [initiated, settled, failed, refunded, mojaloop_failed] }
         created_at: { type: string, format: date-time }
+    Trade:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [h2-sale, h2-purchase, energy-export] }
+        quantity_kg: { type: number }
+        price_minor: { type: integer }
+        status: { type: string, enum: [proposed, executed, failed] }
+        tb_transfer_id: { type: string, description: TigerBeetle transfer id (set once executed) }
+        idempotency_key: { type: string }
+        created_at: { type: string, format: date-time }
+    GovKPIs:
+      type: object
+      description: All sections nullable; a failed rollup is null + named in degraded.
+      properties:
+        revenue_30d_minor: { type: integer, nullable: true }
+        settled_payments_30d: { type: integer, nullable: true }
+        ridership_estimate_30d: { type: integer, nullable: true, description: One settled fare ≈ one ride }
+        kg_co2_avoided_total: { type: number, nullable: true }
+        carbon_credits_total: { type: number, nullable: true }
+        vehicles_total: { type: integer, nullable: true }
+        vehicles_active: { type: integer, nullable: true }
+        fleet_active_ratio_pct: { type: number, nullable: true, description: Static status mix (active/total), NOT time-based uptime }
+        fleet_uptime_pct: { type: number, nullable: true, description: Null until a time-based availability source exists }
+        fleet_uptime_note: { type: string }
+        stations_available_kg: { type: number, nullable: true }
+        open_incidents: { type: integer, nullable: true, description: open + acknowledged + in_progress }
+        partial: { type: boolean }
+        degraded:
+          type: array
+          items: { type: string }
+    LoyaltyBalance:
+      type: object
+      properties:
+        rider_sub: { type: string }
+        points: { type: integer }
+        updated_at: { type: string, format: date-time }
+    Redemption:
+      type: object
+      properties:
+        redemption_id: { type: string, format: uuid }
+        redeemed_offer_id: { type: string, format: uuid }
+        points_spent: { type: integer }
+        idempotency_key: { type: string }
+        status: { type: string }
+        remaining_points: { type: integer, description: Omitted on idempotent replays }
     Health:
       type: object
       properties:
