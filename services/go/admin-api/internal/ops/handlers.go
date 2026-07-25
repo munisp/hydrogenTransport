@@ -43,32 +43,45 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 // Alerts handles GET /v1/admin/alerts: proxies Alertmanager
-// GET /api/v2/alerts. When Alertmanager is unreachable or errors, an empty
-// array is returned gracefully (the feed must never 5xx the NOC dashboard).
+// GET /api/v2/alerts. When Alertmanager is unreachable or errors the feed
+// must never 5xx the NOC dashboard — but a bare empty array would look like
+// "no alerts" (empty-but-plausible), so failures return an explicit degraded
+// envelope instead (BUSINESS_LOGIC_AUDIT: honest-null KPI rule).
 func (h *Handler) Alerts(w http.ResponseWriter, r *http.Request) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
 		h.alertmanagerURL+"/api/v2/alerts", nil)
 	if err != nil {
-		httpx.JSON(w, http.StatusOK, []any{})
+		h.degradedAlerts(w)
 		return
 	}
 	resp, err := h.http.Do(req)
 	if err != nil {
-		h.log.Warn("alertmanager unreachable; returning empty alert feed", zap.Error(err))
-		httpx.JSON(w, http.StatusOK, []any{})
+		h.log.Warn("alertmanager unreachable; returning degraded alert feed", zap.Error(err))
+		h.degradedAlerts(w)
 		return
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil || resp.StatusCode != http.StatusOK || !json.Valid(body) {
-		h.log.Warn("alertmanager returned non-OK; returning empty alert feed",
+		h.log.Warn("alertmanager returned non-OK; returning degraded alert feed",
 			zap.Int("status", resp.StatusCode))
-		httpx.JSON(w, http.StatusOK, []any{})
+		h.degradedAlerts(w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// degradedAlerts answers the alerts feed honestly when Alertmanager cannot
+// provide data: alerts is empty AND degraded is true so no consumer mistakes
+// the feed for "zero active alerts".
+func (h *Handler) degradedAlerts(w http.ResponseWriter) {
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"alerts":   []any{},
+		"degraded": true,
+		"source":   "alertmanager",
+	})
 }
 
 // ToggleView is one enriched toggle entry.
@@ -91,7 +104,7 @@ func (h *Handler) ListToggles(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.http.Do(req)
 	if err != nil {
 		h.log.Error("toggle-service unreachable", zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "toggle-service unreachable: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "toggle-service unreachable")
 		return
 	}
 	defer resp.Body.Close()
@@ -155,7 +168,7 @@ func (h *Handler) UpdateToggle(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.http.Do(req)
 	if err != nil {
 		h.log.Error("toggle-service PUT failed", zap.String("module", module), zap.Error(err))
-		httpx.Error(w, http.StatusBadGateway, "toggle-service unreachable: "+err.Error())
+		httpx.Error(w, http.StatusBadGateway, "toggle-service unreachable")
 		return
 	}
 	defer resp.Body.Close()

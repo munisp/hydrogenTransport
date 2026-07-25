@@ -139,9 +139,18 @@ func TestAlertsGracefulWhenAlertmanagerDown(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d want 200", rec.Code)
 	}
-	var arr []any
-	if err := json.Unmarshal(rec.Body.Bytes(), &arr); err != nil || len(arr) != 0 {
-		t.Fatalf("expected empty array, got %s", rec.Body.String())
+	// The feed must be explicitly degraded — never a bare empty array that
+	// would masquerade as "no alerts".
+	var body struct {
+		Alerts   []any  `json:"alerts"`
+		Degraded bool   `json:"degraded"`
+		Source   string `json:"source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("expected degraded envelope, got %s", rec.Body.String())
+	}
+	if len(body.Alerts) != 0 || !body.Degraded || body.Source != "alertmanager" {
+		t.Fatalf("expected empty alerts + degraded flag, got %s", rec.Body.String())
 	}
 }
 
