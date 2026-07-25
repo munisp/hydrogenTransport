@@ -1,92 +1,78 @@
-import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { setToggle } from "../api/toggles";
-import { useToggles } from "../toggles/TogglesContext";
-import { DOMAINS, modulesByDomain } from "../modules/registry";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  PageHeader,
-  Spinner,
-  Switch,
-} from "../components/ui";
+import { lazy, Suspense } from "react";
+import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Activity, BrainCircuit, LayoutDashboard, Settings2, Users } from "lucide-react";
+import { useAuth } from "../auth/AuthContext";
+import { PageHeader, PageSkeleton } from "../components/ui";
+import { cn } from "../lib/utils";
+
+const OverviewTab = lazy(() => import("./admin/OverviewTab"));
+const ModulesTab = lazy(() => import("./admin/ModulesTab"));
+const UsersTab = lazy(() => import("./admin/UsersTab"));
+const AiLabTab = lazy(() => import("./admin/AiLabTab"));
 
 /**
- * Platform admin: toggle switches for all 20 modules (PUT /api/toggles/{module}),
- * grouped by domain. Requires the Keycloak `platform-admin` role (enforced by
- * RequireRole at the route level and by the toggle-service itself).
+ * Unified admin console (operator + platform-admin). Sub-tabs:
+ * Overview (KPIs), Modules (feature toggles), Users (accounts + onboarding
+ * queue), AI Lab (model registry & drift). The NOC/SOC wallboard lives on the
+ * chromeless full-screen route /admin/noc (registered in App.tsx).
  */
 export default function AdminPage() {
-  const { toggles, isEnabled, loading, refresh } = useToggles();
-  const [lastError, setLastError] = useState<string | null>(null);
+  const { hasRole } = useAuth();
+  const isAdmin = hasRole("platform-admin");
 
-  const mutation = useMutation({
-    mutationFn: ({ module, enabled }: { module: string; enabled: boolean }) =>
-      setToggle(module, enabled),
-    onSuccess: () => {
-      setLastError(null);
-      refresh();
-    },
-    onError: (err) => {
-      setLastError(err instanceof Error ? err.message : "Toggle update failed");
-    },
-  });
-
-  if (loading) return <Spinner />;
+  const tabs = [
+    { to: "/admin", end: true, label: "Overview", icon: LayoutDashboard },
+    { to: "/admin/modules", end: false, label: "Modules", icon: Settings2 },
+    { to: "/admin/users", end: false, label: isAdmin ? "Users & Onboarding" : "Onboarding", icon: Users },
+    { to: "/admin/ai", end: false, label: "AI Lab", icon: BrainCircuit },
+  ];
 
   return (
     <div>
       <PageHeader
-        title="Module Toggles"
-        description="Enable or disable capability modules per deployment. Disabled modules return 404 from their APIs, disappear from navigation, and idle their consumers."
+        title="Admin Console"
+        description="Platform operations: KPIs, module toggles, account & onboarding management, and the ML model registry."
+        actions={
+          <NavLink
+            to="/admin/noc"
+            className="inline-flex items-center gap-2 rounded-lg bg-stone-900 px-3.5 py-2 text-sm font-medium text-stone-100 transition-colors hover:bg-stone-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <Activity className="h-4 w-4" aria-hidden /> NOC wallboard
+          </NavLink>
+        }
       />
 
-      {lastError ? (
-        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {lastError}
-        </div>
-      ) : null}
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {DOMAINS.map((domain) => (
-          <Card key={domain.id}>
-            <CardHeader>
-              <CardTitle>{domain.label}</CardTitle>
-              <p className="text-xs text-stone-500">{domain.description}</p>
-            </CardHeader>
-            <CardContent className="divide-y divide-stone-100 p-0">
-              {modulesByDomain(domain.id).map((m) => {
-                const enabled = isEnabled(m.id);
-                const pending =
-                  mutation.isPending && mutation.variables?.module === m.id;
-                return (
-                  <div key={m.id} className="flex items-center gap-4 px-5 py-3.5">
-                    <m.icon className="h-4 w-4 shrink-0 text-stone-400" aria-hidden />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-stone-800">{m.label}</p>
-                      <p className="truncate text-xs text-stone-500">{m.description}</p>
-                      <p className="mt-0.5 font-mono text-[10px] text-stone-400">{m.id}</p>
-                    </div>
-                    <Switch
-                      label={`Toggle ${m.label}`}
-                      checked={enabled}
-                      disabled={pending || !(m.id in toggles)}
-                      onChange={(next) => mutation.mutate({ module: m.id, enabled: next })}
-                    />
-                  </div>
-                );
-              })}
-            </CardContent>
-          </Card>
+      <div role="tablist" aria-label="Admin sections" className="mb-6 flex gap-1 overflow-x-auto border-b border-stone-200">
+        {tabs.map((t) => (
+          <NavLink
+            key={t.to}
+            to={t.to}
+            end={t.end}
+            role="tab"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2 whitespace-nowrap border-b-2 px-4 py-2.5 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+                isActive
+                  ? "border-accent font-medium text-accent-muted"
+                  : "border-transparent text-stone-500 hover:border-stone-300 hover:text-stone-800",
+              )
+            }
+          >
+            <t.icon className="h-4 w-4" aria-hidden />
+            {t.label}
+          </NavLink>
         ))}
       </div>
 
-      <p className="mt-6 text-xs text-stone-400">
-        Changes publish a toggle.changed event and propagate to all services within seconds;
-        this UI polls the toggle service every 30 seconds.
-      </p>
+      <Suspense fallback={<PageSkeleton />}>
+        <Routes>
+          <Route index element={<OverviewTab />} />
+          <Route path="modules" element={<ModulesTab />} />
+          <Route path="users" element={<UsersTab />} />
+          <Route path="ai" element={<AiLabTab />} />
+          <Route path="*" element={<Navigate to="/admin" replace />} />
+        </Routes>
+      </Suspense>
     </div>
   );
 }

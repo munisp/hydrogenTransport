@@ -42,9 +42,41 @@ export function RequireRole({ role, children }: { role: string; children: ReactN
   return <>{children}</>;
 }
 
+/** Route guard: any one of the listed roles suffices. */
+export function RequireAnyRole({ roles, children }: { roles: string[]; children: ReactNode }) {
+  const { hasRole } = useAuth();
+  if (!roles.some((r) => hasRole(r))) {
+    return (
+      <div className="mx-auto max-w-lg pt-16">
+        <EmptyState
+          title="Insufficient permissions"
+          body={`This area requires one of: ${roles.join(", ")}. Your current Keycloak roles do not grant access.`}
+        />
+      </div>
+    );
+  }
+  return <>{children}</>;
+}
+
+/**
+ * Route guard for the authenticated app shell. Unauthenticated visitors are
+ * sent to the public onboarding landing page (/welcome); from there the
+ * "Sign in" CTA runs the Keycloak login redirect and returns here.
+ */
+export function RequireAuth({ children }: { children: ReactNode }) {
+  const { identity } = useAuth();
+  const location = useLocation();
+  if (!identity.authenticated) {
+    return <Navigate to="/welcome" state={{ from: location.pathname }} replace />;
+  }
+  return <>{children}</>;
+}
+
 /** Landing route: redirect to the first enabled module, gov-dashboard preferred. */
 export function HomeRedirect() {
+  const { identity } = useAuth();
   const { isEnabled, loading } = useToggles();
+  if (!identity.authenticated) return <Navigate to="/welcome" replace />;
   if (loading) return <Spinner />;
   const preferred = MODULES.find((m) => m.id === "gov-dashboard" && isEnabled(m.id));
   const first = preferred ?? MODULES.find((m) => isEnabled(m.id));

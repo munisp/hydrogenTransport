@@ -1,22 +1,38 @@
-import { useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
-import { Droplet, LogOut, Menu, Settings2, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Activity, Droplet, LogOut, Menu, Settings2, X } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { useToggles } from "../toggles/TogglesContext";
 import { DOMAINS, modulesByDomain } from "../modules/registry";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { cn } from "../lib/utils";
 
 /**
  * App shell: sidebar nav grouped by the 4 domains. Entries appear/disappear
- * live as feature toggles change (SPEC §3.7).
+ * live as feature toggles change (SPEC §3.2/§3.7). Under 1024px the sidebar
+ * becomes a slide-over drawer; keyboard users get a skip link and Escape
+ * closes the drawer.
  */
 export function Layout() {
   const { identity, hasRole, logout } = useAuth();
   const { isEnabled, error: toggleError } = useToggles();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const location = useLocation();
+  const canOperate = hasRole("platform-admin") || hasRole("operator");
+
+  // Close the drawer on route change and on Escape.
+  useEffect(() => setMobileOpen(false), [location.pathname]);
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [mobileOpen]);
 
   const nav = (
-    <nav className="flex-1 space-y-6 overflow-y-auto px-4 py-6">
+    <nav aria-label="Primary" className="flex-1 space-y-6 overflow-y-auto px-4 py-6">
       {DOMAINS.map((domain) => {
         const enabledModules = modulesByDomain(domain.id).filter((m) => isEnabled(m.id));
         if (enabledModules.length === 0) return null;
@@ -30,10 +46,9 @@ export function Layout() {
                 <li key={m.id}>
                   <NavLink
                     to={m.path}
-                    onClick={() => setMobileOpen(false)}
                     className={({ isActive }) =>
                       cn(
-                        "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors",
+                        "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
                         isActive
                           ? "bg-accent-soft font-medium text-accent-muted"
                           : "text-stone-600 hover:bg-surface-sunken hover:text-stone-900",
@@ -49,7 +64,7 @@ export function Layout() {
           </div>
         );
       })}
-      {hasRole("platform-admin") ? (
+      {canOperate ? (
         <div>
           <p className="px-2 text-[11px] font-semibold uppercase tracking-wider text-stone-400">
             Platform
@@ -58,10 +73,9 @@ export function Layout() {
             <li>
               <NavLink
                 to="/admin"
-                onClick={() => setMobileOpen(false)}
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors",
+                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
                     isActive
                       ? "bg-accent-soft font-medium text-accent-muted"
                       : "text-stone-600 hover:bg-surface-sunken hover:text-stone-900",
@@ -69,7 +83,23 @@ export function Layout() {
                 }
               >
                 <Settings2 className="h-4 w-4 shrink-0" aria-hidden />
-                Module Toggles
+                Admin Console
+              </NavLink>
+            </li>
+            <li>
+              <NavLink
+                to="/admin/noc"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+                    isActive
+                      ? "bg-accent-soft font-medium text-accent-muted"
+                      : "text-stone-600 hover:bg-surface-sunken hover:text-stone-900",
+                  )
+                }
+              >
+                <Activity className="h-4 w-4 shrink-0" aria-hidden />
+                NOC Wallboard
               </NavLink>
             </li>
           </ul>
@@ -80,8 +110,12 @@ export function Layout() {
 
   return (
     <div className="flex min-h-screen bg-surface text-stone-800">
-      {/* Sidebar — desktop */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-stone-200 bg-surface-raised md:flex">
+      <a href="#main-content" className="skip-link">
+        Skip to content
+      </a>
+
+      {/* Sidebar — desktop (≥1024px) */}
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-stone-200 bg-surface-raised lg:flex">
         <Brand />
         {nav}
         <UserFooter
@@ -91,9 +125,9 @@ export function Layout() {
         />
       </aside>
 
-      {/* Sidebar — mobile drawer */}
+      {/* Sidebar — drawer (<1024px) */}
       {mobileOpen ? (
-        <div className="fixed inset-0 z-40 md:hidden">
+        <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation menu">
           <div
             className="absolute inset-0 bg-stone-900/40"
             onClick={() => setMobileOpen(false)}
@@ -103,7 +137,7 @@ export function Layout() {
             <div className="flex items-center justify-between pr-3">
               <Brand />
               <button
-                className="rounded-md p-2 text-stone-500 hover:bg-surface-sunken"
+                className="rounded-md p-2 text-stone-500 hover:bg-surface-sunken focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                 onClick={() => setMobileOpen(false)}
                 aria-label="Close menu"
               >
@@ -116,12 +150,13 @@ export function Layout() {
       ) : null}
 
       {/* Main column */}
-      <div className="flex min-h-screen flex-1 flex-col md:pl-64">
-        <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-stone-200 bg-surface/90 px-4 py-3 backdrop-blur md:px-8">
+      <div className="flex min-h-screen flex-1 flex-col lg:pl-64">
+        <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-stone-200 bg-surface/90 px-4 py-3 backdrop-blur lg:px-8">
           <button
-            className="rounded-md p-2 text-stone-500 hover:bg-surface-sunken md:hidden"
+            className="rounded-md p-2 text-stone-500 hover:bg-surface-sunken focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent lg:hidden"
             onClick={() => setMobileOpen(true)}
             aria-label="Open menu"
+            aria-expanded={mobileOpen}
           >
             <Menu className="h-5 w-5" />
           </button>
@@ -137,8 +172,12 @@ export function Layout() {
             </span>
           ) : null}
         </header>
-        <main className="flex-1 px-4 py-6 md:px-8 md:py-8">
-          <Outlet />
+        <main id="main-content" className="flex-1 px-4 py-6 lg:px-8 lg:py-8" tabIndex={-1}>
+          <ErrorBoundary resetKey={location.pathname}>
+            <div key={location.pathname} className="page-enter">
+              <Outlet />
+            </div>
+          </ErrorBoundary>
         </main>
       </div>
     </div>
@@ -178,7 +217,7 @@ function UserFooter({
         <p className="text-[11px] text-stone-500">{isDevFallback ? "dev fallback" : "Keycloak SSO"}</p>
       </div>
       <button
-        className="rounded-md p-1.5 text-stone-400 hover:bg-surface-sunken hover:text-stone-600"
+        className="rounded-md p-1.5 text-stone-400 hover:bg-surface-sunken hover:text-stone-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         onClick={onLogout}
         aria-label="Sign out"
         title="Sign out"

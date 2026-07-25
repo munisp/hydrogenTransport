@@ -25,4 +25,8 @@ export const API_PREFIX = {
   ml: "/api/ml",
   optimize: "/api/optimize",
   twin: "/api/twin",
+  /** Admin & onboarding backend (admin-api:8085). */
+  admin: "/api/admin",
+  /** ML inference platform (ml-platform:8095). */
+  mlplatform: "/api/mlplatform",
 } as const;

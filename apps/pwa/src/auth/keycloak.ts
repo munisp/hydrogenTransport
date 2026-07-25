@@ -50,10 +50,12 @@ function identityFromKeycloak(kc: Keycloak): AuthIdentity {
 }
 
 /**
- * Initialise authentication. Resolves with the identity; on Keycloak failure in
- * dev mode resolves with the mock admin identity. In production builds the
- * error propagates so the shell can render a fatal error instead of an
- * unauthenticated app.
+ * Initialise authentication in "check-sso" mode: the app boots without forcing
+ * a login so the public onboarding area (/welcome) works pre-auth. Protected
+ * routes call `login()` explicitly (see RequireAuth). Resolves with the
+ * identity; on Keycloak failure in dev mode resolves with the mock admin
+ * identity. In production builds the error propagates so the shell can render
+ * a fatal error instead of an unauthenticated app.
  */
 export async function initAuth(): Promise<AuthIdentity> {
   try {
@@ -62,12 +64,17 @@ export async function initAuth(): Promise<AuthIdentity> {
       realm: config.keycloak.realm,
       clientId: config.keycloak.clientId,
     });
-    await keycloak.init({
-      onLoad: "login-required",
+    const authenticated = await keycloak.init({
+      onLoad: "check-sso",
       pkceMethod: "S256",
       checkLoginIframe: false,
       silentCheckSsoRedirectUri: `${window.location.origin}/silent-check-sso.html`,
     });
+
+    if (!authenticated) {
+      identity = { authenticated: false, username: "", roles: [], isDevFallback: false };
+      return identity;
+    }
     identity = identityFromKeycloak(keycloak);
 
     // Proactive token refresh: renew when <30s of validity remain.

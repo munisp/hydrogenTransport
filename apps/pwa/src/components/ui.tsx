@@ -1,5 +1,5 @@
-import { forwardRef, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TdHTMLAttributes, type ThHTMLAttributes } from "react";
-import { Loader2 } from "lucide-react";
+import { forwardRef, useEffect, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TdHTMLAttributes, type ThHTMLAttributes } from "react";
+import { Loader2, X } from "lucide-react";
 import { cn } from "../lib/utils";
 
 /** Hand-rolled shadcn-style primitives on the warm stone/amber/teal palette. */
@@ -123,6 +123,8 @@ export function statusTone(status: string): BadgeTone {
     case "resolved":
     case "accepted":
     case "matched":
+    case "approved":
+    case "up":
       return "green";
     case "refueling":
     case "degraded":
@@ -136,12 +138,17 @@ export function statusTone(status: string): BadgeTone {
     case "draft":
     case "paused":
     case "occupied":
+    case "pending":
+    case "insufficient-data":
       return "amber";
     case "offline":
     case "failed":
     case "critical":
     case "out_of_service":
     case "cancelled":
+    case "rejected":
+    case "down":
+    case "drift":
       return "red";
     case "maintenance":
     case "executed":
@@ -305,17 +312,45 @@ export function Spinner({ className }: { className?: string }) {
   );
 }
 
+/** Pulsing placeholder block for loading skeletons. */
+export function Skeleton({ className }: { className?: string }) {
+  return <div className={cn("animate-pulse rounded-md bg-stone-200/70", className)} aria-hidden />;
+}
+
+/** Generic full-page loading skeleton used by route-level Suspense fallbacks. */
+export function PageSkeleton() {
+  return (
+    <div className="mx-auto w-full max-w-5xl px-4 py-10 md:px-8" aria-busy="true" aria-label="Loading page">
+      <Skeleton className="h-7 w-56" />
+      <Skeleton className="mt-2 h-4 w-96 max-w-full" />
+      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <Skeleton key={i} className="h-32 w-full rounded-xl" />
+        ))}
+      </div>
+      <Skeleton className="mt-4 h-48 w-full rounded-xl" />
+    </div>
+  );
+}
+
 export function EmptyState({
   title,
   body,
   action,
+  icon,
 }: {
   title: string;
   body?: string;
   action?: ReactNode;
+  icon?: ReactNode;
 }) {
   return (
     <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-stone-300 bg-surface-sunken px-6 py-12 text-center">
+      {icon ? (
+        <span className="mb-1 rounded-full bg-surface-raised p-3 text-stone-300" aria-hidden>
+          {icon}
+        </span>
+      ) : null}
       <p className="text-sm font-medium text-stone-700">{title}</p>
       {body ? <p className="max-w-md text-xs text-stone-500">{body}</p> : null}
       {action}
@@ -337,6 +372,55 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
         ) : undefined
       }
     />
+  );
+}
+
+// ---- Modal --------------------------------------------------------------------
+
+export function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-stone-900/40 p-4 sm:items-center"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-full max-w-md rounded-xl border border-stone-200 bg-surface-raised p-6 shadow-xl"
+      >
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <h2 className="text-base font-semibold tracking-tight text-stone-900">{title}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close dialog"
+            className="rounded-md p-1.5 text-stone-400 hover:bg-surface-sunken hover:text-stone-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X className="h-4 w-4" aria-hidden />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
   );
 }
 
