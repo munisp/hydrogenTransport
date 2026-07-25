@@ -16,6 +16,7 @@ import (
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
+	"github.com/munisp/hydrogenTransport/services/go/audit-log/pkg/auditclient"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/gate"
@@ -64,6 +65,11 @@ func main() {
 		log.Fatal("ensure schema", zap.Error(err))
 	}
 
+	// Insider-threat audit emission (docs/INSIDER_THREAT.md); noop unless
+	// AUDIT_LOG_URL is set. Best-effort: emission failures never fail a
+	// business request.
+	audit := auditclient.FromEnv("commerce-api", log, os.Getenv)
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, metrics.Middleware("commerce-api"), middleware.Timeout(30*time.Second))
 	r.Get("/healthz", h.Healthz)
@@ -72,9 +78,14 @@ func main() {
 	// fare-payments module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "fare-payments"))
-		r.With(jwtmw.RequireAuth).Post("/v1/payments", h.CreatePayment(os.Getenv("MOJALOOP_ENDPOINT")))
+		r.With(jwtmw.RequireAuth,
+			audit.Middleware("payment.create", "fare_payment", "", true)).
+			Post("/v1/payments", h.CreatePayment(os.Getenv("MOJALOOP_ENDPOINT")))
 		r.With(jwtmw.RequireAuth).Get("/v1/payments", h.ListPayments)
 		r.With(jwtmw.RequireAuth).Get("/v1/payments/{id}", h.GetPayment)
+		// Dev/simulated wallet funding (see handlers.TopUpEnabled; pending a
+		// real Mojaloop cash-in flow).
+		r.With(jwtmw.RequireAuth).Post("/v1/wallets/topup", h.TopUpWallet)
 	})
 	// loyalty-marketplace module
 	r.Group(func(r chi.Router) {
@@ -88,7 +99,9 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "energy-trading"))
 		r.Get("/v1/energy/trades", h.ListTrades)
-		r.With(jwtmw.RequireRole("operator")).Post("/v1/energy/trades", h.CreateTrade)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("trade.create", "energy_trade", "", true)).
+			Post("/v1/energy/trades", h.CreateTrade)
 	})
 	// gov-dashboard module
 	r.With(gate.Module(tc, "gov-dashboard")).Get("/v1/gov/kpis", h.GetGovKPIs)
@@ -97,7 +110,9 @@ func main() {
 		r.Use(gate.Module(tc, "advertising"))
 		r.Get("/v1/ads/campaigns", h.ListCampaigns)
 		r.Get("/v1/ads/campaigns/{id}", h.GetCampaign)
-		r.With(jwtmw.RequireRole("operator")).Post("/v1/ads/campaigns", h.CreateCampaign)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("campaign.create", "ad_campaign", "", true)).
+			Post("/v1/ads/campaigns", h.CreateCampaign)
 		r.With(jwtmw.RequireRole("operator")).Patch("/v1/ads/campaigns/{id}", h.UpdateCampaign)
 	})
 
