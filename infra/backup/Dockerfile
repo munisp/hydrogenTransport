@@ -2,9 +2,10 @@
 # H2Fleet backup runner: pg_dump (both postgres instances) + TigerBeetle
 # data-file snapshot, uploaded to MinIO with the mc client.
 # Build context: infra/backup
+# SECURITY (CVE-2026-41145): bump together with minio/minio once a verified 2026 tag exists (see infra/docker-compose.yml).
 FROM minio/mc:RELEASE.2024-10-08T09-37-26Z AS mc
 
-FROM postgres:16-alpine
+FROM postgres:16.10-alpine
 COPY --from=mc /usr/bin/mc /usr/local/bin/mc
 COPY backup.sh /usr/local/bin/backup.sh
 RUN chmod +x /usr/local/bin/backup.sh

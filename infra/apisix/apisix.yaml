@@ -4,7 +4,8 @@
 #   /api/toggles/*  -> toggle-service:8080      /api/fleet/*    -> fleet-api:8081
 #   /api/infra/*    -> infra-api:8082           /api/citizen/*  -> citizen-api:8083
 #   /api/commerce/* -> commerce-api:8084        /api/ml/*       -> predictive-maintenance:8090
-#   /api/admin/*    -> admin-api:8085
+#   /api/admin/*    -> admin-api:8085            /api/audit/*   -> audit-log:8086
+#   /api/analytics/* -> analytics-bff:8096
 #   /api/optimize/* -> route-optimizer:8091     /api/twin/*     -> digital-twin:8092
 #   /api/open-data/* -> citizen-api:8083 (open-data surface, key-auth)
 #
@@ -74,6 +75,12 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/toggles(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       # GETs are public; PUT requires Keycloak role platform-admin (enforced in
       # toggle-service against the forwarded JWT).
       openid-connect:
@@ -93,12 +100,44 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/fleet(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
         client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # service enforces JWT on mutating routes
+
+  # ------------------------------------------- incident intake (citizens) --
+  # Dedicated route AHEAD of the generic /api/infra/* route: any citizen JWT
+  # may open a safety incident in-service, so the edge caps the false-alarm
+  # flood (SECURITY_AUDIT F12).
+  - uri: /api/infra/v1/incidents
+    methods: ["POST"]
+    name: infra-incident-intake
+    upstream:
+      type: roundrobin
+      nodes:
+        "infra-api:8082": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/infra(/.*)$", "$1"]
+      limit-count:
+        count: 30                 # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT
 
   # --------------------------------------------------------------- infra ----
   - uri: /api/infra/*
@@ -110,12 +149,46 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/infra(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7); stricter limits on the dedicated
+      # leak/incident routes above take precedence.
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
         client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # service enforces JWT on mutating routes
+
+  # ------------------------------------------------- citizen DRT mutations --
+  # Dedicated route AHEAD of the generic /api/citizen/* route: DRT request
+  # creation/cancellation is a mutating, DB-backed flow available to every
+  # citizen account (self-serve onboarding makes accounts free), so it gets a
+  # much tighter limit than the public read surface (SECURITY_AUDIT F4/F7).
+  - uri: /api/citizen/v1/drt/*
+    methods: ["POST"]
+    name: citizen-drt-mutations
+    upstream:
+      type: roundrobin
+      nodes:
+        "citizen-api:8083": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/citizen(/.*)$", "$1"]
+      limit-count:
+        count: 30                 # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutations
 
   # -------------------------------------------------------------- citizen ---
   - uri: /api/citizen/*
@@ -139,6 +212,33 @@ routes:
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # arrivals/alerts are public; mutations 401 in service
 
+  # ------------------------------------------------------ payment intake ---
+  # Dedicated route AHEAD of the generic /api/commerce/* route: payment
+  # creation moves money (ledger + Mojaloop leg), so it carries the strictest
+  # commerce limit (SECURITY_AUDIT F7 names POST /v1/payments as most
+  # abusable).
+  - uri: /api/commerce/v1/payments
+    methods: ["POST"]
+    name: commerce-payments
+    upstream:
+      type: roundrobin
+      nodes:
+        "commerce-api:8084": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/commerce(/.*)$", "$1"]
+      limit-count:
+        count: 60                 # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT
+
   # ------------------------------------------------------------- commerce ---
   - uri: /api/commerce/*
     name: commerce
@@ -149,12 +249,47 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/commerce(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
         client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # service enforces JWT on mutating routes
+
+  # ---------------------------------------- public onboarding intake (F4) --
+  # Dedicated route AHEAD of the generic /api/admin/* route with a STRICT
+  # limit: the unauthenticated self-serve/intake endpoints provision Keycloak
+  # users and send verification emails to arbitrary addresses, so without a
+  # tight per-IP cap the platform is an email-bombing / DB-spam tool
+  # (SECURITY_AUDIT F4). ~5 requests/min/IP; the 300/min generic admin limit
+  # still applies on top.
+  - uri: /api/admin/v1/onboarding/*
+    methods: ["POST"]
+    name: admin-onboarding-intake
+    upstream:
+      type: roundrobin
+      nodes:
+        "admin-api:8085": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/admin(/.*)$", "$1"]
+      limit-req:
+        rate: 0.1                 # r/s per remote address (~6 r/min)
+        burst: 5
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # public intake; service validates payloads
 
   # ---------------------------------------------------------------- admin ---
   # Admin & onboarding backend (admin-api). Public surfaces: POST
@@ -182,6 +317,54 @@ routes:
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # public onboarding intake; admin routes 401/403 in service
 
+  # Audit trail (audit-log). GET /v1/audit + /v1/audit/verify are
+  # platform-admin only, enforced in-service; POST /v1/audit ingest is
+  # service-to-service via X-Audit-Token (or JWT) — never public.
+  - uri: /api/audit/*
+    name: audit-log
+    upstream:
+      type: roundrobin
+      nodes:
+        "audit-log:8086": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/audit(/.*)$", "$1"]
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces ingest token / platform-admin JWT
+
+  # Analytics BFF (Hono + Drizzle). Read-only admin-console analytics;
+  # JWT enforced in-service (fail-closed when KEYCLOAK_ISSUER is unset).
+  - uri: /api/analytics/*
+    name: analytics-bff
+    upstream:
+      type: roundrobin
+      nodes:
+        "analytics-bff:8096": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/analytics(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on all routes
+
   # ------------------------------------------------------------------- ml ---
   - uri: /api/mlplatform/*
     name: mlplatform
@@ -192,6 +375,12 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/mlplatform(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
@@ -208,6 +397,12 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/ml(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
@@ -216,6 +411,30 @@ routes:
         unauth_action: pass        # service enforces JWT on mutating routes
 
   # -------------------------------------------------------------- optimize --
+  # Dedicated route for the CPU-heavy OR-Tools solver (SECURITY_AUDIT F7
+  # names POST /v1/optimize/route as one of the most abusable endpoints).
+  - uri: /api/optimize/v1/optimize/route
+    methods: ["POST"]
+    name: optimize-solve
+    upstream:
+      type: roundrobin
+      nodes:
+        "route-optimizer:8091": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/optimize(/.*)$", "$1"]
+      limit-req:
+        rate: 0.2                 # r/s per remote address (~12 r/min)
+        burst: 3
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT
+
   - uri: /api/optimize/*
     name: route-optimizer
     upstream:
@@ -225,6 +444,12 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/optimize(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 120
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
@@ -242,6 +467,12 @@ routes:
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/twin(/.*)$", "$1"]
+      # Baseline limit (SECURITY_AUDIT F7).
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
       openid-connect:
         bearer_only: true
         client_id: services
@@ -287,6 +518,16 @@ global_rules:
       # Prometheus metrics exporter (listens on :9091 per plugin_attr in
       # config.yaml; publish that port for the Prometheus server to scrape).
       prometheus: {}
+
+      # Global rate-limit backstop (SECURITY_AUDIT F7): every route carries a
+      # limit even if a future route forgets to declare one. Routes with their
+      # own limit-count/limit-req plugin override this per APISIX plugin
+      # precedence.
+      limit-count:
+        count: 1200               # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
 
       # CORS for the PWA (apps/pwa). Origin is env-overridable via PWA_ORIGIN
       # (APISIX expands ${{VAR:=default}}); default matches the local compose

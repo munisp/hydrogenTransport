@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       - name: Build & vet ${{ matrix.service }}
         working-directory: services/go/${{ matrix.service }}
         run: |
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       - name: Test packages/toggle-client/go
         working-directory: packages/toggle-client/go
         run: |
@@ -163,7 +163,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
       - name: Scan Go services
