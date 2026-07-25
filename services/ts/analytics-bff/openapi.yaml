@@ -1,0 +1,117 @@
+openapi: 3.0.3
+info:
+  title: H2Fleet analytics-bff
+  version: 0.1.0
+  description: >-
+    Read-only analytics backend-for-frontend (Hono + Drizzle on @h2fleet/db).
+    All analytics routes require a Keycloak JWT with realm role operator,
+    platform-admin or analyst (jose RS256 JWKS validation mirroring go-auth
+    semantics). Gateway prefix /api/analytics/* (proxy-rewrite strips the
+    prefix). Errors use the shared envelope {"error": "<message>"}.
+servers:
+  - url: http://analytics-bff:8096
+tags:
+  - name: analytics
+  - name: meta
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe (select 1)
+      operationId: healthz
+      responses:
+        '200': { description: Healthy }
+        '503': { description: Postgres unreachable }
+  /v1/analytics/fleet-summary:
+    get:
+      tags: [analytics]
+      summary: Fleet posture — vehicles by status, mean latest H2 level, station availability
+      operationId: fleetSummary
+      responses:
+        '200':
+          description: Aggregated fleet summary (zod-validated)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetSummary' }
+        '401': { description: Missing/invalid bearer token }
+        '403': { description: Missing realm role }
+  /v1/analytics/revenue-daily:
+    get:
+      tags: [analytics]
+      summary: Settled fare revenue + executed trade value per day (minor units)
+      operationId: revenueDaily
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        '200':
+          description: Per-day revenue rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevenueDaily' }
+        '401': { description: Missing/invalid bearer token }
+        '403': { description: Missing realm role }
+  /v1/analytics/carbon-daily:
+    get:
+      tags: [analytics]
+      summary: Avoided CO2 and issued credits per day
+      operationId: carbonDaily
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        '200':
+          description: Per-day carbon rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CarbonDaily' }
+        '401': { description: Missing/invalid bearer token }
+        '403': { description: Missing realm role }
+components:
+  schemas:
+    FleetSummary:
+      type: object
+      properties:
+        buses:
+          type: object
+          properties:
+            total: { type: integer, example: 50 }
+            by_status:
+              type: object
+              additionalProperties: { type: integer }
+              example: { active: 47, maintenance: 3 }
+        avg_h2_level_pct: { type: number, nullable: true, example: 61.5 }
+        stations:
+          type: object
+          properties:
+            total: { type: integer, example: 3 }
+            available_kg: { type: number, example: 812.4 }
+        generated_at: { type: string, format: date-time }
+    RevenueDaily:
+      type: object
+      properties:
+        days: { type: integer }
+        rows:
+          type: array
+          items:
+            type: object
+            properties:
+              day: { type: string, example: '2025-06-01' }
+              payments: { type: integer }
+              settled_minor: { type: number }
+              trades: { type: integer }
+              trades_minor: { type: number }
+    CarbonDaily:
+      type: object
+      properties:
+        days: { type: integer }
+        rows:
+          type: array
+          items:
+            type: object
+            properties:
+              day: { type: string, example: '2025-06-01' }
+              kg_co2_avoided: { type: number }
+              credits: { type: number }

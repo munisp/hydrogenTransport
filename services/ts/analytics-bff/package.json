@@ -1,0 +1,34 @@
+{
+  "name": "@h2fleet/analytics-bff",
+  "version": "0.1.0",
+  "description": "H2Fleet analytics BFF (Hono + Drizzle) — read-only analytics endpoints on :8096. Innovation path for future TS services.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/server.cjs --external:pg-native",
+    "start": "node dist/server.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@h2fleet/db": "file:../../../packages/db",
+    "@hono/node-server": "1.13.7",
+    "@hono/zod-validator": "0.4.1",
+    "drizzle-orm": "0.36.4",
+    "hono": "4.6.12",
+    "jose": "5.9.6",
+    "pg": "8.13.1",
+    "prom-client": "15.1.3",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "@types/pg": "8.11.10",
+    "esbuild": "0.24.0",
+    "tsx": "4.19.2",
+    "typescript": "5.4.5",
+    "vitest": "1.6.0"
+  }
+}
