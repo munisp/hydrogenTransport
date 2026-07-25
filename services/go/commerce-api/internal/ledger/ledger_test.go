@@ -1,7 +1,7 @@
 package ledger
 
 import (
-	"strings"
+	"errors"
 	"testing"
 )
 
@@ -25,8 +25,8 @@ func TestSimulatedRejectsNegativeBalance(t *testing.T) {
 	debit, credit := uint64(1001), OperatorRevenueAccount
 	if _, err := l.Transfer(NewTransferID(), debit, credit, 500, CodeFare); err == nil {
 		t.Fatal("transfer exceeding balance must be rejected")
-	} else if !strings.Contains(err.Error(), "negative") {
-		t.Fatalf("unexpected error: %v", err)
+	} else if !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("overdraft must wrap ErrInsufficientFunds, got: %v", err)
 	}
 	if l.balances[debit] != 0 || l.balances[credit] != 0 {
 		t.Fatalf("rejected transfer must not mutate balances: %+v", l.balances)
