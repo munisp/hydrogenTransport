@@ -1,0 +1,15 @@
+{
+  "model": "carbon_forecaster",
+  "version": "v1.0.0",
+  "trained_at": "2026-07-25T02:36:10.384411+00:00",
+  "mae_kg_co2": 50.31244659423828,
+  "rmse_kg_co2": 64.02691650390625,
+  "rel_mae": 0.017858311533927917,
+  "primary_metric": "rel_mae",
+  "primary_value": 0.017858311533927917,
+  "lower_is_better": true,
+  "train_seconds": 2.78,
+  "source": "synth",
+  "data_note": "SYNTHETIC bootstrap data",
+  "n_params": 4801
+}

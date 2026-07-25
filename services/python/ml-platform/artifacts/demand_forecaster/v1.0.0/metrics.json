@@ -1,0 +1,15 @@
+{
+  "model": "demand_forecaster",
+  "version": "v1.0.0",
+  "trained_at": "2026-07-25T02:35:54.172329+00:00",
+  "mae_riders": 6.369874477386475,
+  "rmse_riders": 9.29721450805664,
+  "rel_mae": 0.12572669982910156,
+  "primary_metric": "rel_mae",
+  "primary_value": 0.12572669982910156,
+  "lower_is_better": true,
+  "train_seconds": 25.42,
+  "source": "synth",
+  "data_note": "SYNTHETIC bootstrap data",
+  "n_params": 19928
+}

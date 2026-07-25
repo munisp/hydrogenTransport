@@ -1,0 +1,15 @@
+{
+  "model": "fleet_gcn",
+  "version": "v1.0.0",
+  "trained_at": "2026-07-25T02:36:04.405732+00:00",
+  "mae_delay_min": 0.2238326072692871,
+  "mae_h2_impact_kg": 0.08620654046535492,
+  "n_nodes": 17,
+  "primary_metric": "mae_delay_min",
+  "primary_value": 0.2238326072692871,
+  "lower_is_better": true,
+  "train_seconds": 1.68,
+  "source": "synth",
+  "data_note": "SYNTHETIC bootstrap data",
+  "n_params": 434
+}

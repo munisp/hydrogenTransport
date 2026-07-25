@@ -1,0 +1,15 @@
+{
+  "model": "leak_autoencoder",
+  "version": "v1.0.0",
+  "trained_at": "2026-07-25T02:35:59.709412+00:00",
+  "auc": 1.0,
+  "threshold": 2.1424877643585205,
+  "fpr_at_threshold": 0.009699079830887839,
+  "tpr_at_threshold": 1.0,
+  "primary_metric": "auc",
+  "primary_value": 1.0,
+  "train_seconds": 2.38,
+  "source": "synth",
+  "data_note": "SYNTHETIC bootstrap data",
+  "n_params": 636
+}
