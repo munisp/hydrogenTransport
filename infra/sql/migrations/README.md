@@ -13,6 +13,9 @@ Canonical, versioned schema source for the platform Postgres
 | `0002_seed.sql` | Seed data: 20 feature toggles ON, 50 buses, 3 stations, sample incidents/telemetry/carbon/fare/trades. |
 | `0003_supplemental.sql` | Service-owned supplemental DDL previously applied at runtime via `EnsureSchema`: commerce (`loyalty_accounts`, `marketplace_offers`, `ad_campaigns`, `rider_accounts`, `fare_payments.idempotency_key`/`tb_transfer_id` + unique index) and infra (`compliance_reports`, `work_orders`, `dispatch_jobs` + `accepted_at`, `depot_bays` + seed bays). |
 | `0004_telemetry_dedup.sql` | `UNIQUE(bus_id, ts)` on `fleet.telemetry` (includes the partition column — Timescale-safe; pairs with `ON CONFLICT DO NOTHING` in telemetry-ingest), 90-day retention policy, compression after 7 days (segment by `bus_id`). |
+| `0005_missing_schemas.sql` | Missing-schema inventory from `docs/BUSINESS_LOGIC_AUDIT.md` (S2–S13): carbon `UNIQUE(period)` double-issuance guard, DRT label/assignment columns, dispatch `ends_at` + `infra.drivers` + active-job double-booking partial unique indexes (driver/vehicle), `infra.station_queue`, ad inventory/placements (+ overlap exclusion), loyalty accounts/ledger/redemptions (`rider_sub` contract), `trades.tb_transfer_id`, fare refund columns, work-order bus/prediction linkage, GTFS-like `fleet.stops/routes/route_stops` + `fleet.depot_zones/route_corridors` (seeded). Also `platform.audit_log` (hash-chained audit trail), `platform.onboarding_requests`, and sequence-backed `infra.incidents.incident_no` (`INC-000001`). |
+
+| `0006_trades_idempotency.sql` | `commerce.trades.idempotency_key` + partial unique index `trades_idempotency_key_uq` — absorbs commerce-api's runtime EnsureSchema DDL for `Idempotency-Key`-protected POST /v1/energy/trades (fare_payments precedent from 0003). |
 
 Every file has a `-- +goose Down` section for rollback.
 

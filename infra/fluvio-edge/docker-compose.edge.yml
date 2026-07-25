@@ -1,0 +1,140 @@
+# =============================================================================
+# H2Fleet EDGE tier (profile: edge) — simulates ONE bus gateway on a laptop.
+#
+#   fluvio-sc / fluvio-spu : the on-bus Fluvio cluster (edge ingestion tier)
+#   fluvio-topic-init      : one-shot topic creation (bus-telemetry)
+#   edge-publisher         : sample on-bus publisher (stands in for the gateway
+#                            CAN/telemetry daemon)
+#   fluvio-edge            : the agent (services/rust/fluvio-edge) bridging
+#                            bus-telemetry → platform Kafka telemetry.raw
+#
+# Kafka remains the platform backbone (SPEC §3.8); this file only adds the
+# edge tier. The agent reaches the MAIN stack's Kafka over the shared h2net
+# network — start the middleware first:
+#
+#   cd infra && docker compose up -d kafka
+#   docker compose -f infra/fluvio-edge/docker-compose.edge.yml --profile edge up
+#
+# If your main compose project name is not `infra`, recreate its network with
+# an explicit name or adjust `networks.h2net.name` below.
+# =============================================================================
+
+networks:
+  h2net:
+    external: true
+    # Default compose project of infra/docker-compose.yml (directory name).
+    name: infra_h2net
+  edgenet:
+    driver: bridge
+
+services:
+
+  # --- Fluvio SC (streaming controller) --------------------------------------
+  fluvio-sc:
+    image: infinyon/fluvio:0.11.11
+    container_name: h2-edge-fluvio-sc
+    profiles: ["edge"]
+    networks: [edgenet]
+    ports:
+      - "127.0.0.1:9003:9003"   # SC public (fluvio CLI / clients)
+    command: ["fluvio-run", "sc", "--local"]
+    healthcheck:
+      test: ["CMD-SHELL", "fluvio profile add hc localhost:9003 >/dev/null 2>&1; fluvio cluster stats >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # --- Fluvio SPU (streaming processing unit) --------------------------------
+  fluvio-spu:
+    image: infinyon/fluvio:0.11.11
+    container_name: h2-edge-fluvio-spu
+    profiles: ["edge"]
+    networks: [edgenet]
+    # Ports follow the infinyon/fluvio 0.11 image defaults: SC private 9004,
+    # SPU public 9010 / private 9011.
+    command:
+      - fluvio-run
+      - spu
+      - -i
+      - "5001"
+      - -p
+      - fluvio-sc:9004
+      - --bind-public
+      - 0.0.0.0:9010
+      - --bind-private
+      - 0.0.0.0:9011
+      - --public-server-address
+      - fluvio-spu:9010
+      - --private-server-address
+      - fluvio-spu:9011
+    volumes:
+      - edge_spu_data:/var/lib/fluvio
+    depends_on:
+      fluvio-sc:
+        condition: service_healthy
+
+  # --- one-shot: create the edge topic ---------------------------------------
+  fluvio-topic-init:
+    image: infinyon/fluvio:0.11.11
+    container_name: h2-edge-fluvio-topic-init
+    profiles: ["edge"]
+    networks: [edgenet]
+    entrypoint: >
+      sh -c "fluvio profile add local fluvio-sc:9003
+             && fluvio topic create bus-telemetry --partitions 1 --replication 1
+             || fluvio topic list | grep -q bus-telemetry"
+    depends_on:
+      fluvio-spu:
+        condition: service_started
+    restart: "no"
+
+  # --- sample on-bus publisher (stands in for the gateway telemetry daemon) --
+  edge-publisher:
+    image: infinyon/fluvio:0.11.11
+    container_name: h2-edge-publisher
+    profiles: ["edge"]
+    networks: [edgenet]
+    entrypoint: >
+      sh -c "fluvio profile add local fluvio-sc:9003;
+             i=0;
+             while true; do
+               i=$((i+1));
+               echo '{\"id\":\"edge-'$i'\",\"type\":\"telemetry.raw\",\"source\":\"bus-07\",\"time\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"data\":{\"bus_id\":\"bus-07\",\"speed_kph\":'$(($i % 80))',\"h2_level_pct\":61.2,\"fuel_cell_kw\":75.0,\"battery_soc_pct\":82.1,\"odometer_km\":'$(10000 + $i)'}}'
+                 | fluvio produce bus-telemetry >/dev/null 2>&1 || true;
+               sleep 1;
+             done"
+    depends_on:
+      fluvio-topic-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # --- the edge agent under test ----------------------------------------------
+  fluvio-edge:
+    build:
+      context: ../../services/rust/fluvio-edge
+    container_name: h2-edge-agent
+    profiles: ["edge"]
+    networks:
+      - edgenet   # reach the local Fluvio SPU/SC
+      - h2net     # reach the platform Kafka (h2-kafka:9092)
+    ports:
+      - "127.0.0.1:8093:8093"   # /healthz
+    environment:
+      FLUVIO_ENDPOINT: fluvio-sc:9003
+      FLUVIO_TOPIC: bus-telemetry
+      KAFKA_BROKERS: h2-kafka:9092
+      KAFKA_TOPIC: telemetry.raw
+      SPOOL_DIR: /var/lib/fluvio-edge
+      BATCH_MAX: "100"
+      BATCH_LINGER_MS: "500"
+      RUST_LOG: info,fluvio_edge=debug
+    volumes:
+      - edge_spool:/var/lib/fluvio-edge
+    depends_on:
+      fluvio-topic-init:
+        condition: service_completed_successfully
+
+volumes:
+  edge_spu_data:
+  edge_spool:
