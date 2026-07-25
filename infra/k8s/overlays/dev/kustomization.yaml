@@ -76,5 +76,16 @@ images:
     newTag: dev
   - name: ghcr.io/munisp/h2fleet/carbon-analytics
     newTag: dev
+  - name: ghcr.io/munisp/h2fleet/admin-api
+    newTag: dev
+  - name: ghcr.io/munisp/h2fleet/ml-platform
+    newTag: dev
   - name: ghcr.io/munisp/h2fleet/pwa
     newTag: dev
+# NOTE (admin-api / ml-platform): both run replicas: 1 in base, so no dev
+# scaling patch is needed. ml-platform expects an MLflow server and
+# (optionally) Neo4j at the DNS names in h2fleet-config — those middleware
+# pieces are not part of this kustomize base; deploy them separately and
+# patch MLFLOW_TRACKING_URI / NEO4J_URI here if they live elsewhere.
+# admin-api needs a confidential `h2fleet-admin-api` client in the Keycloak
+# realm and its secret in h2fleet-secrets (KEYCLOAK_ADMIN_CLIENT_SECRET).

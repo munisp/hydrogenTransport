@@ -1,0 +1,70 @@
+# admin-api (Go, :8085) — platform admin control plane (Keycloak Admin REST
+# onboarding + Alertmanager alert routing). Mirrors the compose service.
+# KEYCLOAK_ADMIN_URL / ALERTMANAGER_URL come from the h2fleet-config ConfigMap;
+# the confidential client secret comes from h2fleet-secrets via secretKeyRef.
+#
+# /metrics note: when admin-api adds Prometheus instrumentation, expose
+# /metrics on the same port and add a scrape job (or ServiceMonitor) — no
+# scrape config ships for it yet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-api
+  namespace: h2fleet
+  labels:
+    app: admin-api
+    app.kubernetes.io/part-of: h2fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin-api
+  template:
+    metadata:
+      labels:
+        app: admin-api
+    spec:
+      containers:
+        - name: admin-api
+          image: ghcr.io/munisp/h2fleet/admin-api:latest
+          ports:
+            - containerPort: 8085
+          envFrom:
+            - configMapRef:
+                name: h2fleet-config
+            - secretRef:
+                name: h2fleet-secrets
+          env:
+            - name: PORT
+              value: "8085"
+            - name: KEYCLOAK_ADMIN_CLIENT_ID
+              value: "h2fleet-admin-api"
+            - name: KEYCLOAK_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: h2fleet-secrets
+                  key: KEYCLOAK_ADMIN_CLIENT_SECRET
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8085 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8085 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-api
+  namespace: h2fleet
+spec:
+  selector:
+    app: admin-api
+  ports:
+    - name: http
+      port: 8085
+      targetPort: 8085

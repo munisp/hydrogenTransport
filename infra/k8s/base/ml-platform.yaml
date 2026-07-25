@@ -1,0 +1,84 @@
+# ml-platform (Python, :8095) — ML control plane (MLflow tracking, model
+# artifacts, optional Neo4j graph features). Mirrors the compose service.
+# MLFLOW_TRACKING_URI / NEO4J_URI come from the h2fleet-config ConfigMap;
+# NEO4J_PASSWORD from h2fleet-secrets via secretKeyRef.
+#
+# The MLflow server and Neo4j themselves are middleware and are NOT part of
+# this base — deploy them separately (e.g. their own Helm charts/namespaces)
+# and keep the ConfigMap URIs pointing at them.
+#
+# /metrics note: when ml-platform adds Prometheus instrumentation, expose
+# /metrics on the same port and add a scrape job (or ServiceMonitor) — no
+# scrape config ships for it yet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-platform
+  namespace: h2fleet
+  labels:
+    app: ml-platform
+    app.kubernetes.io/part-of: h2fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-platform
+  template:
+    metadata:
+      labels:
+        app: ml-platform
+    spec:
+      containers:
+        - name: ml-platform
+          image: ghcr.io/munisp/h2fleet/ml-platform:latest
+          ports:
+            - containerPort: 8095
+          envFrom:
+            - configMapRef:
+                name: h2fleet-config
+            - secretRef:
+                name: h2fleet-secrets
+          env:
+            - name: PORT
+              value: "8095"
+            - name: MODEL_ARTIFACTS_DIR
+              value: /artifacts
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: h2fleet-secrets
+                  key: NEO4J_PASSWORD
+                  optional: true   # graph features are optional
+          volumeMounts:
+            - name: model-artifacts
+              mountPath: /artifacts
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8095 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8095 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        # Dev placeholder: artifacts also flow to MLflow/MinIO via the tracking
+        # URI, so an ephemeral dir is tolerable locally. Swap for a PVC in any
+        # real environment.
+        - name: model-artifacts
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-platform
+  namespace: h2fleet
+spec:
+  selector:
+    app: ml-platform
+  ports:
+    - name: http
+      port: 8095
+      targetPort: 8095

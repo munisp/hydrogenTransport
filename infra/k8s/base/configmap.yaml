@@ -22,3 +22,10 @@ data:
   PERMIFY_GRPC: "permify.h2fleet.svc:3476"
   TIGERBEETLE_ADDR: "tigerbeetle.h2fleet.svc:3000"
   MOJALOOP_ENDPOINT: "http://mojaloop-simulator.h2fleet.svc:8444"
+  # admin-api (Keycloak Admin REST + Alertmanager routing)
+  KEYCLOAK_ADMIN_URL: "http://keycloak.h2fleet.svc:8080"
+  ALERTMANAGER_URL: "http://alertmanager.h2fleet.svc:9093"
+  # ml-platform — MLflow/Neo4j are middleware deployed outside this base;
+  # these point at the expected in-cluster DNS names, override per overlay.
+  MLFLOW_TRACKING_URI: "http://mlflow.h2fleet.svc:5000"
+  NEO4J_URI: "bolt://neo4j.h2fleet.svc:7687"

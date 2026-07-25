@@ -7,10 +7,22 @@
   "registrationAllowed": false,
   "roles": {
     "realm": [
-      { "name": "platform-admin", "description": "Full platform administration incl. feature toggles (PUT /v1/toggles/*)" },
-      { "name": "operator", "description": "Fleet/infra operations: dispatch, stations, incidents" },
-      { "name": "driver", "description": "Bus driver: assigned jobs, vehicle state" },
-      { "name": "citizen", "description": "Passenger: DRT requests, fares, carbon view" }
+      {
+        "name": "platform-admin",
+        "description": "Full platform administration incl. feature toggles (PUT /v1/toggles/*)"
+      },
+      {
+        "name": "operator",
+        "description": "Fleet/infra operations: dispatch, stations, incidents"
+      },
+      {
+        "name": "driver",
+        "description": "Bus driver: assigned jobs, vehicle state"
+      },
+      {
+        "name": "citizen",
+        "description": "Passenger: DRT requests, fares, carbon view"
+      }
     ]
   },
   "clients": [
@@ -25,7 +37,10 @@
         "http://localhost:3000/*",
         "http://localhost:9080/*"
       ],
-      "webOrigins": ["http://localhost:3000", "http://localhost:9080"],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://localhost:9080"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:3000/*"
@@ -57,7 +72,10 @@
         "http://localhost:3000/*",
         "http://localhost:9080/*"
       ],
-      "webOrigins": ["http://localhost:3000", "http://localhost:9080"],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://localhost:9080"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:3000/*"
@@ -77,6 +95,16 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "h2fleet-admin-api",
+      "name": "H2Fleet admin-api (user management service account)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${KEYCLOAK_ADMIN_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
     },
     {
       "clientId": "services",
@@ -105,13 +133,34 @@
   ],
   "users": [
     {
+      "username": "service-account-h2fleet-admin-api",
+      "serviceAccountClientId": "h2fleet-admin-api",
+      "enabled": true,
+      "clientRoles": {
+        "realm-management": [
+          "manage-users",
+          "view-users",
+          "manage-realm"
+        ]
+      }
+    },
+    {
       "username": "admin",
       "enabled": true,
       "email": "admin@h2fleet.local",
       "firstName": "Ada",
       "lastName": "Admin",
-      "credentials": [{ "type": "password", "value": "${KEYCLOAK_ADMIN_USER_PASSWORD}", "temporary": false }],
-      "realmRoles": ["platform-admin", "operator"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_ADMIN_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "platform-admin",
+        "operator"
+      ]
     },
     {
       "username": "operator",
@@ -119,8 +168,16 @@
       "email": "operator@h2fleet.local",
       "firstName": "Otto",
       "lastName": "Operator",
-      "credentials": [{ "type": "password", "value": "${KEYCLOAK_OPERATOR_PASSWORD}", "temporary": false }],
-      "realmRoles": ["operator"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_OPERATOR_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "operator"
+      ]
     },
     {
       "username": "driver",
@@ -128,8 +185,16 @@
       "email": "driver@h2fleet.local",
       "firstName": "Dora",
       "lastName": "Driver",
-      "credentials": [{ "type": "password", "value": "${KEYCLOAK_DRIVER_PASSWORD}", "temporary": false }],
-      "realmRoles": ["driver"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_DRIVER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "driver"
+      ]
     },
     {
       "username": "citizen",
@@ -137,8 +202,16 @@
       "email": "citizen@h2fleet.local",
       "firstName": "Cid",
       "lastName": "Citizen",
-      "credentials": [{ "type": "password", "value": "${KEYCLOAK_CITIZEN_PASSWORD}", "temporary": false }],
-      "realmRoles": ["citizen"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_CITIZEN_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "citizen"
+      ]
     }
   ]
 }
