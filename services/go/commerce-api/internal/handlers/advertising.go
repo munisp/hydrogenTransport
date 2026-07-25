@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -87,11 +88,29 @@ type createCampaignRequest struct {
 	EndsAt      *time.Time `json:"ends_at"`
 }
 
-// CreateCampaign handles POST /v1/ads/campaigns (Keycloak JWT).
+// maxCampaignNameLen bounds campaign names (audit: no validation).
+const maxCampaignNameLen = 200
+
+// CreateCampaign handles POST /v1/ads/campaigns (Keycloak JWT). Validation
+// (audit defects): name required (trimmed, ≤200 chars), budget must not be
+// negative, and ends_at must not precede starts_at.
 func (h *Handler) CreateCampaign(w http.ResponseWriter, r *http.Request) {
 	var req createCampaignRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.Name) > maxCampaignNameLen {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required (1-200 chars)"})
+		return
+	}
+	if req.BudgetMinor < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "budget_minor must not be negative"})
+		return
+	}
+	if req.StartsAt != nil && req.EndsAt != nil && req.EndsAt.Before(*req.StartsAt) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ends_at must not be before starts_at"})
 		return
 	}
 	c, err := scanCampaign(h.db.QueryRow(r.Context(), `
@@ -109,16 +128,45 @@ var validCampaignStatuses = map[string]bool{
 	"draft": true, "active": true, "paused": true, "ended": true,
 }
 
+// campaignStatusTransitions is the campaign lifecycle (audit: any → any was
+// accepted, so ended campaigns could be resurrected). ended is terminal;
+// staying in the same status is an idempotent no-op.
+var campaignStatusTransitions = map[string]map[string]bool{
+	"draft":  {"draft": true, "active": true, "ended": true},
+	"active": {"active": true, "paused": true, "ended": true},
+	"paused": {"paused": true, "active": true, "ended": true},
+	"ended":  {"ended": true},
+}
+
 type updateCampaignRequest struct {
 	Status string `json:"status"`
 }
 
 // UpdateCampaign handles PATCH /v1/ads/campaigns/{id} (Keycloak JWT).
+// Enforces the lifecycle above: an illegal transition (e.g. ended → active)
+// is rejected with 409.
 func (h *Handler) UpdateCampaign(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req updateCampaignRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validCampaignStatuses[req.Status] {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || !validCampaignStatuses[req.Status] {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be one of draft|active|paused|ended"})
+		return
+	}
+	var current string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT status FROM commerce.ad_campaigns WHERE id = $1`, id).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "campaign not found"})
+		return
+	}
+	if err != nil {
+		h.internal(w, "load campaign status", err)
+		return
+	}
+	if !campaignStatusTransitions[current][req.Status] {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "invalid status transition from " + current + " to " + req.Status,
+		})
 		return
 	}
 	c, err := scanCampaign(h.db.QueryRow(r.Context(), `

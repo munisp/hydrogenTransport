@@ -1,10 +1,15 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/ledger"
@@ -12,15 +17,29 @@ import (
 
 // Trade mirrors commerce.trades (energy-trading module).
 type Trade struct {
-	ID         string    `json:"id"`
-	Kind       string    `json:"kind"` // e.g. "h2_surplus", "grid_energy"
-	QuantityKg float64   `json:"quantity_kg"`
-	PriceMinor int64     `json:"price_minor"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Kind           string    `json:"kind"` // h2-sale|h2-purchase|energy-export
+	QuantityKg     float64   `json:"quantity_kg"`
+	PriceMinor     int64     `json:"price_minor"`
+	Status         string    `json:"status"` // proposed|executed|failed
+	TBTransferID   *string   `json:"tb_transfer_id,omitempty"`
+	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
-const tradeCols = `id, kind, COALESCE(quantity_kg,0), COALESCE(price_minor,0), status, created_at`
+const tradeCols = `id, kind, COALESCE(quantity_kg,0), COALESCE(price_minor,0), status,
+	tb_transfer_id, idempotency_key, created_at`
+
+// validTradeKinds enumerates the trade kinds from migration 0001.
+var validTradeKinds = map[string]bool{
+	"h2-sale": true, "h2-purchase": true, "energy-export": true,
+}
+
+// kindDrawsSurplus reports whether the trade kind consumes physical H2
+// station surplus (checked against — and decremented from —
+// infra.stations.available_kg). h2-purchase is inbound supply: recording the
+// physical receipt is station-ops' job, so it does not touch available_kg.
+func kindDrawsSurplus(kind string) bool { return kind != "h2-purchase" }
 
 // ListTrades handles GET /v1/energy/trades.
 func (h *Handler) ListTrades(w http.ResponseWriter, r *http.Request) {
@@ -34,8 +53,8 @@ func (h *Handler) ListTrades(w http.ResponseWriter, r *http.Request) {
 
 	trades := []Trade{}
 	for rows.Next() {
-		var t Trade
-		if err := rows.Scan(&t.ID, &t.Kind, &t.QuantityKg, &t.PriceMinor, &t.Status, &t.CreatedAt); err != nil {
+		t, err := scanTrade(rows)
+		if err != nil {
 			h.internal(w, "scan trade", err)
 			return
 		}
@@ -48,52 +67,230 @@ func (h *Handler) ListTrades(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"trades": trades})
 }
 
+func scanTrade(row interface{ Scan(...any) error }) (Trade, error) {
+	var t Trade
+	err := row.Scan(&t.ID, &t.Kind, &t.QuantityKg, &t.PriceMinor, &t.Status,
+		&t.TBTransferID, &t.IdempotencyKey, &t.CreatedAt)
+	return t, err
+}
+
 type createTradeRequest struct {
 	Kind       string  `json:"kind"`
 	QuantityKg float64 `json:"quantity_kg"`
 	PriceMinor int64   `json:"price_minor"`
 }
 
-// CreateTrade handles POST /v1/energy/trades (Keycloak JWT). Executes the
-// trade on the TigerBeetle ledger (ENERGY_TRADE 3xxx → OPERATOR_REVENUE 2xxx)
-// and publishes energy.trade.executed (SPEC §3.3).
+// errInsufficientSurplus marks a trade whose quantity exceeds the recorded
+// station H2 surplus.
+var errInsufficientSurplus = errors.New("insufficient station surplus")
+
+// stationDraw records how much H2 was drawn from one station so a failed
+// settlement can be compensated exactly.
+type stationDraw struct {
+	id string
+	kg float64
+}
+
+// CreateTrade handles POST /v1/energy/trades (Keycloak JWT, operator,
+// Idempotency-Key required). Flow (ordering fixed so a DB failure cannot
+// orphan a ledger transfer):
+//  1. insert commerce.trades row as 'proposed' (idempotent on the key);
+//  2. physical backing: sale kinds draw down infra.stations.available_kg in
+//     one transaction — a trade for more H2 than the recorded surplus is
+//     rejected (409, trade marked failed, energy.trade.failed published);
+//  3. TigerBeetle settlement (energy clearing 3001 → operator revenue 2001,
+//     deterministic transfer id from the Idempotency-Key). The clearing
+//     account is overdraft-protected, so an unfunded trade is rejected
+//     (402), the surplus draw-down is compensated, the trade lands in
+//     'failed' and energy.trade.failed is published — never "cleared";
+//  4. on success the trade becomes 'executed' with tb_transfer_id persisted
+//     and energy.trade.executed is published (SPEC §3.3).
 func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
+	idemKey := r.Header.Get("Idempotency-Key")
+	if idemKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Idempotency-Key header is required"})
+		return
+	}
 	var req createTradeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Kind == "" || req.QuantityKg <= 0 || req.PriceMinor <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind, positive quantity_kg and price_minor are required"})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if !validTradeKinds[req.Kind] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be one of h2-sale|h2-purchase|energy-export"})
+		return
+	}
+	if req.QuantityKg <= 0 || req.PriceMinor <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "positive quantity_kg and price_minor are required"})
 		return
 	}
 
-	status := "executed"
-	transferID, err := h.ledger.Transfer(
-		ledger.NewTransferID(), ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount,
-		uint64(req.PriceMinor), ledger.CodeEnergy)
-	if err != nil {
-		h.log.Error("energy trade ledger transfer failed", zap.Error(err))
-		status = "failed"
+	// Step 1: idempotent insert. A replay with the same key returns the
+	// already-recorded trade unchanged (no second transfer, no second
+	// surplus draw-down).
+	tradeID := uuid.NewString()
+	_, err := h.db.Exec(r.Context(), `
+		INSERT INTO commerce.trades (id, kind, quantity_kg, price_minor, status, idempotency_key)
+		VALUES ($1, $2, $3, $4, 'proposed', $5)`,
+		tradeID, req.Kind, req.QuantityKg, req.PriceMinor, idemKey)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		existing, qerr := scanTrade(h.db.QueryRow(r.Context(),
+			`SELECT `+tradeCols+` FROM commerce.trades WHERE idempotency_key = $1`, idemKey))
+		if qerr != nil {
+			h.internal(w, "load idempotent trade", qerr)
+			return
+		}
+		writeJSON(w, http.StatusOK, existing)
+		return
 	}
-
-	var t Trade
-	err = h.db.QueryRow(r.Context(), `
-		INSERT INTO commerce.trades (kind, quantity_kg, price_minor, status)
-		VALUES ($1, $2, $3, $4) RETURNING `+tradeCols,
-		req.Kind, req.QuantityKg, req.PriceMinor, status).
-		Scan(&t.ID, &t.Kind, &t.QuantityKg, &t.PriceMinor, &t.Status, &t.CreatedAt)
 	if err != nil {
-		h.internal(w, "create trade", err)
+		h.internal(w, "insert trade", err)
 		return
 	}
 
-	if status == "executed" {
-		if err := h.pub.Publish(r.Context(), "energy.trade.executed", map[string]any{
-			"trade_id":       t.ID,
-			"kind":           t.Kind,
-			"quantity_kg":    t.QuantityKg,
-			"price_minor":    t.PriceMinor,
-			"tb_transfer_id": transferID,
-		}); err != nil {
-			h.log.Error("failed to publish energy.trade.executed", zap.Error(err))
+	event := map[string]any{
+		"trade_id":    tradeID,
+		"kind":        req.Kind,
+		"quantity_kg": req.QuantityKg,
+		"price_minor": req.PriceMinor,
+	}
+	fail := func(statusCode int, code, reason string) {
+		t, uerr := scanTrade(h.db.QueryRow(r.Context(), `
+			UPDATE commerce.trades SET status = 'failed' WHERE id = $1 RETURNING `+tradeCols, tradeID))
+		if uerr != nil {
+			h.internal(w, "mark trade failed", uerr)
+			return
+		}
+		event["reason"] = reason
+		event["failed_at"] = time.Now().UTC().Format(time.RFC3339)
+		if err := h.pub.Publish(r.Context(), "energy.trade.failed", event); err != nil {
+			h.log.Error("failed to publish energy.trade.failed", zap.Error(err))
+		}
+		writeJSON(w, statusCode, map[string]any{"error": code, "message": reason, "trade": t})
+	}
+
+	// Step 2: physical backing — draw down the station H2 surplus.
+	var draws []stationDraw
+	if kindDrawsSurplus(req.Kind) {
+		draws, err = h.drawDownSurplus(r.Context(), req.QuantityKg)
+		if errors.Is(err, errInsufficientSurplus) {
+			fail(http.StatusConflict, "insufficient_surplus",
+				fmt.Sprintf("trade quantity %.2f kg exceeds recorded station surplus", req.QuantityKg))
+			return
+		}
+		if err != nil {
+			h.internal(w, "draw down station surplus", err)
+			return
 		}
 	}
+
+	// Step 3: ledger settlement. The deterministic transfer id makes client
+	// retries safe; the overdraft-protected clearing account rejects
+	// unfunded trades instead of conjuring revenue.
+	transferID, err := h.ledger.Transfer(
+		ledger.DeterministicTransferID("trade:"+idemKey),
+		ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount,
+		uint64(req.PriceMinor), ledger.CodeEnergy)
+	if err != nil {
+		h.log.Error("energy trade ledger transfer failed", zap.String("trade", tradeID), zap.Error(err))
+		// Compensate the physical draw-down so H2 is not lost from inventory.
+		if rerr := h.restoreSurplus(r.Context(), draws); rerr != nil {
+			h.log.Error("failed to restore station surplus", zap.String("trade", tradeID), zap.Error(rerr))
+		}
+		if errors.Is(err, ledger.ErrInsufficientFunds) {
+			fail(http.StatusPaymentRequired, "insufficient_funds",
+				"energy clearing account is not funded by a buyer settlement")
+			return
+		}
+		fail(http.StatusBadGateway, "ledger_error", "ledger transfer failed")
+		return
+	}
+
+	// Step 4: finalize.
+	t, err := scanTrade(h.db.QueryRow(r.Context(), `
+		UPDATE commerce.trades SET status = 'executed', tb_transfer_id = $2
+		WHERE id = $1 RETURNING `+tradeCols, tradeID, transferID))
+	if err != nil {
+		h.internal(w, "finalize trade", err)
+		return
+	}
+	event["tb_transfer_id"] = transferID
+	event["executed_at"] = time.Now().UTC().Format(time.RFC3339)
+	if err := h.pub.Publish(r.Context(), "energy.trade.executed", event); err != nil {
+		h.log.Error("failed to publish energy.trade.executed", zap.Error(err))
+	}
 	writeJSON(w, http.StatusCreated, t)
+}
+
+// drawDownSurplus atomically verifies that the recorded station surplus
+// covers kg and decrements it greedily across stations (ordered, locked FOR
+// UPDATE). It returns the per-station allocations for exact compensation.
+func (h *Handler) drawDownSurplus(ctx context.Context, kg float64) ([]stationDraw, error) {
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT id, COALESCE(available_kg,0) FROM infra.stations
+		WHERE available_kg > 0 ORDER BY id FOR UPDATE`)
+	if err != nil {
+		return nil, err
+	}
+	var stations []stationDraw
+	var total float64
+	for rows.Next() {
+		var s stationDraw
+		if err := rows.Scan(&s.id, &s.kg); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stations = append(stations, s)
+		total += s.kg
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if total+1e-9 < kg {
+		return nil, fmt.Errorf("%w (available %.2f kg, requested %.2f kg)", errInsufficientSurplus, total, kg)
+	}
+
+	remaining := kg
+	draws := []stationDraw{}
+	for _, s := range stations {
+		if remaining <= 1e-9 {
+			break
+		}
+		take := s.kg
+		if take > remaining {
+			take = remaining
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE infra.stations SET available_kg = available_kg - $2 WHERE id = $1`,
+			s.id, take); err != nil {
+			return nil, err
+		}
+		draws = append(draws, stationDraw{id: s.id, kg: take})
+		remaining -= take
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return draws, nil
+}
+
+// restoreSurplus compensates a previous drawDownSurplus after a failed
+// settlement, returning the exact per-station allocations.
+func (h *Handler) restoreSurplus(ctx context.Context, draws []stationDraw) error {
+	for _, d := range draws {
+		if _, err := h.db.Exec(ctx, `
+			UPDATE infra.stations SET available_kg = available_kg + $2 WHERE id = $1`,
+			d.id, d.kg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
