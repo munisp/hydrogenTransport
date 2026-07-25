@@ -30,6 +30,7 @@ export default function GovDashboardPage() {
   const creditSeries = [...(credits.data ?? [])]
     .sort((a, b) => a.period.localeCompare(b.period))
     .map((c) => ({ date: c.period, value: c.credits }));
+  const degraded = kpis.degraded ?? [];
 
   return (
     <div>
@@ -38,11 +39,28 @@ export default function GovDashboardPage() {
         description="Fleet KPIs — uptime, hydrogen, emissions, ridership and fare revenue."
       />
 
+      {kpis.partial || degraded.length > 0 ? (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          Some KPI sources are temporarily unavailable
+          {degraded.length > 0 ? ` (${degraded.join(", ")})` : ""}; affected figures are shown as
+          “—” rather than estimated.
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <StatCard
           label="Fleet uptime"
-          value={`${formatNumber(kpis.fleet_uptime_pct, 1)}%`}
-          hint={`${kpis.vehicles_active} of ${kpis.vehicles_total} vehicles active`}
+          value={
+            kpis.fleet_uptime_pct === null || kpis.fleet_uptime_pct === undefined
+              ? "—"
+              : `${formatNumber(kpis.fleet_uptime_pct, 1)}%`
+          }
+          hint={
+            kpis.fleet_uptime_pct === null || kpis.fleet_uptime_pct === undefined
+              ? kpis.fleet_uptime_note ??
+                `Active ratio ${formatNumber(kpis.fleet_active_ratio_pct, 1)}% (status mix, not time-based)`
+              : `${formatNumber(kpis.vehicles_active)} of ${formatNumber(kpis.vehicles_total)} vehicles active`
+          }
           icon={<Activity className="h-4 w-4" />}
         />
         <StatCard
@@ -77,7 +95,7 @@ export default function GovDashboardPage() {
         />
         <StatCard
           label="Vehicles"
-          value={`${kpis.vehicles_active}/${kpis.vehicles_total}`}
+          value={`${formatNumber(kpis.vehicles_active)}/${formatNumber(kpis.vehicles_total)}`}
           hint="Active / total fleet"
           icon={<Bus className="h-4 w-4" />}
         />

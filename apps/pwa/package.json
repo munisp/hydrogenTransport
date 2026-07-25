@@ -2,7 +2,7 @@
   "name": "@h2fleet/pwa",
   "version": "0.1.0",
   "private": true,
-  "description": "H2Fleet unified PWA: 4 domain dashboards + citizen app, module-toggle driven (SPEC §3.7).",
+  "description": "H2Fleet unified PWA: 4 domain dashboards + citizen app, module-toggle driven (SPEC \u00a73.7).",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -19,7 +19,7 @@
     "maplibre-gl": "4.1.2",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "react-router-dom": "6.23.1",
+    "react-router-dom": "6.30.4",
     "recharts": "2.12.7",
     "tailwind-merge": "2.3.0"
   },
@@ -28,10 +28,14 @@
     "@types/react-dom": "18.3.0",
     "@vitejs/plugin-react": "4.3.0",
     "autoprefixer": "10.4.19",
-    "postcss": "8.4.38",
+    "postcss": "8.5.18",
     "tailwindcss": "3.4.4",
     "typescript": "5.4.5",
-    "vite": "5.2.13",
+    "vite": "5.4.21",
     "vite-plugin-pwa": "0.20.0"
+  },
+  "overrides": {
+    "esbuild": "0.25.0",
+    "brace-expansion": "5.0.8"
   }
 }

@@ -47,13 +47,29 @@ export async function listEnergyTrades(): Promise<EnergyTrade[]> {
   return unwrapList<EnergyTrade>(raw);
 }
 
-export async function createEnergyTrade(body: {
-  kind: string;
-  quantity_kg: number;
-  price_minor: number;
-}): Promise<EnergyTrade> {
+/**
+ * Stable idempotency key for one user-initiated form submission. commerce-api
+ * requires the Idempotency-Key header (400 without it); generating the key once
+ * per submission means mutation retries replay the original operation instead
+ * of double-posting.
+ */
+export function newIdempotencyKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export async function createEnergyTrade(
+  body: {
+    kind: string;
+    quantity_kg: number;
+    price_minor: number;
+  },
+  idempotencyKey: string = newIdempotencyKey(),
+): Promise<EnergyTrade> {
   return apiFetch<EnergyTrade>(`${API_PREFIX.commerce}/v1/energy/trades`, {
     method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(body),
   });
 }

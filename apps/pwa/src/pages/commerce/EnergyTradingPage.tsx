@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createEnergyTrade, listEnergyTrades } from "../../api/commerce";
+import { createEnergyTrade, listEnergyTrades, newIdempotencyKey } from "../../api/commerce";
 import {
   Button,
   Card,
@@ -26,12 +26,15 @@ export default function EnergyTradingPage() {
   const query = useQuery({ queryKey: ["commerce", "trades"], queryFn: listEnergyTrades });
   const trades = query.data ?? [];
 
-  const [kind, setKind] = useState("h2_sale");
+  const [kind, setKind] = useState("h2-sale");
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
 
   const create = useMutation({
-    mutationFn: createEnergyTrade,
+    mutationFn: (vars: {
+      body: { kind: string; quantity_kg: number; price_minor: number };
+      idempotencyKey: string;
+    }) => createEnergyTrade(vars.body, vars.idempotencyKey),
     onSuccess: () => {
       setQuantity("");
       setPrice("");
@@ -44,7 +47,12 @@ export default function EnergyTradingPage() {
     const qty = Number(quantity);
     const priceMajor = Number(price);
     if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(priceMajor) || priceMajor <= 0) return;
-    create.mutate({ kind, quantity_kg: qty, price_minor: Math.round(priceMajor * 100) });
+    // One stable key per form submission: mutation retries replay the original
+    // trade server-side instead of double-settling.
+    create.mutate({
+      body: { kind, quantity_kg: qty, price_minor: Math.round(priceMajor * 100) },
+      idempotencyKey: newIdempotencyKey(),
+    });
   }
 
   return (
@@ -63,9 +71,9 @@ export default function EnergyTradingPage() {
             <form className="space-y-4" onSubmit={submit}>
               <Field label="Instrument">
                 <Select value={kind} onChange={(e) => setKind(e.target.value)}>
-                  <option value="h2_sale">Sell H2</option>
-                  <option value="h2_purchase">Buy H2</option>
-                  <option value="electricity">Electricity</option>
+                  <option value="h2-sale">Sell H2</option>
+                  <option value="h2-purchase">Buy H2</option>
+                  <option value="energy-export">Energy export</option>
                 </Select>
               </Field>
               <Field label="Quantity (kg)">
