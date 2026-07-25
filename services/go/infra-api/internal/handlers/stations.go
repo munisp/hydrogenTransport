@@ -84,7 +84,7 @@ type createStationRequest struct {
 // CreateStation handles POST /v1/stations (Keycloak JWT required).
 func (h *Handler) CreateStation(w http.ResponseWriter, r *http.Request) {
 	var req createStationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -128,7 +128,7 @@ type stationStatusRequest struct {
 func (h *Handler) UpdateStationStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req stationStatusRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Status == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.Status == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"status\""})
 		return
 	}

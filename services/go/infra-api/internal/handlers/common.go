@@ -92,7 +92,13 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) internal(w http.ResponseWriter, op string, err error) {
 	h.log.Error(op, zap.Error(err))
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+}
+
+// decodeJSON decodes a JSON request body capped at 1 MiB so unbounded
+// payloads cannot exhaust memory (SECURITY_AUDIT F8).
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	return json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

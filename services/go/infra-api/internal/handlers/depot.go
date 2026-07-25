@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -117,7 +116,7 @@ type createWorkOrderRequest struct {
 // CreateWorkOrder handles POST /v1/depot/work-orders (Keycloak JWT).
 func (h *Handler) CreateWorkOrder(w http.ResponseWriter, r *http.Request) {
 	var req createWorkOrderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.Title == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"title\""})
 		return
 	}

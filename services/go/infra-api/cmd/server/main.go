@@ -21,8 +21,8 @@ import (
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/handlers"
-	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/workflow"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/metrics"
+	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/workflow"
 )
 
 func main() {
@@ -107,7 +107,12 @@ func main() {
 	// leak-detection module: incidents + sensor webhook
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "leak-detection"))
-		r.Get("/v1/incidents", h.ListIncidents)
+		// The incident feed contains safety/PII data; citizens must not list
+		// all incidents (SECURITY_AUDIT F12 / task: incident list gating).
+		// station-staff is accepted as a role name even though today it maps
+		// to the operator realm role at provisioning time.
+		r.With(jwtmw.RequireAnyRole("operator", "platform-admin", "station-staff")).
+			Get("/v1/incidents", h.ListIncidents)
 		r.With(jwtmw.RequireAuth).Post("/v1/incidents", h.OpenIncident)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/incidents/{id}/ack", h.AckIncident)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/incidents/{id}/resolve", h.ResolveIncident)

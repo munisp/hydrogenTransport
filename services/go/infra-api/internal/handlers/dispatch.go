@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -79,18 +78,55 @@ type createDispatchJobRequest struct {
 // dispatch workflow.
 func (h *Handler) CreateDispatchJob(w http.ResponseWriter, r *http.Request) {
 	var req createDispatchJobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DriverSub == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.DriverSub == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"driver_sub\""})
 		return
 	}
+
+	// Conflict checks (BUSINESS_LOGIC_AUDIT §8 dispatch-workforce): a driver
+	// must not hold two overlapping active jobs and a vehicle must not be
+	// double-booked. Active = assigned|accepted|in_progress. The check runs
+	// inside the insert transaction so a concurrent create cannot race past
+	// it between check and insert.
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		h.internal(w, "begin dispatch job transaction", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	var conflict string
+	err = tx.QueryRow(r.Context(), `
+		SELECT CASE WHEN driver_sub = $1 THEN 'driver' ELSE 'vehicle' END
+		FROM infra.dispatch_jobs
+		WHERE status IN ('assigned','accepted','in_progress')
+		  AND (driver_sub = $1 OR ($2::uuid IS NOT NULL AND vehicle_id = $2))
+		LIMIT 1`, req.DriverSub, req.VehicleID).Scan(&conflict)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		h.internal(w, "dispatch conflict check", err)
+		return
+	}
+	if err == nil {
+		if conflict == "driver" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "driver already has an active dispatch job"})
+		} else {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "vehicle already assigned to an active dispatch job"})
+		}
+		return
+	}
+
 	var j DispatchJob
-	err := h.db.QueryRow(r.Context(), `
+	err = tx.QueryRow(r.Context(), `
 		INSERT INTO infra.dispatch_jobs (driver_sub, vehicle_id, route, starts_at)
 		VALUES ($1, $2, $3, $4)
 		RETURNING `+dispatchJobCols, req.DriverSub, req.VehicleID, req.Route, req.StartsAt).
 		Scan(&j.ID, &j.DriverSub, &j.VehicleID, &j.Route, &j.StartsAt, &j.Status, &j.CreatedAt, &j.AcceptedAt)
 	if err != nil {
 		h.internal(w, "create dispatch job", err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		h.internal(w, "commit dispatch job", err)
 		return
 	}
 
