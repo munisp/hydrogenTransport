@@ -1,7 +1,7 @@
 {
   "name": "@h2fleet/toggle-client",
   "version": "0.1.0",
-  "description": "H2Fleet feature-toggle client SDK (TypeScript). Contract per SPEC §3.2: isEnabled(module) -> boolean, 5s local cache, fail-closed.",
+  "description": "H2Fleet feature-toggle client SDK (TypeScript). Contract per SPEC \u00a73.2: isEnabled(module) -> boolean, 5s local cache, fail-closed.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.ts",

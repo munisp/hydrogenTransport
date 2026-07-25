@@ -36,7 +36,7 @@ arrives via the SPEC §3.8 settlement workflow), `CARBON_FUND=4001`. When
 fallback) and a warning is logged.
 
 Note: `tigerbeetle-go` requires **CGO** (bundled native client), so the
-Dockerfile builds on `golang:1.26-bookworm` and ships `distroless/cc`.
+Dockerfile builds on `golang:1.22-bookworm` and ships `distroless/cc`.
 
 ## Configuration (env, SPEC §3.5)
 

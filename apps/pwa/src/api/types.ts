@@ -275,17 +275,29 @@ export interface OpenDataset {
 // ---- Commerce domain (commerce-api, /api/commerce) --------------------------
 
 /** commerce-api GET /v1/gov/kpis — aggregated KPIs for the gov-dashboard module. */
+/**
+ * GovKPIs — every rollup is independently nullable: a failed source leaves its
+ * fields null and is named in `degraded` (never a fabricated value).
+ * `fleet_uptime_pct` is null until a time-based availability source exists.
+ */
 export interface GovKpis {
-  revenue_30d_minor: number;
-  settled_payments_30d: number;
-  ridership_estimate_30d: number;
-  kg_co2_avoided_total: number;
-  carbon_credits_total: number;
-  vehicles_total: number;
-  vehicles_active: number;
-  fleet_uptime_pct: number;
-  stations_available_kg: number;
-  open_incidents: number;
+  revenue_30d_minor: number | null;
+  settled_payments_30d: number | null;
+  ridership_estimate_30d: number | null;
+  kg_co2_avoided_total: number | null;
+  carbon_credits_total: number | null;
+  vehicles_total: number | null;
+  vehicles_active: number | null;
+  /** Static status mix (active/total), NOT time-based uptime. */
+  fleet_active_ratio_pct: number | null;
+  /** Null until a time-based availability source exists. */
+  fleet_uptime_pct: number | null;
+  fleet_uptime_note?: string;
+  stations_available_kg: number | null;
+  /** open + acknowledged + in_progress */
+  open_incidents: number | null;
+  partial?: boolean;
+  degraded?: string[];
 }
 
 /** commerce.fare_payments */
@@ -311,10 +323,13 @@ export interface MarketplaceOffer {
 /** commerce.trades */
 export interface EnergyTrade {
   id: string;
-  kind: "h2_sale" | "h2_purchase" | "electricity" | string;
+  kind: "h2-sale" | "h2-purchase" | "energy-export" | string;
   quantity_kg: number;
   price_minor: number;
-  status: "open" | "executed" | "settled" | "cancelled" | string;
+  status: "proposed" | "executed" | "failed" | string;
+  /** TigerBeetle transfer id, set once executed. */
+  tb_transfer_id?: string | null;
+  idempotency_key?: string;
   created_at: string;
 }
 
