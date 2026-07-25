@@ -13,6 +13,18 @@ infra/k8s/
   overlays/dev/         dev overlay: TOGGLE_DOMAINS=fleet,infra, 1 replica, :dev images, HPAs removed
 ```
 
+## Image tags
+
+Base manifests reference `ghcr.io/munisp/h2fleet/<service>:REPLACE_ME` — a
+deliberate placeholder, never a mutable `:latest` (SECURITY_AUDIT F13).
+Applying base directly without pinning fails fast (ImagePullBackOff) instead
+of silently running whatever `:latest` happens to point at. Overlays pin via
+the kustomize `images:` block (the dev overlay uses `:dev`); release pipelines
+must substitute an immutable tag or digest. Third-party middleware images are
+not part of these manifests — they come from the pinned Helm charts in the
+table below (and from `infra/docker-compose.yml`'s pinned tags in compose
+deployments).
+
 ## Apply
 
 ```bash

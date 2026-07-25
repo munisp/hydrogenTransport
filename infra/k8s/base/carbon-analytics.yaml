@@ -18,7 +18,11 @@ spec:
     spec:
       containers:
         - name: carbon-analytics
-          image: ghcr.io/munisp/h2fleet/carbon-analytics:latest
+          # SECURITY_AUDIT F13: never deploy a mutable :latest tag.
+          # :REPLACE_ME is a deliberate placeholder — overlays pin the tag
+          # via kustomize `images:` (dev overlay uses :dev); release pipelines
+          # must set an immutable tag/digest before applying base directly.
+          image: ghcr.io/munisp/h2fleet/carbon-analytics:REPLACE_ME
           ports:
             - containerPort: 8094
           envFrom:
