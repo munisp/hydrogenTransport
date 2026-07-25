@@ -93,7 +93,7 @@ def build_graph_from_postgres(database_url: str) -> dict[str, np.ndarray]:
         j = int(np.argmin([dist(cent[k], d) for d in dep_xy]))
         node = n_st + n_dep + k
         adj[node, i] = adj[i, node] = 1.0
-        adj[node, n_st + j] = adj[n_st + dep, node] = 1.0
+        adj[node, n_st + j] = adj[n_st + j, node] = 1.0
 
     node_type = np.zeros((n, 3), dtype=np.float32)
     node_type[:n_st, 0] = 1

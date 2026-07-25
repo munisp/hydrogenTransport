@@ -1,20 +1,25 @@
 """Problem data loading: Postgres (fleet.vehicles + latest telemetry +
-infra.stations) with a deterministic seed-data fallback when the DB has no
-fleet yet (SPEC §4: simulated fallbacks allowed).
+infra.stations + fleet.route_stops) with deterministic fallbacks when the
+DB has no fleet yet (SPEC §4: simulated fallbacks allowed).
 
-Scheduled route stops are not yet modeled in SPEC §3.4, so per-day waypoints
-come from a deterministic generator (seeded by date); swap `generate_stops`
-for a route_stops table lookup when infra/sql adds one — the VRP input
-contract (`list[Stop]`) does not change.
+Route stops come from fleet.route_stops / fleet.stops (migration 0005) when
+populated; on databases without those tables (or with an empty network) the
+legacy deterministic per-date generator is used instead, so the VRP input
+contract (`list[Stop]`) never changes.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 import random
 
+import asyncpg
+
 from .models import Bus, Problem, Station, Stop
+
+log = logging.getLogger("route-optimizer")
 
 # Berlin-ish operating area for the seed fleet.
 _SEED_CENTER = (52.5200, 13.4050)
@@ -25,9 +30,31 @@ async def load_problem(pool, bus_ids: list[str] | None, date: dt.date) -> tuple[
     stations = await _load_stations(pool)
     if not buses:
         return seed_problem(bus_ids, date), "seed"
-    stops = generate_stops(date)
+    stops = await load_stops(pool, date)
     depot = Stop(stop_id="DEPOT-CENTRAL", name="Central Depot", lat=_SEED_CENTER[0], lon=_SEED_CENTER[1])
     return Problem(depot=depot, buses=buses, stations=stations, stops=stops), "database"
+
+
+async def load_stops(pool, date: dt.date) -> list[Stop]:
+    """Scheduled route stops from fleet.route_stops / fleet.stops (0005),
+    ordered by route/sequence. Falls back to the deterministic per-date
+    generator when the tables are missing (pre-0005 database) or empty."""
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT s.code AS stop_id, s.name,
+                   ST_Y(s.geom)::float8 AS lat, ST_X(s.geom)::float8 AS lon
+            FROM fleet.route_stops rs
+            JOIN fleet.stops s ON s.id = rs.stop_id
+            ORDER BY rs.route_id, rs.seq
+            """
+        )
+    except asyncpg.exceptions.UndefinedTableError:
+        log.info("fleet.route_stops/fleet.stops not present; using generated stops")
+        rows = []
+    if not rows:
+        return generate_stops(date)
+    return [Stop(**dict(r)) for r in rows]
 
 
 async def _load_buses(pool, bus_ids: list[str] | None) -> list[Bus]:

@@ -1,17 +1,17 @@
 # ml-platform pinned dependencies (Python 3.12).
 # torch must come from the CPU wheel index (see README/Dockerfile):
-#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
 numpy==2.2.1
 pandas==2.2.3
-pyarrow==18.1.0
+pyarrow==23.0.1
 scikit-learn==1.6.1
-torch==2.5.1
+torch==2.6.0
 httpx==0.28.1
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.13.0
 prometheus-fastapi-instrumentator==7.0.0
 prometheus-client==0.21.1
 psycopg[binary]==3.2.3
