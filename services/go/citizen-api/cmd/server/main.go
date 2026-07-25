@@ -19,8 +19,8 @@ import (
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/handlers"
-	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/pubsub"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/metrics"
+	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/pubsub"
 )
 
 func main() {
