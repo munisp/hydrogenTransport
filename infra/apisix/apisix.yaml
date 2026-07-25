@@ -4,6 +4,7 @@
 #   /api/toggles/*  -> toggle-service:8080      /api/fleet/*    -> fleet-api:8081
 #   /api/infra/*    -> infra-api:8082           /api/citizen/*  -> citizen-api:8083
 #   /api/commerce/* -> commerce-api:8084        /api/ml/*       -> predictive-maintenance:8090
+#   /api/admin/*    -> admin-api:8085
 #   /api/optimize/* -> route-optimizer:8091     /api/twin/*     -> digital-twin:8092
 #   /api/open-data/* -> citizen-api:8083 (open-data surface, key-auth)
 #
@@ -155,7 +156,49 @@ routes:
         discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
         unauth_action: pass        # service enforces JWT on mutating routes
 
+  # ---------------------------------------------------------------- admin ---
+  # Admin & onboarding backend (admin-api). Public surfaces: POST
+  # /v1/onboarding/citizen and /v1/onboarding/{persona} intake; everything
+  # else requires a Keycloak JWT with platform-admin/operator roles enforced
+  # in-service (unauth_action: pass lets the public intake through).
+  - uri: /api/admin/*
+    name: admin
+    upstream:
+      type: roundrobin
+      nodes:
+        "admin-api:8085": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/admin(/.*)$", "$1"]
+      limit-count:
+        count: 300                # requests per time_window per remote address
+        time_window: 60
+        rejected_code: 429
+        key: remote_addr
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # public onboarding intake; admin routes 401/403 in service
+
   # ------------------------------------------------------------------- ml ---
+  - uri: /api/mlplatform/*
+    name: mlplatform
+    upstream:
+      type: roundrobin
+      nodes:
+        "ml-platform:8095": 1
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/api/mlplatform(/.*)$", "$1"]
+      openid-connect:
+        bearer_only: true
+        client_id: services
+        client_secret: "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}"
+        discovery: http://keycloak:8080/realms/h2fleet/.well-known/openid-configuration
+        unauth_action: pass        # service enforces JWT on mutating routes
+
   - uri: /api/ml/*
     name: predictive-maintenance
     upstream:
