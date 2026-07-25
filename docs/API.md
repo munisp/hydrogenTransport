@@ -93,15 +93,15 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/v1/payments` | JWT (`citizen`) | Initiate fare: Mojaloop transfer + TB ledger entry → `fare.payment.initiated`; 502 + `fare.payment.failed` on ledger/switch failure |
+| POST | `/v1/payments` | JWT (`citizen`) + `Idempotency-Key` header (400 without) | Initiate fare, body `{"amount_minor": 250, "currency": "EUR"}`: Mojaloop transfer + TB ledger entry → `fare.payment.initiated`; same key replays the original payment; 502 + `fare.payment.failed` on ledger/switch failure |
 | GET | `/v1/payments` | JWT | List payments (own for `citizen`, all for `operator`); 401 unauthenticated |
 | GET | `/v1/payments/{id}` | JWT | Payment detail; 401 unauthenticated |
 | GET | `/v1/loyalty/balance` | JWT | Caller loyalty point balance |
 | POST | `/v1/loyalty/redeem` | JWT (`citizen`) | Redeem an offer, body `{"offer_id": "..."}` → `{redeemed_offer_id, points_spent, remaining_points}` |
 | GET | `/v1/marketplace/offers` | public | Loyalty marketplace offers |
 | POST | `/v1/marketplace/offers` | JWT | Publish an offer |
-| GET/POST | `/v1/energy/trades` | public / JWT (`operator`) | Energy/H2 trades → `energy.trade.executed` |
-| GET | `/v1/gov/kpis` | public | Gov dashboard KPIs: `revenue_30d_minor`, `settled_payments_30d`, `ridership_estimate_30d`, `kg_co2_avoided_total`, `carbon_credits_total`, `vehicles_total`, `vehicles_active`, `fleet_uptime_pct`, `stations_available_kg`, `open_incidents` |
+| GET/POST | `/v1/energy/trades` | public / JWT (`operator`) + `Idempotency-Key` header (400 without) | Energy/H2 trade, body `{"kind": "h2-sale\|h2-purchase\|energy-export", "quantity_kg": 25, "price_minor": 84000}`: proposed → station-surplus backing check (409 `insufficient_surplus`) → TigerBeetle settlement (402 `insufficient_funds` when energy clearing is unfunded) → `executed` + `energy.trade.executed`; same key replays the trade |
+| GET | `/v1/gov/kpis` | public | Gov dashboard KPIs (each rollup independently nullable; failed sources are named in `degraded` + `partial: true`): `revenue_30d_minor`, `settled_payments_30d`, `ridership_estimate_30d`, `kg_co2_avoided_total`, `carbon_credits_total`, `vehicles_total`, `vehicles_active`, `fleet_active_ratio_pct`, `fleet_uptime_pct` (null until a time-based source exists), `stations_available_kg`, `open_incidents` |
 | GET/POST | `/v1/ads/campaigns` | public / JWT | Ad inventory & campaigns |
 | GET/PATCH | `/v1/ads/campaigns/{id}` | public / JWT | Campaign detail / update |
 
