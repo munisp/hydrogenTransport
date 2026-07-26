@@ -107,6 +107,30 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 			ends_at      timestamptz,
 			created_at   timestamptz NOT NULL DEFAULT now()
 		)`,
+		// Wave-4 parity with migrations 0005/0007 (dev databases that never
+		// ran goose): refunds, fare capping, ad inventory & placements.
+		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS charged_minor bigint`,
+		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS refund_of uuid`,
+		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS refunded_at timestamptz`,
+		`CREATE TABLE IF NOT EXISTS commerce.ad_inventory (
+			id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			kind       text NOT NULL,
+			bus_id     uuid,
+			label      text NOT NULL DEFAULT '',
+			active     boolean NOT NULL DEFAULT true,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS commerce.ad_placements (
+			id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			campaign_id  uuid NOT NULL,
+			inventory_id uuid NOT NULL,
+			starts_at    timestamptz NOT NULL,
+			ends_at      timestamptz NOT NULL,
+			cost_minor   bigint NOT NULL DEFAULT 0,
+			created_at   timestamptz NOT NULL DEFAULT now(),
+			CHECK (ends_at > starts_at)
+		)`,
+		`ALTER TABLE commerce.ad_placements ADD COLUMN IF NOT EXISTS cost_minor bigint NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := h.db.Exec(ctx, s); err != nil {

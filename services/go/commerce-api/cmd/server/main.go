@@ -18,6 +18,7 @@ import (
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
 	"github.com/munisp/hydrogenTransport/services/go/audit-log/pkg/auditclient"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/config"
+	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/consumers"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/commerce-api/internal/handlers"
@@ -65,6 +66,10 @@ func main() {
 		log.Fatal("ensure schema", zap.Error(err))
 	}
 
+	// carbon.credit.issued → CARBON_FUND ledger leg (SPEC §3.4; the event
+	// was produced-never-consumed, BUSINESS_LOGIC_AUDIT §14).
+	go consumers.StartCarbonConsumer(ctx, cfg.KafkaBrokers, led, log)
+
 	// Insider-threat audit emission (docs/INSIDER_THREAT.md); noop unless
 	// AUDIT_LOG_URL is set. Best-effort: emission failures never fail a
 	// business request.
@@ -83,6 +88,9 @@ func main() {
 			Post("/v1/payments", h.CreatePayment(os.Getenv("MOJALOOP_ENDPOINT")))
 		r.With(jwtmw.RequireAuth).Get("/v1/payments", h.ListPayments)
 		r.With(jwtmw.RequireAuth).Get("/v1/payments/{id}", h.GetPayment)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("payment.refund", "fare_payment", "", true)).
+			Post("/v1/payments/{id}/refund", h.RefundPayment)
 		// Dev/simulated wallet funding (see handlers.TopUpEnabled; pending a
 		// real Mojaloop cash-in flow).
 		r.With(jwtmw.RequireAuth).Post("/v1/wallets/topup", h.TopUpWallet)
@@ -102,6 +110,7 @@ func main() {
 		r.With(jwtmw.RequireRole("operator"),
 			audit.Middleware("trade.create", "energy_trade", "", true)).
 			Post("/v1/energy/trades", h.CreateTrade)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/energy/trades/{id}/cancel", h.CancelTrade)
 	})
 	// gov-dashboard module
 	r.With(gate.Module(tc, "gov-dashboard")).Get("/v1/gov/kpis", h.GetGovKPIs)
@@ -114,6 +123,11 @@ func main() {
 			audit.Middleware("campaign.create", "ad_campaign", "", true)).
 			Post("/v1/ads/campaigns", h.CreateCampaign)
 		r.With(jwtmw.RequireRole("operator")).Patch("/v1/ads/campaigns/{id}", h.UpdateCampaign)
+		// Ad inventory & placements (SPEC §1 "ad inventory & campaigns").
+		r.Get("/v1/ads/inventory", h.ListAdInventory)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/ads/inventory", h.CreateAdInventory)
+		r.Get("/v1/ads/placements", h.ListAdPlacements)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/ads/placements", h.CreateAdPlacement)
 	})
 
 	srv := &http.Server{

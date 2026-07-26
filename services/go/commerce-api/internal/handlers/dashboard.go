@@ -30,7 +30,7 @@ type GovKPIs struct {
 	Degraded             []string `json:"degraded,omitempty"`
 }
 
-const fleetUptimeNote = "time-based availability is not sourced yet (requires telemetry/incident rollup); this is fleet_active_ratio_pct (static status mix), not uptime"
+const fleetUptimeNote = "share of the fleet with telemetry in the last 15 minutes (time-based availability); fleet_active_ratio_pct is the static status mix, reported separately"
 
 // GetGovKPIs handles GET /v1/gov/kpis — SQL rollups across all domain
 // schemas. Each rollup is independent: failures degrade the response
@@ -75,9 +75,10 @@ func (h *Handler) GetGovKPIs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// fleet rollup. NOTE: active/total is a static status ratio, NOT
-	// time-based uptime — it is labeled accordingly; fleet_uptime_pct stays
-	// null until a real availability source exists.
+	// fleet rollup: static status mix (active/total) AND time-based
+	// availability — fleet_uptime_pct is the share of the fleet that
+	// actually reported telemetry in the last 15 minutes (a bus broken for
+	// weeks but still status 'active' stops counting).
 	{
 		var total, active int64
 		if err := h.db.QueryRow(ctx, `
@@ -90,6 +91,15 @@ func (h *Handler) GetGovKPIs(w http.ResponseWriter, r *http.Request) {
 			if total > 0 {
 				ratio := float64(active) / float64(total) * 100
 				k.FleetActiveRatioPct = &ratio
+			}
+			var reporting int64
+			if err := h.db.QueryRow(ctx, `
+				SELECT count(DISTINCT bus_id) FROM fleet.telemetry
+				WHERE ts > now() - interval '15 minutes'`).Scan(&reporting); err != nil {
+				degraded("fleet-telemetry", err)
+			} else if total > 0 {
+				uptime := float64(reporting) / float64(total) * 100
+				k.FleetUptimePct = &uptime
 			}
 		}
 	}

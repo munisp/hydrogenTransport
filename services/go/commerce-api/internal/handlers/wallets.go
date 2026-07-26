@@ -15,17 +15,17 @@ import (
 const maxTopUpMinor int64 = 1_000_000
 
 // TopUpEnabled reports whether the dev/simulated wallet-funding endpoint is
-// active. It is ON by default when the simulated ledger is in use
-// (TIGERBEETLE_ADDR unset — every dev wallet starts empty and needs a
-// funding path, per the business-logic audit), and OFF by default against a
-// real TigerBeetle cluster unless WALLET_TOPUP_ENABLED=true is set
-// explicitly. A production cash-in flow over Mojaloop rails will replace
-// this endpoint.
+// active. It is ON by default only when the simulated in-memory ledger was
+// explicitly opted into (H2_SIMULATED_LEDGER=true — every dev wallet starts
+// empty and needs a funding path, per the business-logic audit), and OFF in
+// every other deployment (real TigerBeetle, or fail-closed startup) unless
+// WALLET_TOPUP_ENABLED=true/false is set explicitly. A production cash-in
+// flow over Mojaloop rails will replace this endpoint.
 func TopUpEnabled(getenv func(string) string) bool {
 	if v := getenv("WALLET_TOPUP_ENABLED"); v != "" {
 		return v == "true"
 	}
-	return getenv("TIGERBEETLE_ADDR") == ""
+	return getenv("H2_SIMULATED_LEDGER") == "true"
 }
 
 type topUpRequest struct {

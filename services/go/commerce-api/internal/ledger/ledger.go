@@ -1,14 +1,17 @@
 // Package ledger is the TigerBeetle double-entry ledger client (SPEC §3.4:
 // accounts RIDER_WALLET=1xxx, OPERATOR_REVENUE=2xxx, ENERGY_TRADE=3xxx,
-// CARBON_FUND=4xxx). When TIGERBEETLE_ADDR is unset a simulated in-memory
-// ledger is used so the service still runs in minimal dev environments
-// (simulated fallback allowed per SPEC §4).
+// CARBON_FUND=4xxx). The real TigerBeetle cluster is the default: when
+// TIGERBEETLE_ADDR is unset New fails closed, because a money path must never
+// silently run on a fabricated ledger. A simulated in-memory ledger exists
+// for local development only and requires the explicit opt-in
+// H2_SIMULATED_LEDGER=true (SPEC §4 simulated fallback, env-gated).
 package ledger
 
 import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	tb "github.com/tigerbeetle/tigerbeetle-go"
@@ -40,6 +43,12 @@ const (
 	RiderFundingAccount uint64 = 2002
 	EnergyTradeAccount  uint64 = 3001
 	CarbonFundAccount   uint64 = 4001
+	// CarbonIssuanceAccount is the platform issuance source for carbon
+	// credits: when carbon-analytics issues a period credit, the
+	// carbon.credit.issued consumer posts 4002 → 4001 (SPEC §3.4 CARBON_FUND
+	// leg). Issuance creates the asset, so this account intentionally has no
+	// balance cap.
+	CarbonIssuanceAccount uint64 = 4002
 )
 
 // isRiderWallet reports whether id belongs to the per-rider wallet range
@@ -77,11 +86,15 @@ type Ledger interface {
 	Close()
 }
 
-// New returns a TigerBeetle-backed Ledger when addr is set, otherwise a
-// simulated in-memory ledger.
+// New returns a TigerBeetle-backed Ledger. When addr is empty it fails
+// closed: the simulated in-memory ledger is only available behind the
+// explicit dev opt-in H2_SIMULATED_LEDGER=true, never silently.
 func New(addr string, log *zap.Logger) (Ledger, error) {
 	if addr == "" {
-		log.Warn("TIGERBEETLE_ADDR not set; using simulated in-memory ledger")
+		if os.Getenv("H2_SIMULATED_LEDGER") != "true" {
+			return nil, errors.New("TIGERBEETLE_ADDR is required: the fare/wallet/trade money path must not run on a simulated ledger (set H2_SIMULATED_LEDGER=true to opt into the in-memory dev ledger)")
+		}
+		log.Warn("H2_SIMULATED_LEDGER=true: using simulated in-memory ledger (DEV ONLY — balances are fabricated and lost on restart)")
 		return newSimulated(), nil
 	}
 	client, err := tb.NewClient(tb_types.ToUint128(0), []string{addr})
@@ -98,6 +111,7 @@ func New(addr string, log *zap.Logger) (Ledger, error) {
 		{RiderFundingAccount, CodeFare},
 		{EnergyTradeAccount, CodeEnergy},
 		{CarbonFundAccount, CodeCarbon},
+		{CarbonIssuanceAccount, CodeCarbon},
 	} {
 		if err := l.EnsureAccount(acc.id, acc.code); err != nil {
 			client.Close()
@@ -177,8 +191,10 @@ func (l *tbLedger) Transfer(id tb_types.Uint128, debit, credit, amount uint64, c
 
 func (l *tbLedger) Close() { l.client.Close() }
 
-// simulated is an in-memory ledger for dev environments without TigerBeetle.
-// It enforces the same core invariants as the real ledger: a transfer that
+// simulated is an in-memory ledger for local development without TigerBeetle,
+// selected only via the explicit opt-in H2_SIMULATED_LEDGER=true (New fails
+// closed otherwise). It enforces the same core invariants as the real ledger:
+// a transfer that
 // would drive the debit account negative is rejected, and re-posting an
 // already-seen transfer ID is treated as an idempotent retry.
 type simulated struct {
