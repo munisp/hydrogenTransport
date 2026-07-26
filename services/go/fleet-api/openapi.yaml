@@ -142,8 +142,15 @@ components:
       type: object
       properties:
         bus_id: { type: string, format: uuid }
+        fleet_no: { type: string }
         h2_level_pct: { type: number }
-        ts: { type: string, format: date-time }
+        h2_remaining_kg: { type: number, description: level% × vehicle h2_capacity_kg }
+        estimated_range_km: { type: number, description: remaining kg × 100 / consumption rate }
+        consumption_kg_per_100km:
+          type: number
+          description: Rate behind the range estimate (learned from fuel.reading telemetry, else the fleet-wide default 8.0)
+        consumption_source: { type: string, enum: [learned, default] }
+        measured_at: { type: string, format: date-time }
     Health:
       type: object
       properties:

@@ -72,18 +72,25 @@ func (h *Handler) ListPredictions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"predictions": predictions})
 }
 
-// h2KgPer100Km is the fleet-average H2 consumption used for range prediction
-// (rule-based fallback per SPEC §4 until ML estimates are available).
-const h2KgPer100Km = 8.0
+// defaultH2KgPer100Km is the fallback H2 consumption used for range
+// prediction only until fleet.fuel_consumption holds a per-bus rate learned
+// from fuel.reading events (0007; BUSINESS_LOGIC_AUDIT §4: one fleet-wide
+// constant was used for every bus).
+const defaultH2KgPer100Km = 8.0
 
 // FuelLevel is the latest H2 reading per vehicle (fuel-monitoring module).
 type FuelLevel struct {
-	BusID            string    `json:"bus_id"`
-	FleetNo          string    `json:"fleet_no"`
-	H2LevelPct       float64   `json:"h2_level_pct"`
-	H2RemainingKg    float64   `json:"h2_remaining_kg"`
-	EstimatedRangeKm float64   `json:"estimated_range_km"`
-	MeasuredAt       time.Time `json:"measured_at"`
+	BusID            string  `json:"bus_id"`
+	FleetNo          string  `json:"fleet_no"`
+	H2LevelPct       float64 `json:"h2_level_pct"`
+	H2RemainingKg    float64 `json:"h2_remaining_kg"`
+	EstimatedRangeKm float64 `json:"estimated_range_km"`
+	// ConsumptionKgPer100Km is the rate behind the range estimate and
+	// ConsumptionSource says whether it was learned from fuel.reading
+	// telemetry or is the fleet-wide default.
+	ConsumptionKgPer100Km float64   `json:"consumption_kg_per_100km"`
+	ConsumptionSource     string    `json:"consumption_source"` // learned|default
+	MeasuredAt            time.Time `json:"measured_at"`
 }
 
 // ListFuelLevels handles GET /v1/fuel/levels: latest H2 level per vehicle plus
@@ -91,9 +98,11 @@ type FuelLevel struct {
 func (h *Handler) ListFuelLevels(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `
 		SELECT DISTINCT ON (t.bus_id)
-		       t.bus_id, v.fleet_no, COALESCE(t.h2_level_pct,0), COALESCE(v.h2_capacity_kg,0), t.ts
+		       t.bus_id, v.fleet_no, COALESCE(t.h2_level_pct,0), COALESCE(v.h2_capacity_kg,0), t.ts,
+		       fc.kg_per_100km
 		FROM fleet.telemetry t
 		JOIN fleet.vehicles v ON v.id = t.bus_id
+		LEFT JOIN fleet.fuel_consumption fc ON fc.bus_id = t.bus_id
 		ORDER BY t.bus_id, t.ts DESC`)
 	if err != nil {
 		h.internal(w, "list fuel levels", err)
@@ -107,19 +116,26 @@ func (h *Handler) ListFuelLevels(w http.ResponseWriter, r *http.Request) {
 			busID, fleetNo string
 			pct, capacity  float64
 			ts             time.Time
+			learned        *float64
 		)
-		if err := rows.Scan(&busID, &fleetNo, &pct, &capacity, &ts); err != nil {
+		if err := rows.Scan(&busID, &fleetNo, &pct, &capacity, &ts, &learned); err != nil {
 			h.internal(w, "scan fuel level", err)
 			return
 		}
 		remainingKg := pct / 100 * capacity
+		rate, source := defaultH2KgPer100Km, "default"
+		if learned != nil && *learned > 0 {
+			rate, source = *learned, "learned"
+		}
 		levels = append(levels, FuelLevel{
-			BusID:            busID,
-			FleetNo:          fleetNo,
-			H2LevelPct:       pct,
-			H2RemainingKg:    remainingKg,
-			EstimatedRangeKm: remainingKg * 100 / h2KgPer100Km,
-			MeasuredAt:       ts,
+			BusID:                 busID,
+			FleetNo:               fleetNo,
+			H2LevelPct:            pct,
+			H2RemainingKg:         remainingKg,
+			EstimatedRangeKm:      remainingKg * 100 / rate,
+			ConsumptionKgPer100Km: rate,
+			ConsumptionSource:     source,
+			MeasuredAt:            ts,
 		})
 	}
 	if err := rows.Err(); err != nil {

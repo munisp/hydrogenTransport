@@ -11,7 +11,7 @@ a disabled module returns **404** (fail-closed via the toggle-client SDK).
 | GET  | `/v1/vehicles` | `telematics` | — |
 | GET  | `/v1/telemetry/latest` (latest reading per bus) | `telematics` | — |
 | GET  | `/v1/maintenance/predictions?bus_id=&min_risk=` | `predictive-maintenance` | — |
-| GET  | `/v1/fuel/levels` (latest H2 % + rule-based range estimate, 8 kg/100 km) | `fuel-monitoring` | — |
+| GET  | `/v1/fuel/levels` (latest H2 % + range estimate from `consumption_kg_per_100km` — learned per bus from `fuel.reading` events into `fleet.fuel_consumption`, else the 8 kg/100 km default; `consumption_source` = learned\|default) | `fuel-monitoring` | — |
 | GET  | `/healthz` | — | — |
 
 Removed orphan routes (docs/BUSINESS_LOGIC_AUDIT.md — zero PWA/mobile
