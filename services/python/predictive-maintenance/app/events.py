@@ -22,11 +22,11 @@ log = logging.getLogger("predictive-maintenance.events")
 SERVICE_NAME = "predictive-maintenance"
 
 
-def build_envelope(data: dict) -> bytes:
+def build_envelope(data: dict, topic: str | None = None) -> bytes:
     return json.dumps(
         {
             "id": str(uuid.uuid4()),
-            "type": settings.output_topic,
+            "type": topic or settings.output_topic,
             "source": SERVICE_NAME,
             "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "data": data,
@@ -34,7 +34,10 @@ def build_envelope(data: dict) -> bytes:
     ).encode()
 
 
-async def persist_predictions(pool, bus_id: str, model_version: str, risks: list[ComponentRisk]) -> None:
+async def persist_predictions(pool, bus_id: str, model_version: str, risks: list[ComponentRisk]) -> dict[str, str]:
+    """Persists the predictions; returns component -> prediction id so the
+    maintenance.predicted event can carry prediction_id (consumed by
+    infra-api to create linked depot work orders)."""
     now = datetime.now(timezone.utc)
     rows = [
         (
@@ -56,6 +59,42 @@ async def persist_predictions(pool, bus_id: str, model_version: str, risks: list
         """,
         rows,
     )
+    return {r.component: row[0] for r, row in zip(risks, rows)}
+
+
+# --- fuel-monitoring: per-bus learned consumption from fuel.reading --------
+# (BUSINESS_LOGIC_AUDIT §4). Pairs of consecutive readings with genuine
+# distance and a genuine H2 drop yield kg/100km; refuel jumps and noise are
+# rejected. fleet-api range math reads fleet.fuel_consumption.
+
+MIN_PAIR_KM = 1.0     # ignore GPS/odo jitter
+MAX_DROP_PCT = 30.0   # a larger "drop" is a refuel/sensor artifact
+
+
+def consumption_kg_per_100km(prev_pct: float, pct: float, delta_km: float, capacity_kg: float) -> float | None:
+    """kg/100km between two readings, or None when the pair is unusable."""
+    if capacity_kg <= 0 or delta_km < MIN_PAIR_KM:
+        return None
+    drop = prev_pct - pct
+    if drop <= 0 or drop > MAX_DROP_PCT:
+        return None
+    return capacity_kg * (drop / 100.0) / delta_km * 100.0
+
+
+async def upsert_fuel_consumption(pool, bus_id: str, kg_per_100km: float, delta_km: float) -> None:
+    await pool.execute(
+        """
+        INSERT INTO fleet.fuel_consumption (bus_id, kg_per_100km, sample_km, samples, updated_at)
+        VALUES ($1::uuid, $2, $3, 1, now())
+        ON CONFLICT (bus_id) DO UPDATE SET
+            kg_per_100km = (fleet.fuel_consumption.kg_per_100km * fleet.fuel_consumption.samples
+                            + EXCLUDED.kg_per_100km) / (fleet.fuel_consumption.samples + 1),
+            sample_km = fleet.fuel_consumption.sample_km + EXCLUDED.sample_km,
+            samples = fleet.fuel_consumption.samples + 1,
+            updated_at = now()
+        """,
+        bus_id, kg_per_100km, delta_km,
+    )
 
 
 async def score_bus(pool, producer, bus_id: str, model) -> list[ComponentRisk]:
@@ -68,11 +107,12 @@ async def score_bus(pool, producer, bus_id: str, model) -> list[ComponentRisk]:
             return []
         features["_sequence"] = seq
     risks = model.predict_all(features)
-    await persist_predictions(pool, bus_id, model.version, risks)
+    prediction_ids = await persist_predictions(pool, bus_id, model.version, risks)
     for r in risks:
         if r.risk_score >= settings.high_risk_threshold:
             payload = build_envelope(
                 {
+                    "prediction_id": prediction_ids.get(r.component),
                     "bus_id": bus_id,
                     "component": r.component,
                     "risk_score": r.risk_score,
@@ -93,6 +133,7 @@ async def run_consumer_loop(pool, toggles, model_holder: dict) -> None:
     dict so a retrained model can be hot-swapped by the API process."""
     consumer = AIOKafkaConsumer(
         settings.input_topic,
+        settings.fuel_topic,
         bootstrap_servers=settings.kafka_brokers,
         group_id=settings.kafka_group_id,
         enable_auto_commit=True,
@@ -105,6 +146,8 @@ async def run_consumer_loop(pool, toggles, model_holder: dict) -> None:
 
     active_buses: dict[str, datetime] = {}
     last_scoring = datetime.min.replace(tzinfo=timezone.utc)
+    fuel_state: dict[str, dict] = {}   # bus_id -> {"pct": float, "odo": float}
+    capacity_cache: dict[str, float] = {}
 
     try:
         while True:
@@ -118,11 +161,44 @@ async def run_consumer_loop(pool, toggles, model_holder: dict) -> None:
                 for rec in records:
                     try:
                         env = json.loads(rec.value)
-                        bus_id = env.get("data", {}).get("bus_id")
-                        if bus_id:
+                        data = env.get("data", {})
+                        bus_id = data.get("bus_id")
+                        if not bus_id:
+                            continue
+                        if rec.topic == settings.fuel_topic:
+                            pct = data.get("h2_level_pct")
+                            odo = data.get("odometer_km")
+                            if pct is None or odo is None:
+                                continue
+                            prev = fuel_state.get(bus_id)
+                            if prev is not None:
+                                if bus_id not in capacity_cache:
+                                    cap = await pool.fetchval(
+                                        "SELECT COALESCE(h2_capacity_kg,0) FROM fleet.vehicles WHERE id = $1::uuid",
+                                        bus_id)
+                                    capacity_cache[bus_id] = float(cap or 0.0)
+                                rate = consumption_kg_per_100km(
+                                    prev["pct"], float(pct), float(odo) - prev["odo"], capacity_cache[bus_id])
+                                if rate is not None:
+                                    await upsert_fuel_consumption(
+                                        pool, bus_id, rate, float(odo) - prev["odo"])
+                            fuel_state[bus_id] = {"pct": float(pct), "odo": float(odo)}
+                        else:
                             active_buses[bus_id] = now
+                            # Derive the catalog fuel.reading stream (SPEC §3.3)
+                            # from enriched telemetry and publish it; the fuel
+                            # branch above consumes it into fleet.fuel_consumption.
+                            if data.get("h2_level_pct") is not None and data.get("odometer_km") is not None:
+                                fuel = build_envelope({
+                                    "bus_id": bus_id,
+                                    "ts": data.get("ts") or now.isoformat().replace("+00:00", "Z"),
+                                    "h2_level_pct": data.get("h2_level_pct"),
+                                    "odometer_km": data.get("odometer_km"),
+                                }, topic=settings.fuel_topic)
+                                await producer.send_and_wait(
+                                    settings.fuel_topic, fuel, key=bus_id.encode())
                     except Exception:
-                        log.warning("dropping malformed telemetry.enriched message")
+                        log.warning("dropping malformed %s message", rec.topic)
 
             # Evict buses not seen for 2x the scoring interval.
             cutoff = now - timedelta(seconds=2 * settings.scoring_interval_s)

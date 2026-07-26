@@ -46,7 +46,15 @@ def credit_id_for_period(period: str) -> str:
 _DISTANCE_SQL = """
 SELECT coalesce(sum(km), 0)::float8 AS total_km, count(*)::int AS bus_count
 FROM (
-    SELECT bus_id, max(odometer_km) - min(odometer_km) AS km
+    SELECT bus_id, km FROM (
+        SELECT bus_id, sum(d) AS km FROM (
+            SELECT bus_id,
+                   odometer_km - lag(odometer_km) OVER (PARTITION BY bus_id ORDER BY ts) AS d
+            FROM fleet.telemetry
+            WHERE ts >= $1 AND ts < $2
+        ) deltas WHERE d > 0
+        GROUP BY bus_id
+    ) positive
     FROM fleet.telemetry
     WHERE ts >= $1 AND ts < $2
     GROUP BY bus_id

@@ -141,3 +141,24 @@ def seed_problem(bus_ids: list[str] | None, date: dt.date) -> Problem:
     ]
     depot = Stop(stop_id="DEPOT-CENTRAL", name="Central Depot", lat=lat0, lon=lon0)
     return Problem(depot=depot, buses=buses, stations=stations, stops=generate_stops(date))
+
+
+async def write_back_inventory(pool, plans) -> None:
+    """Atomically apply the planned refuel draw-down to infra.stations.
+    Refuels whose recorded stock no longer covers the planned kg are skipped
+    and annotated on the plan (never a negative available_kg)."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for plan in plans:
+                for refuel in plan.refuels:
+                    result = await conn.execute(
+                        """
+                        UPDATE infra.stations SET available_kg = available_kg - $2
+                        WHERE station_id = $1 AND available_kg >= $2
+                        """,
+                        refuel.station_id, refuel.kg_taken,
+                    )
+                    if result.endswith(" 0"):
+                        plan.notes.append(
+                            f"inventory write-back skipped for station {refuel.station_id}: "
+                            "insufficient recorded available_kg")
