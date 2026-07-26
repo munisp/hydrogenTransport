@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"go.uber.org/zap"
@@ -232,6 +233,47 @@ func TestCreateTrade_PurchaseSkipsSurplus(t *testing.T) {
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("got %d, want 201 (body: %s)", rec.Code, rec.Body)
+	}
+	// h2-purchase is the buyer leg: operator revenue (2001) FUNDS the
+	// energy clearing account (3001) — clearing can never be drained by a
+	// sale that no purchase ever paid for.
+	if led.count() != 1 {
+		t.Fatalf("want exactly 1 ledger transfer, got %d", led.count())
+	}
+	tr := led.transfers[0]
+	if tr.debit != ledger.OperatorRevenueAccount || tr.credit != ledger.EnergyTradeAccount || tr.amount != 5000 || tr.code != ledger.CodeEnergy {
+		t.Fatalf("purchase must settle revenue→clearing, got %+v", tr)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
+	}
+}
+
+// A proposed trade (not yet drawn/settled) can be cancelled by an operator;
+// executed/failed trades are terminal.
+func TestCancelTrade(t *testing.T) {
+	h, pool := newMockHandler(t)
+	pub := &fakePublisher{}
+	h.pub = pub
+
+	pool.ExpectQuery(`UPDATE commerce\.trades SET status = 'cancelled'`).
+		WithArgs("tr-9").
+		WillReturnRows(tradeRow("tr-9", "h2-sale", 10.0, 5000, "cancelled", nil, strPtr("tk-9")))
+
+	r := chi.NewRouter()
+	r.Post("/v1/energy/trades/{id}/cancel", h.CancelTrade)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, withClaims(httptest.NewRequest(http.MethodPost, "/v1/energy/trades/tr-9/cancel", nil), "ops-1", "operator"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (body: %s)", rec.Code, rec.Body)
+	}
+	var tr Trade
+	if err := json.Unmarshal(rec.Body.Bytes(), &tr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tr.Status != "cancelled" {
+		t.Fatalf("unexpected trade: %+v", tr)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet db expectations: %v", err)

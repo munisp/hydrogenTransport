@@ -85,9 +85,9 @@ func withClaims(r *http.Request, sub string, roles ...string) *http.Request {
 
 func paymentRow(id, rider, key, status string) *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
-		"id", "rider_sub", "amount_minor", "currency", "mojaloop_transfer_id",
+		"id", "rider_sub", "amount_minor", "charged_minor", "currency", "mojaloop_transfer_id",
 		"tb_transfer_id", "idempotency_key", "status", "created_at",
-	}).AddRow(id, rider, int64(500), "EUR", nil, nil, &key, status,
+	}).AddRow(id, rider, int64(500), nil, "EUR", nil, nil, &key, status,
 		time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC))
 }
 
@@ -162,8 +162,11 @@ func TestCreatePayment_RiderSubMatchingSubjectAccepted(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
+	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
+		WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
-		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), "EUR", "idem-match").
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-match").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO commerce\.rider_accounts`).
@@ -220,8 +223,11 @@ func TestCreatePayment_InsufficientFunds(t *testing.T) {
 	led := &fakeLedger{err: fmt.Errorf("debit account 1001: %w", ledger.ErrInsufficientFunds)}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
+	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
+		WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
-		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), "EUR", "idem-broke").
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-broke").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO commerce\.rider_accounts`).
@@ -267,8 +273,11 @@ func TestCreatePayment_IdempotentReplay(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
+	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
+		WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
-		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), "EUR", "idem-123").
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-123").
 		WillReturnError(&pgconn.PgError{Code: "23505"}) // unique violation on idempotency_key
 	pool.ExpectQuery(`WHERE idempotency_key = \$1`).
 		WithArgs("idem-123").
@@ -308,8 +317,11 @@ func TestCreatePayment_ReplayScopedToOwner(t *testing.T) {
 	defer pool.Close()
 	h := &Handler{db: pool, ledger: &fakeLedger{}, pub: &fakePublisher{}, log: zap.NewExample()}
 
+	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
+		WithArgs("mallory").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
-		WithArgs(pgxmock.AnyArg(), "mallory", int64(500), "EUR", "idem-123").
+		WithArgs(pgxmock.AnyArg(), "mallory", int64(500), int64(500), "EUR", "idem-123").
 		WillReturnError(&pgconn.PgError{Code: "23505"})
 	pool.ExpectQuery(`WHERE idempotency_key = \$1`).
 		WithArgs("idem-123").
@@ -402,8 +414,11 @@ func TestCreatePayment_Settled(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
+	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
+		WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
-		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), "EUR", "idem-happy").
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-happy").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO commerce\.rider_accounts`).

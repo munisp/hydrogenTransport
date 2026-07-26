@@ -34,6 +34,8 @@ func TestGetGovKPIs(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"kg", "credits"}).AddRow(1200.5, 34.0))
 	pool.ExpectQuery(`FROM fleet\.vehicles`).
 		WillReturnRows(pgxmock.NewRows([]string{"total", "active"}).AddRow(int64(50), int64(47)))
+	pool.ExpectQuery(`FROM fleet\.telemetry`).
+		WillReturnRows(pgxmock.NewRows([]string{"reporting"}).AddRow(int64(40)))
 	pool.ExpectQuery(`FROM infra\.stations`).
 		WillReturnRows(pgxmock.NewRows([]string{"kg"}).AddRow(820.25))
 	pool.ExpectQuery(`FROM infra\.incidents`).
@@ -67,8 +69,10 @@ func TestGetGovKPIs(t *testing.T) {
 	if k.FleetActiveRatioPct == nil || *k.FleetActiveRatioPct != 94.0 {
 		t.Fatalf("fleet_active_ratio_pct must be 94.0: %+v", k)
 	}
-	if k.FleetUptimePct != nil {
-		t.Fatalf("fleet_uptime_pct must be null until a time-based source exists, got %v", *k.FleetUptimePct)
+	// Time-based availability: 40 of 50 buses reported telemetry in the last
+	// 15 minutes → 80%.
+	if k.FleetUptimePct == nil || *k.FleetUptimePct != 80.0 {
+		t.Fatalf("fleet_uptime_pct must be the 15-minute telemetry share (40/50=80), got %v", k.FleetUptimePct)
 	}
 	if k.FleetUptimeNote == "" {
 		t.Fatal("fleet_uptime_note must explain the null uptime")
@@ -95,6 +99,8 @@ func TestGetGovKPIs_IncidentsIncludeInProgress(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"kg", "credits"}).AddRow(0.0, 0.0))
 	pool.ExpectQuery(`FROM fleet\.vehicles`).
 		WillReturnRows(pgxmock.NewRows([]string{"total", "active"}).AddRow(int64(0), int64(0)))
+	pool.ExpectQuery(`FROM fleet\.telemetry`).
+		WillReturnRows(pgxmock.NewRows([]string{"reporting"}).AddRow(int64(40)))
 	pool.ExpectQuery(`FROM infra\.stations`).
 		WillReturnRows(pgxmock.NewRows([]string{"kg"}).AddRow(0.0))
 	pool.ExpectQuery(`FROM infra\.incidents WHERE status IN \('open','acknowledged','in_progress'\)`).
@@ -130,6 +136,8 @@ func TestGetGovKPIs_PartialDegradation(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"kg", "credits"}).AddRow(1200.5, 34.0))
 	pool.ExpectQuery(`FROM fleet\.vehicles`).
 		WillReturnRows(pgxmock.NewRows([]string{"total", "active"}).AddRow(int64(50), int64(47)))
+	pool.ExpectQuery(`FROM fleet\.telemetry`).
+		WillReturnRows(pgxmock.NewRows([]string{"reporting"}).AddRow(int64(40)))
 	pool.ExpectQuery(`FROM infra\.stations`).
 		WillReturnRows(pgxmock.NewRows([]string{"kg"}).AddRow(820.25))
 	pool.ExpectQuery(`FROM infra\.incidents`).
@@ -170,6 +178,8 @@ func TestGetGovKPIs_ZeroFleet(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"kg", "credits"}).AddRow(0.0, 0.0))
 	pool.ExpectQuery(`FROM fleet\.vehicles`).
 		WillReturnRows(pgxmock.NewRows([]string{"total", "active"}).AddRow(int64(0), int64(0)))
+	pool.ExpectQuery(`FROM fleet\.telemetry`).
+		WillReturnRows(pgxmock.NewRows([]string{"reporting"}).AddRow(int64(40)))
 	pool.ExpectQuery(`FROM infra\.stations`).
 		WillReturnRows(pgxmock.NewRows([]string{"kg"}).AddRow(0.0))
 	pool.ExpectQuery(`FROM infra\.incidents`).

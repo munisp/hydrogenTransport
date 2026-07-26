@@ -77,14 +77,18 @@ func TestTopUpWallet_Disabled(t *testing.T) {
 	}
 }
 
-// Default enablement: simulated ledger (no TIGERBEETLE_ADDR) → enabled;
-// real TigerBeetle → disabled unless explicitly overridden.
+// Default enablement: explicit simulated-ledger opt-in (H2_SIMULATED_LEDGER)
+// → enabled; anything else (real TigerBeetle, or fail-closed unset) →
+// disabled unless explicitly overridden.
 func TestTopUpEnabled_Defaults(t *testing.T) {
 	get := func(vals map[string]string) func(string) string {
 		return func(k string) string { return vals[k] }
 	}
-	if !TopUpEnabled(get(map[string]string{})) {
-		t.Error("simulated ledger default should enable top-up")
+	if TopUpEnabled(get(map[string]string{})) {
+		t.Error("unset env default should disable top-up")
+	}
+	if !TopUpEnabled(get(map[string]string{"H2_SIMULATED_LEDGER": "true"})) {
+		t.Error("simulated ledger opt-in should enable top-up")
 	}
 	if TopUpEnabled(get(map[string]string{"TIGERBEETLE_ADDR": "tb:3000"})) {
 		t.Error("real TigerBeetle default should disable top-up")

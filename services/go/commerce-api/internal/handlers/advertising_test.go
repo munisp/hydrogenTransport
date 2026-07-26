@@ -16,8 +16,8 @@ import (
 
 func campaignRow(id, name, status string, budget int64) *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
-		"id", "name", "advertiser", "budget_minor", "status", "starts_at", "ends_at", "created_at",
-	}).AddRow(id, name, "acme", budget, status, nil, nil,
+		"id", "name", "advertiser", "budget_minor", "committed", "status", "starts_at", "ends_at", "created_at",
+	}).AddRow(id, name, "acme", budget, int64(0), status, nil, nil,
 		time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC))
 }
 
