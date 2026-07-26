@@ -260,6 +260,131 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/stations/{id}/queue:
+    get:
+      tags: [refueling-stations]
+      summary: >-
+        List the station's active queue (waiting|serving) in join order with
+        per-entry position and estimated wait derived from the station's
+        historical service time
+      operationId: listStationQueue
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Active queue entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  station_id: { type: string, format: uuid }
+                  queue:
+                    type: array
+                    items: { $ref: '#/components/schemas/QueueEntry' }
+                  avg_service_minutes: { type: number }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [refueling-stations]
+      summary: >-
+        Join the station queue (JWT). The bus joins as waiting, or serving
+        immediately when the queue is empty
+      operationId: joinStationQueue
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bus_id]
+              properties:
+                bus_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Queue entry (status waiting|serving)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: >-
+            Bus already has an active entry at this station, or the station
+            is not online
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: bus_id does not reference a known vehicle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/stations/{id}/queue/{entry}/complete:
+    post:
+      tags: [refueling-stations]
+      summary: >-
+        Complete the serving entry (operator role). A positive dispensed_kg
+        decrements the station's recorded available_kg; the next waiting bus
+        is promoted to serving
+      operationId: completeStationQueueEntry
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/Entry'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dispensed_kg: { type: number, minimum: 0 }
+      responses:
+        '200':
+          description: Completed entry (with dispensed_kg / available_after_kg when given)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Entry not serving, or dispensed_kg exceeds recorded inventory
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/stations/{id}/queue/{entry}/leave:
+    post:
+      tags: [refueling-stations]
+      summary: >-
+        Leave the queue (JWT): waiting|serving → left; the next waiting bus is
+        promoted when the leaving entry was serving
+      operationId: leaveStationQueue
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/Entry'
+      responses:
+        '200':
+          description: Left entry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Entry not found or already inactive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/dispatch/jobs:
     get:
       tags: [dispatch-workforce]
@@ -268,7 +393,11 @@ paths:
       parameters:
         - name: status
           in: query
-          schema: { type: string, enum: [assigned, accepted, requeued] }
+          schema: { type: string, enum: [assigned, accepted, in_progress, requeued, cancelled] }
+        - name: driver_sub
+          in: query
+          description: Filter to one driver's jobs (the mobile DriverScreen sends it)
+          schema: { type: string }
       responses:
         '200':
           description: Job list
@@ -300,6 +429,7 @@ paths:
                 vehicle_id: { type: string, format: uuid }
                 route: { type: string }
                 starts_at: { type: string, format: date-time }
+                ends_at: { type: string, format: date-time, description: Must be after starts_at when both are given }
       responses:
         '201':
           description: Assigned job
@@ -312,8 +442,9 @@ paths:
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '409':
           description: Conflict — the driver already has an active job, or the
-            vehicle is already assigned to an active job (active =
-            assigned/accepted/in_progress)
+            vehicle is already assigned to an active job, or the requested
+            [starts_at, ends_at) window overlaps an existing active job for
+            the driver/vehicle (active = assigned/accepted/in_progress)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -336,6 +467,31 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: Job not found, not in assigned status, or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/dispatch/jobs/{id}/cancel:
+    post:
+      tags: [dispatch-workforce]
+      summary: >-
+        Cancel an active job (operator role); delivers the job-cancelled
+        signal to the dispatch workflow
+      operationId: cancelDispatchJob
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Cancelled job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DispatchJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Job not found or not active (assigned/accepted/in_progress)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -382,7 +538,17 @@ paths:
       operationId: generateComplianceReport
       security:
         - bearerAuth: []
+      parameters:
+        - name: days
+          in: query
+          description: Report window in days (default 30, bounded 1..365)
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
       responses:
+        '400':
+          description: days is not an integer in 1..365
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '201':
           description: Generated report
           content:
@@ -409,6 +575,67 @@ paths:
                     items: { $ref: '#/components/schemas/DepotBay' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
         '500': { $ref: '#/components/responses/InternalError' }
+  /v1/depot/bays/{id}/assign:
+    post:
+      tags: [depot-management]
+      summary: Assign a bus to a depot bay (operator role)
+      operationId: assignDepotBay
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bus_id]
+              properties:
+                bus_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Occupied bay
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DepotBay' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Bay not found or not free
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: bus_id does not reference a known vehicle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/depot/bays/{id}/release:
+    post:
+      tags: [depot-management]
+      summary: Release a depot bay (operator role)
+      operationId: releaseDepotBay
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Released (free) bay
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DepotBay' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Bay not found or not occupied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/depot/work-orders:
     get:
       tags: [depot-management]
@@ -444,6 +671,9 @@ paths:
                 title: { type: string }
                 description: { type: string }
                 asset_ref: { type: string }
+                bus_id: { type: string, format: uuid }
+                prediction_id: { type: string, format: uuid, description: Links the work order to a maintenance prediction (maintenance.predicted consumer path) }
+                assignee: { type: string }
       responses:
         '201':
           description: Created work order
@@ -454,6 +684,101 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/depot/work-orders/{id}/assign:
+    post:
+      tags: [depot-management]
+      summary: Assign a work order to a technician (operator role)
+      operationId: assignWorkOrder
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignee]
+              properties:
+                assignee: { type: string }
+      responses:
+        '200':
+          description: Updated work order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkOrder' }
+        '400':
+          description: assignee is required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Work order not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Invalid status transition (only open → assigned)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/depot/work-orders/{id}/start:
+    post:
+      tags: [depot-management]
+      summary: Start work on an order (operator role); stamps started_at
+      operationId: startWorkOrder
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: In-progress work order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Work order not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Invalid status transition (open|assigned|on_hold → in_progress)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/depot/work-orders/{id}/hold:
+    post:
+      tags: [depot-management]
+      summary: Put a work order on hold (operator role)
+      operationId: holdWorkOrder
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: On-hold work order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Work order not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Invalid status transition (assigned|in_progress → on_hold)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/depot/work-orders/{id}/close:
     post:
       tags: [depot-management]
@@ -494,6 +819,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    Entry:
+      name: entry
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
     Station:
       type: object
@@ -521,15 +851,37 @@ components:
         vehicle_id: { type: string, format: uuid }
         route: { type: string }
         starts_at: { type: string, format: date-time }
-        status: { type: string, enum: [assigned, accepted, requeued] }
+        ends_at: { type: string, format: date-time }
+        status: { type: string, enum: [assigned, accepted, in_progress, requeued, cancelled] }
         created_at: { type: string, format: date-time }
         accepted_at: { type: string, format: date-time }
+    QueueEntry:
+      type: object
+      description: One infra.station_queue row plus derived position/wait.
+      properties:
+        id: { type: string, format: uuid }
+        station_id: { type: string, format: uuid }
+        bus_id: { type: string, format: uuid }
+        joined_at: { type: string, format: date-time }
+        status: { type: string, enum: [waiting, serving, completed, left] }
+        position: { type: integer, description: 1-based queue position (waiting entries only) }
+        est_wait_minutes: { type: integer, description: Estimated wait from the station's historical service time }
+        dispensed_kg: { type: number, description: Set on completion when a dispensed amount was recorded }
+        available_after_kg: { type: number, description: Station available_kg after the dispensed draw-down }
     ComplianceReport:
       type: object
       properties:
         id: { type: string, format: uuid }
         generated_at: { type: string, format: date-time }
-        report: { type: object }
+        report:
+          type: object
+          description: >-
+            Generated report body. Top-level keys: generated_at, period_days,
+            period_start, then the sections incidents_by_status,
+            incidents_by_severity_period, unresolved_leaks, mttr,
+            maintenance_predictions_period, work_orders_open,
+            fleet_availability, stations, and degraded (section names whose
+            data source failed during generation).
     DepotBay:
       type: object
       properties:
@@ -546,7 +898,11 @@ components:
         title: { type: string }
         description: { type: string }
         asset_ref: { type: string }
-        status: { type: string }
+        status: { type: string, enum: [open, assigned, in_progress, on_hold, closed] }
+        bus_id: { type: string, format: uuid }
+        prediction_id: { type: string, format: uuid }
+        assignee: { type: string }
+        started_at: { type: string, format: date-time }
         opened_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time }
     Health:
