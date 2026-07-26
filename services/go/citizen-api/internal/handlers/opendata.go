@@ -44,7 +44,7 @@ type Dataset struct {
 }
 
 var datasetCatalog = []Dataset{
-	{ID: "gtfs-static", Title: "GTFS static feed", Description: "Stops, routes and timetable of the H2 bus network.", Format: "GTFS", URL: "/api/citizen/v1/passenger/routes"},
+	{ID: "gtfs-static", Title: "GTFS static feed", Description: "Stops, routes and timetable of the H2 bus network.", Format: "GTFS", URL: "/api/citizen/v1/opendata/gtfs"},
 	{ID: "arrivals", Title: "Stop arrivals", Description: "Next departures per stop (derived from the static timetable).", Format: "JSON", URL: "/api/citizen/v1/passenger/arrivals?stop_id=S001"},
 	{ID: "carbon-credits", Title: "CO2 avoidance ledger", Description: "Issued carbon credits per reporting period.", Format: "JSON", URL: "/api/citizen/v1/carbon/credits"},
 	{ID: "service-alerts", Title: "Service alerts", Description: "Active service disruptions and notices.", Format: "JSON", URL: "/api/citizen/v1/passenger/alerts"},

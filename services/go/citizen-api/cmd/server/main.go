@@ -17,6 +17,7 @@ import (
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/config"
+	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/consumers"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/handlers"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/metrics"
@@ -57,6 +58,12 @@ func main() {
 	pub := pubsub.New(log)
 	defer pub.Close()
 	h := handlers.New(pool, pub, tc, log)
+	if pool != nil {
+		// drt.requested → nearest-vehicle auto-assignment (BUSINESS_LOGIC_AUDIT
+		// §13: the event was produced-never-consumed and assigned/enroute/
+		// completed were unreachable).
+		go consumers.StartDRTConsumer(ctx, cfg.KafkaBrokers, pool, pub, log)
+	}
 	od := handlers.NewOpenData(os.Getenv("OPENSEARCH_URL"), os.Getenv("OPENSEARCH_INDEX"), log)
 
 	r := chi.NewRouter()
@@ -82,6 +89,9 @@ func main() {
 		r.With(jwtmw.RequireAuth).Get("/v1/drt/requests", h.ListDRTRequests)
 		r.With(jwtmw.RequireAuth).Get("/v1/drt/requests/{id}", h.GetDRTRequest)
 		r.With(jwtmw.RequireAuth).Post("/v1/drt/requests/{id}/cancel", h.CancelDRTRequest)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/drt/requests/{id}/assign", h.AssignDRTRequest)
+		r.With(jwtmw.RequireAnyRole("driver", "operator")).Post("/v1/drt/requests/{id}/start", h.ProgressDRTRequest)
+		r.With(jwtmw.RequireAnyRole("driver", "operator")).Post("/v1/drt/requests/{id}/complete", h.ProgressDRTRequest)
 	})
 	// carbon-credits module
 	r.Group(func(r chi.Router) {
@@ -94,6 +104,8 @@ func main() {
 		r.Use(gate.Module(tc, "open-data-portal"))
 		r.Get("/v1/opendata/datasets", od.ListDatasets)
 		r.Get("/v1/opendata/search", od.Search)
+		r.Get("/v1/opendata/gtfs", h.GTFSZip)
+		r.Get("/v1/opendata/gtfs/{file}", h.GTFSFile)
 	})
 
 	srv := &http.Server{
