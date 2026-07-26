@@ -460,3 +460,19 @@ sensor --> [infra-api]/v1/safety/leak --> infra.incidents + safety.leak.detected
 [toggle-service] --> public.feature_toggles + Redis toggles:<m> (OK) + toggle.changed (✗ no consumer; HTTP polling used)
 [mobile app] --JWT flows--> ✗ setAccessToken never called → all authed endpoints 401
 ```
+
+
+---
+
+## Wave-4 re-verification (2026-07-25)
+Method: every finding re-read at the referenced file:line, classified FIXED-VERIFIED / STILL-BROKEN→fixed / INTENTIONAL / env-bound. Go modules gofmt+build+vet+test green (Go 1.26).
+
+**D1:** telematics 10 (bus:meta seeded by telemetry-simulator; orphan GETs intentional API completeness) · predictive-maintenance 10 (maintenance.predicted→infra-api consumer→deduped prediction-linked work orders, 0007 W3; prediction_id in event; min_risk honored) · digital-twin 8 (snapshot ts fixed; refueling label residual) · fuel-monitoring 10 (fuel.reading produced/consumed; per-bus learned consumption in fleet-api) · route-optimizer 10 (DB stops, inventory write-back, stranded flag).
+
+**D2:** stations 10 (queue mgmt + refuel draw-down) · leak-detection 10 (LEL ppm bands + per-sensor dedup) · dispatch 10 (ends_at/shift_end, window overlap, cancel, driver filter) · compliance 10 (period param, leak aging/MTTR/backlog/availability, scheduler) · depot 10 (lifecycle + bay occupancy).
+
+**D3:** passenger-pwa 10 (DB network, transfers, expiring alerts; GTFS-RT env-bound, arrivals flagged schedule_based) · mobile-app 8 (TS wiring residual) · DRT 10 (labels/passengers, operator assign + start/complete, auto-assign consumer) · carbon 10 (CARBON_FUND leg consumer; odometer-reset guard) · open-data 10 (real GTFS zip/CSV feed).
+
+**D4:** fare-payments 10 (top-up/402 verified; refunds; daily capping) · loyalty 10 (accrual+redeem+refund clawback) · energy-trading 10 (purchase funds clearing; cancel; 402 proof) · gov-dashboard 10 (15-min telemetry uptime) · advertising 10 (inventory, placements, budget tracking, overlap 409).
+
+All previously "produced-never-consumed" per-feature topics (maintenance.predicted, fuel.reading, drt.requested, carbon.credit.issued) now have real consumers; station.status.changed / safety.leak.detected / energy.trade.executed remain INTENTIONAL publish-for-external-subscribers topics (in-repo automation is synchronous via Temporal signals/DB, per SPEC §3.3 catalog semantics).

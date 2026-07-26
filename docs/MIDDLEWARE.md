@@ -83,8 +83,9 @@ persistent, secured, observable, backed up, graceful dependent behavior).
   **before** publishing events (outbox-lite ordering); a failed TB transfer
   marks the payment failed and returns 502 — **fail-closed, no fabricated
   ledger entries** (`payments.go:135–183`).
-* Honest simulated fallback: in-memory ledger when `TIGERBEETLE_ADDR` unset,
-  clearly logged as a warning.
+* Honest simulated fallback: in-memory ledger only behind the explicit dev
+  opt-in `H2_SIMULATED_LEDGER=true` when `TIGERBEETLE_ADDR` is unset (startup
+  fails closed otherwise), clearly logged as a warning.
 * **Dead wiring**: `TIGERBEETLE_ADDR` is set in compose for `telemetry-ingest`
   (line 949) and `carbon-analytics` (line 1038), but grep shows **zero
   TigerBeetle references in either codebase**. The env vars imply an
@@ -160,10 +161,12 @@ persistent, secured, observable, backed up, graceful dependent behavior).
 * `commerce-api` integration is real as far as the simulator goes:
   `mojaloopTransfer()` (`payments.go:243+`) POSTs a transfer to
   `MOJALOOP_ENDPOINT`, stores the echoed/client-generated transfer id, and on
-  any transport error or non-2xx marks the payment `mojaloop_failed` and
-  returns 502 — **it never fabricates a transfer id**. Without an endpoint it
-  returns a clearly-labelled `ml-simulated-*` id. The Mojaloop leg is opt-in
-  per request (`use_mojaloop`).
+  any transport error or non-2xx marks the payment with the classified
+  `mojaloop_*` status and returns 502 — **it never fabricates a transfer
+  id**. Without an endpoint the leg fails closed (`mojaloop_unavailable`)
+  unless the explicit dev opt-in `H2_SIMULATED_MOJALOOP=true` returns a
+  clearly-labelled `ml-simulated-*` id. The Mojaloop leg is opt-in per
+  request (`use_mojaloop`).
 * `mojaloop_transfer_id` is persisted in `commerce.fare_payments`.
 
 ### Robustness / gaps (ranked)
