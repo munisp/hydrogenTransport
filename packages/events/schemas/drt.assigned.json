@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/drt.assigned.json",
+  "title": "drt.assigned",
+  "description": "On-demand shuttle assigned to a vehicle (requested → assigned), published by the operator assign endpoint or the drt.requested auto-assignment consumer. CloudEvents-ish envelope (SPEC.md §3.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "drt.assigned"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "user_sub": {
+          "type": "string"
+        },
+        "vehicle_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "driver_sub": {
+          "type": ["string", "null"]
+        },
+        "assigned_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "request_id",
+        "user_sub",
+        "vehicle_id",
+        "assigned_at"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

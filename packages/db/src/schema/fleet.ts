@@ -1,8 +1,9 @@
-// fleet schema (migration 0001_core.sql + 0004_telemetry_dedup.sql).
+// fleet schema (migration 0001_core.sql + 0004_telemetry_dedup.sql +
+// 0007_wave4_business_rules.sql).
 // fleet.telemetry is a TimescaleDB hypertable with UNIQUE(bus_id, ts),
 // 90-day retention and 7-day compression — modeled here as a plain table;
 // the hypertable/policy DDL stays in goose migrations.
-import { boolean, index, integer, jsonb, numeric, pgSchema, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, doublePrecision, index, integer, jsonb, numeric, pgSchema, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 import { geometryLineString, geometryPoint, geometryPolygon } from "./columns";
 
@@ -64,6 +65,17 @@ export const twinSnapshots = fleet.table(
     busIdx: index("twin_snapshots_bus_idx").on(t.busId, t.updatedAt),
   }),
 );
+
+// 0007 (W1): per-bus learned H2 consumption, maintained by the
+// fuel-monitoring pipeline (telemetry-ingest fuel.reading consumer);
+// fleet-api range math reads it instead of one fleet-wide constant.
+export const fuelConsumption = fleet.table("fuel_consumption", {
+  busId: uuid("bus_id").primaryKey().references(() => vehicles.id),
+  kgPer100km: doublePrecision("kg_per_100km").notNull(), // learned running average
+  sampleKm: doublePrecision("sample_km").notNull().default(0), // distance behind the estimate
+  samples: integer("samples").notNull().default(0), // reading pairs behind the estimate
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // --- GTFS-like route network + geofences (migration 0005_missing_schemas.sql).
 // Replace the previously hardcoded stops/routes (citizen-api) and random

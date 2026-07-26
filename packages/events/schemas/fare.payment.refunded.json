@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h2fleet.example/schemas/fare.payment.refunded.json",
+  "title": "fare.payment.refunded",
+  "description": "Settled fare payment fully refunded (operator revenue → rider wallet reversal; loyalty points clawed back). amount_minor is the charged (post-capping) amount. CloudEvents-ish envelope (SPEC.md §3.3).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event id."
+    },
+    "type": {
+      "const": "fare.payment.refunded"
+    },
+    "source": {
+      "type": "string",
+      "description": "Emitting service name."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 emission time."
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "payment_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "rider_sub": {
+          "type": "string"
+        },
+        "amount_minor": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Refunded amount (the charged amount after daily fare capping; 0 for a fully capped ride)."
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 3
+        },
+        "tb_transfer_id": {
+          "type": ["string", "null"],
+          "description": "TigerBeetle reversal transfer id; null when no ledger posting was needed (0-charged payment)."
+        },
+        "refunded_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "payment_id",
+        "rider_sub",
+        "amount_minor",
+        "currency",
+        "refunded_at"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "source",
+    "time",
+    "data"
+  ],
+  "additionalProperties": false
+}

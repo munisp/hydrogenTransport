@@ -1,4 +1,5 @@
-// infra schema (migrations 0001_core.sql + 0003_supplemental.sql + 0005_missing_schemas.sql).
+// infra schema (migrations 0001_core.sql + 0003_supplemental.sql + 0005_missing_schemas.sql +
+// 0007_wave4_business_rules.sql).
 import { sql } from "drizzle-orm";
 import { index, jsonb, numeric, pgSchema, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
@@ -30,6 +31,8 @@ export const incidents = infra.table(
     // 0005: deterministic human-readable number, sequence-backed DEFAULT
     // ('INC-000123'); assigned by the database, never by the app.
     incidentNo: text("incident_no").notNull(),
+    // 0007 (W3c): resolution timestamp for compliance MTTR reporting.
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
   (t) => ({
     incidentNoUq: uniqueIndex("incidents_incident_no_uq").on(t.incidentNo),
@@ -42,20 +45,30 @@ export const complianceReports = infra.table("compliance_reports", {
   report: jsonb("report").notNull(),
 });
 
-export const workOrders = infra.table("work_orders", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  title: text("title").notNull(),
-  description: text("description").notNull().default(""),
-  assetRef: text("asset_ref").notNull().default(""),
-  status: text("status").notNull().default("open"),
-  openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
-  closedAt: timestamp("closed_at", { withTimezone: true }),
-  // 0005: predictive-maintenance → work-order linkage + assignment lifecycle
-  busId: uuid("bus_id").references(() => vehicles.id),
-  predictionId: uuid("prediction_id").references(() => maintenancePredictions.id),
-  assignee: text("assignee"),
-  startedAt: timestamp("started_at", { withTimezone: true }),
-});
+export const workOrders = infra.table(
+  "work_orders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    assetRef: text("asset_ref").notNull().default(""),
+    status: text("status").notNull().default("open"),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    // 0005: predictive-maintenance → work-order linkage + assignment lifecycle
+    busId: uuid("bus_id").references(() => vehicles.id),
+    predictionId: uuid("prediction_id").references(() => maintenancePredictions.id),
+    assignee: text("assignee"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+  },
+  (t) => ({
+    // 0007 (W3): at most one OPEN work order per maintenance prediction, so
+    // the maintenance.predicted consumer can retry/replay without duplicates.
+    openPredictionUq: uniqueIndex("work_orders_open_prediction_uq")
+      .on(t.predictionId)
+      .where(sql`${t.predictionId} IS NOT NULL AND ${t.status} <> 'closed'`),
+  }),
+);
 
 export const dispatchJobs = infra.table(
   "dispatch_jobs",
@@ -102,6 +115,8 @@ export const stationQueue = infra.table(
     busId: uuid("bus_id").notNull().references(() => vehicles.id),
     joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
     status: text("status").notNull().default("waiting"), // waiting|serving|completed|left
+    // 0007 (W3b): completion timestamp for service-time (wait estimate) stats.
+    completedAt: timestamp("completed_at", { withTimezone: true }),
   },
   (t) => ({
     activeUq: uniqueIndex("station_queue_active_uq")

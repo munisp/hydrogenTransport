@@ -1,5 +1,6 @@
 // commerce schema (migrations 0001_core.sql + 0003_supplemental.sql +
-// 0005_missing_schemas.sql + 0006_trades_idempotency.sql).
+// 0005_missing_schemas.sql + 0006_trades_idempotency.sql +
+// 0007_wave4_business_rules.sql).
 // TigerBeetle holds the authoritative double-entry ledger; these tables are
 // the query/index side (account id ranges: RIDER_WALLET=1xxx,
 // OPERATOR_REVENUE=2xxx, ENERGY_TRADE=3xxx, CARBON_FUND=4xxx).
@@ -37,6 +38,9 @@ export const farePayments = commerce.table(
     // 0005: refund linkage (refund_of points at the original payment)
     refundOf: uuid("refund_of"),
     refundedAt: timestamp("refunded_at", { withTimezone: true }),
+    // 0007 (W2b): amount actually charged after daily fare capping
+    // (amount_minor stays the requested fare; NULL = pre-capping row).
+    chargedMinor: bigint("charged_minor", { mode: "bigint" }),
   },
   (t) => ({
     riderIdx: index("fare_payments_rider_idx").on(t.riderSub, t.createdAt),
@@ -150,6 +154,10 @@ export const adPlacements = commerce.table("ad_placements", {
   startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
   endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // 0007 (W2): per-placement spend; campaign budgets are tracked against
+  // committed placement cost (sum(cost_minor) <= ad_campaigns.budget_minor
+  // enforced in commerce-api).
+  costMinor: bigint("cost_minor", { mode: "bigint" }).notNull().default(0n),
 });
 
 export const riderAccounts = commerce.table("rider_accounts", {

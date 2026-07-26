@@ -63,6 +63,11 @@ channels:
     description: On-demand shuttle requests (demand-responsive).
     messages:
       drtRequested: { $ref: "#/components/messages/DrtRequested" }
+  drtAssigned:
+    address: drt.assigned
+    description: On-demand shuttle assigned to a vehicle (demand-responsive).
+    messages:
+      drtAssigned: { $ref: "#/components/messages/DrtAssigned" }
   farePaymentInitiated:
     address: fare.payment.initiated
     description: Fare payment started on Mojaloop rails (fare-payments).
@@ -78,6 +83,11 @@ channels:
     description: Fare payment failed on Mojaloop rails (fare-payments).
     messages:
       farePaymentFailed: { $ref: "#/components/messages/FarePaymentFailed" }
+  farePaymentRefunded:
+    address: fare.payment.refunded
+    description: Settled fare payment fully refunded (fare-payments); loyalty clawed back.
+    messages:
+      farePaymentRefunded: { $ref: "#/components/messages/FarePaymentRefunded" }
   carbonCreditIssued:
     address: carbon.credit.issued
     description: CO2-avoidance credits issued (carbon-credits).
@@ -88,6 +98,11 @@ channels:
     description: Surplus H2/energy trades executed (energy-trading).
     messages:
       energyTradeExecuted: { $ref: "#/components/messages/EnergyTradeExecuted" }
+  energyTradeCancelled:
+    address: energy.trade.cancelled
+    description: Proposed energy trade cancelled by an operator (energy-trading).
+    messages:
+      energyTradeCancelled: { $ref: "#/components/messages/EnergyTradeCancelled" }
   toggleChanged:
     address: toggle.changed
     description: Feature toggle flips (toggle-service); consumers refresh caches.
@@ -140,6 +155,10 @@ operations:
     action: send
     channel: { $ref: "#/channels/drtRequested" }
     title: demand-responsive receives ride requests
+  publishDrtAssigned:
+    action: send
+    channel: { $ref: "#/channels/drtAssigned" }
+    title: demand-responsive assigns a vehicle to a ride
   publishFarePaymentInitiated:
     action: send
     channel: { $ref: "#/channels/farePaymentInitiated" }
@@ -152,6 +171,10 @@ operations:
     action: send
     channel: { $ref: "#/channels/farePaymentFailed" }
     title: fare-payments reports a failed payment
+  publishFarePaymentRefunded:
+    action: send
+    channel: { $ref: "#/channels/farePaymentRefunded" }
+    title: fare-payments refunds a settled payment
   publishCarbonCreditIssued:
     action: send
     channel: { $ref: "#/channels/carbonCreditIssued" }
@@ -160,6 +183,10 @@ operations:
     action: send
     channel: { $ref: "#/channels/energyTradeExecuted" }
     title: energy-trading executes trades
+  publishEnergyTradeCancelled:
+    action: send
+    channel: { $ref: "#/channels/energyTradeCancelled" }
+    title: energy-trading cancels a proposed trade
   publishToggleChanged:
     action: send
     channel: { $ref: "#/channels/toggleChanged" }
@@ -227,6 +254,11 @@ components:
       title: drt.requested
       contentType: application/json
       payload: { $ref: "./schemas/drt.requested.json" }
+    DrtAssigned:
+      name: DrtAssigned
+      title: drt.assigned
+      contentType: application/json
+      payload: { $ref: "./schemas/drt.assigned.json" }
     FarePaymentInitiated:
       name: FarePaymentInitiated
       title: fare.payment.initiated
@@ -242,6 +274,11 @@ components:
       title: fare.payment.failed
       contentType: application/json
       payload: { $ref: "./schemas/fare.payment.failed.json" }
+    FarePaymentRefunded:
+      name: FarePaymentRefunded
+      title: fare.payment.refunded
+      contentType: application/json
+      payload: { $ref: "./schemas/fare.payment.refunded.json" }
     CarbonCreditIssued:
       name: CarbonCreditIssued
       title: carbon.credit.issued
@@ -252,6 +289,11 @@ components:
       title: energy.trade.executed
       contentType: application/json
       payload: { $ref: "./schemas/energy.trade.executed.json" }
+    EnergyTradeCancelled:
+      name: EnergyTradeCancelled
+      title: energy.trade.cancelled
+      contentType: application/json
+      payload: { $ref: "./schemas/energy.trade.cancelled.json" }
     ToggleChanged:
       name: ToggleChanged
       title: toggle.changed
