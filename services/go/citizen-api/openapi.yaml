@@ -96,17 +96,33 @@ paths:
           application/json:
             schema:
               type: object
+              required: [pickup]
               properties:
-                pickup: { type: string }
-                dropoff: { type: string }
-                pax: { type: integer }
+                pickup:
+                  type: object
+                  required: [lat, lon]
+                  properties:
+                    lat: { type: number }
+                    lon: { type: number }
+                dropoff:
+                  type: object
+                  properties:
+                    lat: { type: number }
+                    lon: { type: number }
+                pickup_label: { type: string }
+                dropoff_label: { type: string }
+                passengers: { type: integer, minimum: 1, maximum: 20, default: 1 }
       responses:
         '201':
           description: Created DRT request
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DRTRequest' }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400':
+          description: pickup {lat,lon} missing, or passengers outside 1..20
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
     get:
@@ -179,6 +195,130 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/drt/requests/{id}/assign:
+    post:
+      tags: [demand-responsive]
+      summary: >-
+        Assign a requested ride to a vehicle (operator role): requested →
+        assigned, stamping vehicle_id/driver_sub/assigned_at. Publishes
+        drt.assigned.
+      operationId: assignDRTRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vehicle_id]
+              properties:
+                vehicle_id: { type: string, format: uuid }
+                driver_sub: { type: string }
+      responses:
+        '200':
+          description: Assigned request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DRTRequest' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Request not found or not in requested status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: vehicle_id does not reference a known vehicle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/drt/requests/{id}/start:
+    post:
+      tags: [demand-responsive]
+      summary: "Start an assigned ride (driver|operator role): assigned → enroute"
+      operationId: startDRTRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Enroute request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DRTRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Request not found or not in assigned status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/drt/requests/{id}/complete:
+    post:
+      tags: [demand-responsive]
+      summary: "Complete an enroute ride (driver|operator role): enroute → completed"
+      operationId: completeDRTRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Completed request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DRTRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Request not found or not in enroute status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/opendata/gtfs:
+    get:
+      tags: [open-data-portal]
+      summary: >-
+        Full GTFS static feed as one zip archive (stops.txt, routes.txt,
+        trips.txt, stop_times.txt, frequencies.txt), built from the live
+        timetable data
+      operationId: gtfsZip
+      responses:
+        '200':
+          description: GTFS zip archive
+          content:
+            application/zip: {}
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/opendata/gtfs/{file}:
+    get:
+      tags: [open-data-portal]
+      summary: One GTFS CSV file from the static feed
+      operationId: gtfsFile
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [stops.txt, routes.txt, trips.txt, stop_times.txt, frequencies.txt]
+      responses:
+        '200':
+          description: GTFS CSV content
+          content:
+            text/csv: {}
+        '404':
+          description: Unknown GTFS file or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/carbon/credits:
     get:
       tags: [carbon-credits]
@@ -238,10 +378,18 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        rider_sub: { type: string }
-        pickup: { type: string }
-        dropoff: { type: string }
-        status: { type: string }
+        user_sub: { type: string, description: Owning rider's JWT subject }
+        pickup_lat: { type: number }
+        pickup_lon: { type: number }
+        dropoff_lat: { type: number }
+        dropoff_lon: { type: number }
+        pickup_label: { type: string, description: Human-readable pickup label (free text) }
+        dropoff_label: { type: string, description: Human-readable dropoff label (free text) }
+        passengers: { type: integer, minimum: 1, maximum: 20 }
+        vehicle_id: { type: string, format: uuid, description: Set once assigned }
+        driver_sub: { type: string, description: Assigned driver's subject }
+        assigned_at: { type: string, format: date-time }
+        status: { type: string, enum: [requested, assigned, enroute, completed, cancelled] }
         requested_at: { type: string, format: date-time }
     Health:
       type: object
@@ -274,6 +422,11 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     Unauthorized:
       description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but lacking the required realm role
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
