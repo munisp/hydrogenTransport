@@ -19,6 +19,7 @@ from toggle_client import AsyncToggleClient
 from .config import settings
 from .data import load_problem
 from .models import BusPlan, LegOut, OptimizeRequest, OptimizeResponse
+from .data import write_back_inventory
 from .vrp import haversine_km, plan_refuels, range_km, solve_vrp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -86,6 +87,11 @@ async def optimize_route(req: OptimizeRequest, request: Request):
     plans: list[BusPlan] = []
     for route in routes:
         refuels, h2_end, feasible, notes = plan_refuels(route, list(inventory.values()), problem.depot)
+        if h2_end < -1e-9:
+            # A bus that cannot finish the route is STRANDED, never a plan
+            # with silently-negative H2 (BUSINESS_LOGIC_AUDIT §5).
+            feasible = False
+            notes.append("stranded: route exceeds remaining H2 range (h2_end_kg < 0)")
         legs = [
             LegOut(sequence=i, stop_id=s.stop_id, stop_name=s.name, cumulative_km=0.0)
             for i, s in enumerate(route.stops)
@@ -113,6 +119,12 @@ async def optimize_route(req: OptimizeRequest, request: Request):
                 refuels=refuels,
             )
         )
+
+    # Persist the planned draw-down so infra.stations.available_kg reflects
+    # tomorrow's refuels (BUSINESS_LOGIC_AUDIT §5: the optimizer decremented
+    # only in-memory copies; the DB inventory never changed).
+    if getattr(request.app.state, "pool", None) is not None:
+        await write_back_inventory(request.app.state.pool, plans)
 
     return OptimizeResponse(
         date=req.date,
