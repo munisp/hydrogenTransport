@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 
@@ -98,11 +100,12 @@ type stationDraw struct {
 //  2. physical backing: sale kinds draw down infra.stations.available_kg in
 //     one transaction — a trade for more H2 than the recorded surplus is
 //     rejected (409, trade marked failed, energy.trade.failed published);
-//  3. TigerBeetle settlement (energy clearing 3001 → operator revenue 2001,
-//     deterministic transfer id from the Idempotency-Key). The clearing
-//     account is overdraft-protected, so an unfunded trade is rejected
-//     (402), the surplus draw-down is compensated, the trade lands in
-//     'failed' and energy.trade.failed is published — never "cleared";
+//  3. TigerBeetle settlement (deterministic transfer id from the
+//     Idempotency-Key). Sale kinds settle clearing 3001 → operator revenue
+//     2001; h2-purchase settles 2001 → 3001, funding the clearing account
+//     (the buyer leg). The clearing account is overdraft-protected, so an
+//     unfunded sale is rejected (402), the surplus draw-down is compensated,
+//     the trade lands in 'failed' and energy.trade.failed is published;
 //  4. on success the trade becomes 'executed' with tb_transfer_id persisted
 //     and energy.trade.executed is published (SPEC §3.3).
 func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
@@ -185,12 +188,24 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 3: ledger settlement. The deterministic transfer id makes client
-	// retries safe; the overdraft-protected clearing account rejects
-	// unfunded trades instead of conjuring revenue.
+	// Step 3: ledger settlement. Direction follows the trade kind
+	// (BUSINESS_LOGIC_AUDIT §18: no buyer/counterparty account existed, so
+	// clearing was never funded):
+	//   - h2-sale / energy-export: clearing (3001) → operator revenue (2001).
+	//     The clearing account is overdraft-protected, so a sale can only
+	//     settle against funds a purchase previously paid in — revenue is
+	//     never conjured from an unfunded clearing account.
+	//   - h2-purchase: operator revenue (2001) → clearing (3001). Buying
+	//     supply costs the operator and FUNDS the clearing account; this is
+	//     the buyer/counterparty settlement leg.
+	// The deterministic transfer id makes client retries safe.
+	debit, credit := ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount
+	if req.Kind == "h2-purchase" {
+		debit, credit = ledger.OperatorRevenueAccount, ledger.EnergyTradeAccount
+	}
 	transferID, err := h.ledger.Transfer(
 		ledger.DeterministicTransferID("trade:"+idemKey),
-		ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount,
+		debit, credit,
 		uint64(req.PriceMinor), ledger.CodeEnergy)
 	if err != nil {
 		h.log.Error("energy trade ledger transfer failed", zap.String("trade", tradeID), zap.Error(err))
@@ -221,6 +236,37 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("failed to publish energy.trade.executed", zap.Error(err))
 	}
 	writeJSON(w, http.StatusCreated, t)
+}
+
+// CancelTrade handles POST /v1/energy/trades/{id}/cancel (Keycloak JWT,
+// operator). Only 'proposed' trades can be cancelled — a proposed trade has
+// not drawn surplus and not settled, so cancellation is a pure status
+// transition (executed trades are final; failed trades are already
+// terminal). Publishes energy.trade.cancelled.
+func (h *Handler) CancelTrade(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := scanTrade(h.db.QueryRow(r.Context(), `
+		UPDATE commerce.trades SET status = 'cancelled'
+		WHERE id = $1 AND status = 'proposed'
+		RETURNING `+tradeCols, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "trade not found or not in proposed status"})
+		return
+	}
+	if err != nil {
+		h.internal(w, "cancel trade", err)
+		return
+	}
+	if err := h.pub.Publish(r.Context(), "energy.trade.cancelled", map[string]any{
+		"trade_id":     t.ID,
+		"kind":         t.Kind,
+		"quantity_kg":  t.QuantityKg,
+		"price_minor":  t.PriceMinor,
+		"cancelled_at": time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		h.log.Error("failed to publish energy.trade.cancelled", zap.Error(err))
+	}
+	writeJSON(w, http.StatusOK, t)
 }
 
 // drawDownSurplus atomically verifies that the recorded station surplus

@@ -15,8 +15,10 @@
 // statuses via PaymentStatus so the commerce-api handler can persist a
 // truthful state instead of a generic failure.
 //
-// When MOJALOOP_ENDPOINT is unset, commerce-api keeps its simulated fallback
-// (SPEC §4) and this client is never constructed.
+// When MOJALOOP_ENDPOINT is unset, commerce-api fails the Mojaloop leg closed
+// (status mojaloop_unavailable) unless the explicit dev opt-in
+// H2_SIMULATED_MOJALOOP=true is set (SPEC §4); in both cases this client is
+// never constructed.
 package mojaloop
 
 import (
