@@ -347,7 +347,7 @@ services:
              sleep 2;
              curl -sf -X POST http://permify:3478/v1/tenants/t1/schemas
                -H 'Content-Type: application/json'
-               -d '{\"schema\": '\"'$$(cat /schema.perm | sed 's/\"/\\\\\"/g' | sed 's/^/\\n/' | tr -d \"\n\")'\"'}'
+               -d '{\"schema\": '"'$$(cat /schema.perm | sed 's/\"/\\\\\"/g' | sed 's/^/\\n/' | tr -d \"\n\")'\"'}'
              || echo 'schema write best-effort (use Permify UI/CLI to verify)'"
     depends_on:
       permify:
@@ -455,6 +455,10 @@ services:
     environment:
       APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:-h2fleet-admin-key-change-me}
       PWA_ORIGIN: http://localhost:3000   # CORS allow-origin for the PWA
+      # Must match the `services` client secret rendered into the Keycloak
+      # realm by keycloak-realm-init; without it the openid-connect plugin
+      # entries in apisix.yaml would resolve to the REPLACE_ME_* default.
+      KEYCLOAK_SERVICES_CLIENT_SECRET: ${KEYCLOAK_SERVICES_CLIENT_SECRET:-h2fleet-services-secret-change-me}
     volumes:
       - ../infra/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
       - ../infra/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
