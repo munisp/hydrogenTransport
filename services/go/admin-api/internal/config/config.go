@@ -14,7 +14,7 @@ type Config struct {
 	// Keycloak Admin REST (onboarding + user management).
 	KeycloakAdminURL          string // KEYCLOAK_ADMIN_URL (default http://keycloak:8080)
 	KeycloakRealm             string // KEYCLOAK_REALM (default h2fleet)
-	KeycloakAdminClientID     string // KEYCLOAK_ADMIN_CLIENT_ID — unset => simulated dev fallback
+	KeycloakAdminClientID     string // KEYCLOAK_ADMIN_CLIENT_ID — unset => fail-closed unless H2_SIMULATED_KEYCLOAK=true
 	KeycloakAdminClientSecret string // KEYCLOAK_ADMIN_CLIENT_SECRET
 
 	AlertmanagerURL string // ALERTMANAGER_URL (default http://alertmanager:9093)

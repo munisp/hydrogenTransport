@@ -118,17 +118,20 @@ A failed/timed-out source yields `null` for its section and is named in
 | `KEYCLOAK_ISSUER`            | no       | —                           | e.g. `http://keycloak:8080/realms/h2fleet`; JWT-protected routes fail closed when unset |
 | `KEYCLOAK_ADMIN_URL`         | no       | `http://keycloak:8080`      | Keycloak base URL for Admin REST |
 | `KEYCLOAK_REALM`             | no       | `h2fleet`                   | realm for Admin REST + client-credentials token |
-| `KEYCLOAK_ADMIN_CLIENT_ID`   | no       | —                           | service-account client (realm-management roles); **unset ⇒ simulated dev fallback** |
-| `KEYCLOAK_ADMIN_CLIENT_SECRET` | no     | —                           | as above |
+| `KEYCLOAK_ADMIN_CLIENT_ID`   | yes      | —                           | service-account client (realm-management roles); **unset ⇒ fail-closed startup** unless `H2_SIMULATED_KEYCLOAK=true` |
+| `KEYCLOAK_ADMIN_CLIENT_SECRET` | yes    | —                           | as above |
+| `H2_SIMULATED_KEYCLOAK`      | no       | —                           | `true` opts into the simulated in-memory Keycloak admin client (DEV ONLY; no real users are created) |
 | `TOGGLE_URL`                 | no       | `http://toggle-service:8080`| toggle-service base URL |
 | `ALERTMANAGER_URL`           | no       | `http://alertmanager:9093`  | Alertmanager base URL |
 | `TOGGLE_SERVICE_URL` … `CARBON_ANALYTICS_URL` | no | `http://<service>:<port>` | health-sweep service base URLs (see `internal/config`) |
 | `KAFKA_TCP_ADDR`, `POSTGRES_TCP_ADDR`, `REDIS_TCP_ADDR`, `OPENSEARCH_TCP_ADDR`, `TEMPORAL_TCP_ADDR`, `TIGERBEETLE_TCP_ADDR` | no | `kafka:9092` … | health-sweep middleware TCP targets |
 
-**Dev fallback:** when `KEYCLOAK_ADMIN_CLIENT_ID/SECRET` are unset, all
-Keycloak admin operations are simulated in-memory with loud `SIMULATED
-keycloak: …` warnings — onboarding and user-management flows work end-to-end
-without a privileged service account, but no real users are created.
+**Dev fallback (explicit opt-in):** when `KEYCLOAK_ADMIN_CLIENT_ID/SECRET`
+are unset the service fails closed at startup. Setting
+`H2_SIMULATED_KEYCLOAK=true` opts into a simulated in-memory client with loud
+`SIMULATED keycloak: …` warnings — onboarding and user-management flows work
+end-to-end without a privileged service account, but no real users are
+created. Never set this in any shared/production environment.
 
 In production the client needs a service account with the realm-management
 roles `manage-users`, `view-users` and `manage-realm` (role assignment) in

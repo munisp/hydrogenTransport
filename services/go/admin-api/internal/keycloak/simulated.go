@@ -12,8 +12,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// simulated is the dev fallback AdminClient used when
-// KEYCLOAK_ADMIN_CLIENT_ID/SECRET are unset. It keeps users in memory so the
+// simulated is the dev fallback AdminClient, selected only via the explicit
+// opt-in H2_SIMULATED_KEYCLOAK=true when KEYCLOAK_ADMIN_CLIENT_ID/SECRET are
+// unset (New fails closed otherwise). It keeps users in memory so the
 // onboarding and user-management flows are fully exercisable locally; every
 // operation is logged with a clear "SIMULATED" marker.
 type simulated struct {

@@ -130,7 +130,11 @@ func buildRouter(t *testing.T, env *jwksEnv) http.Handler {
 	t.Helper()
 	log := zap.NewNop()
 	jwtmw := auth.New(env.issuer, log)
-	kc := keycloak.New("http://127.0.0.1:1", "h2fleet", "", "", log) // simulated dev client
+	t.Setenv("H2_SIMULATED_KEYCLOAK", "true") // simulated dev client
+	kc, err := keycloak.New("http://127.0.0.1:1", "h2fleet", "", "", log)
+	if err != nil {
+		t.Fatalf("keycloak.New: %v", err)
+	}
 
 	return server.NewRouter(server.Deps{
 		Log: log,

@@ -4,9 +4,11 @@
 // h2fleet realm with realm-management roles) against
 // KEYCLOAK_ADMIN_URL (default http://keycloak:8080).
 //
-// When the admin client credentials are unset, New returns a simulated
-// in-memory client so local development works without a privileged Keycloak
-// service account; every simulated call is logged loudly.
+// When the admin client credentials are unset, New fails closed: user
+// provisioning is an identity path and must never silently fabricate success.
+// A simulated in-memory client exists for local development only behind the
+// explicit opt-in H2_SIMULATED_KEYCLOAK=true; every simulated call is logged
+// loudly and no real Keycloak user is created.
 package keycloak
 
 import (
@@ -17,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -56,12 +59,17 @@ type AdminClient interface {
 	SetEnabled(ctx context.Context, userID string, enabled bool) error
 }
 
-// New returns an HTTP AdminClient when clientID and clientSecret are set,
-// otherwise a simulated in-memory client (dev fallback, clearly logged).
-func New(adminURL, realm, clientID, clientSecret string, log *zap.Logger) AdminClient {
+// New returns an HTTP AdminClient when clientID and clientSecret are set.
+// Without credentials it fails closed with an error, unless the explicit dev
+// opt-in H2_SIMULATED_KEYCLOAK=true selects the simulated in-memory client
+// (dev fallback, clearly logged; no real users are provisioned).
+func New(adminURL, realm, clientID, clientSecret string, log *zap.Logger) (AdminClient, error) {
 	if clientID == "" || clientSecret == "" {
-		log.Warn("KEYCLOAK_ADMIN_CLIENT_ID/SECRET unset: Keycloak admin operations are SIMULATED (dev fallback, no real users are created)")
-		return newSimulated(log)
+		if os.Getenv("H2_SIMULATED_KEYCLOAK") != "true" {
+			return nil, fmt.Errorf("KEYCLOAK_ADMIN_CLIENT_ID/SECRET are required: user provisioning must not be silently simulated (set H2_SIMULATED_KEYCLOAK=true to opt into the simulated dev client)")
+		}
+		log.Warn("H2_SIMULATED_KEYCLOAK=true: Keycloak admin operations are SIMULATED (DEV ONLY — no real users are created)")
+		return newSimulated(log), nil
 	}
 	return &httpClient{
 		adminURL:     strings.TrimSuffix(adminURL, "/"),
@@ -70,7 +78,7 @@ func New(adminURL, realm, clientID, clientSecret string, log *zap.Logger) AdminC
 		clientSecret: clientSecret,
 		log:          log,
 		http:         &http.Client{Timeout: 10 * time.Second},
-	}
+	}, nil
 }
 
 // --------------------------------------------------------------------------

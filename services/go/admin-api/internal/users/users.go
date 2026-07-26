@@ -1,7 +1,8 @@
 // Package users implements the platform-admin user-management surface of
 // admin-api: list/create users, assign/revoke realm roles, disable/enable
 // accounts and trigger password resets. All operations go through the
-// Keycloak Admin REST client (or the simulated dev fallback).
+// Keycloak Admin REST client (or the simulated dev fallback behind the
+// explicit opt-in H2_SIMULATED_KEYCLOAK=true).
 package users
 
 import (

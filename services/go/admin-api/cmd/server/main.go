@@ -52,8 +52,11 @@ func main() {
 		log.Fatal("ensure platform schema", zap.Error(err))
 	}
 
-	kc := keycloak.New(cfg.KeycloakAdminURL, cfg.KeycloakRealm,
+	kc, err := keycloak.New(cfg.KeycloakAdminURL, cfg.KeycloakRealm,
 		cfg.KeycloakAdminClientID, cfg.KeycloakAdminClientSecret, log)
+	if err != nil {
+		log.Fatal("keycloak admin client init", zap.Error(err))
+	}
 	jwtmw := auth.New(cfg.KeycloakIssuer, log)
 
 	agg := kpi.NewAggregator([]kpi.Source{
