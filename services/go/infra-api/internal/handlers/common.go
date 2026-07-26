@@ -55,6 +55,28 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 			created_at timestamptz NOT NULL DEFAULT now()
 		)`,
 		`ALTER TABLE infra.dispatch_jobs ADD COLUMN IF NOT EXISTS accepted_at timestamptz`,
+		// Wave-4 parity with migrations 0005/0007 (dev databases that never
+		// ran goose): shift end, work-order linkage/lifecycle columns, station
+		// queue, incident resolution timestamp, prediction dedup index.
+		`ALTER TABLE infra.dispatch_jobs ADD COLUMN IF NOT EXISTS ends_at timestamptz`,
+		`ALTER TABLE infra.work_orders ADD COLUMN IF NOT EXISTS bus_id uuid`,
+		`ALTER TABLE infra.work_orders ADD COLUMN IF NOT EXISTS prediction_id uuid`,
+		`ALTER TABLE infra.work_orders ADD COLUMN IF NOT EXISTS assignee text`,
+		`ALTER TABLE infra.work_orders ADD COLUMN IF NOT EXISTS started_at timestamptz`,
+		`ALTER TABLE infra.incidents ADD COLUMN IF NOT EXISTS resolved_at timestamptz`,
+		`CREATE TABLE IF NOT EXISTS infra.station_queue (
+			id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			station_id   uuid NOT NULL,
+			bus_id       uuid NOT NULL,
+			joined_at    timestamptz NOT NULL DEFAULT now(),
+			status       text NOT NULL DEFAULT 'waiting',
+			completed_at timestamptz
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS station_queue_active_uq
+			ON infra.station_queue (station_id, bus_id) WHERE status IN ('waiting','serving')`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS work_orders_open_prediction_uq
+			ON infra.work_orders (prediction_id)
+			WHERE prediction_id IS NOT NULL AND status <> 'closed'`,
 		`CREATE TABLE IF NOT EXISTS infra.depot_bays (
 			id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			depot       text NOT NULL,

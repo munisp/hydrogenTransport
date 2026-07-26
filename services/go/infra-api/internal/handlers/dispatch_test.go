@@ -45,16 +45,16 @@ func createJob(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder
 
 const conflictQuery = `FROM infra\.dispatch_jobs`
 
-var jobCols = []string{"id", "driver_sub", "vehicle_id", "route", "starts_at", "status", "created_at", "accepted_at"}
+var jobCols = []string{"id", "driver_sub", "vehicle_id", "route", "starts_at", "ends_at", "status", "created_at", "accepted_at"}
 
-// A driver already on an active (assigned/accepted/in_progress) job must be
-// rejected with 409 (BUSINESS_LOGIC_AUDIT §8: no double-booking).
+// A driver already on an overlapping active (assigned/accepted/in_progress)
+// job must be rejected with 409 (BUSINESS_LOGIC_AUDIT §8: no double-booking).
 func TestCreateDispatchJob_DriverConflict(t *testing.T) {
 	h, pool := newDispatchHandler(t)
 
 	pool.ExpectBegin()
 	pool.ExpectQuery(conflictQuery).
-		WithArgs("driver-1", (*string)(nil)).
+		WithArgs("driver-1", (*string)(nil), (*time.Time)(nil), (*time.Time)(nil)).
 		WillReturnRows(pgxmock.NewRows([]string{"conflict"}).AddRow("driver"))
 	pool.ExpectRollback()
 
@@ -74,14 +74,14 @@ func TestCreateDispatchJob_DriverConflict(t *testing.T) {
 	}
 }
 
-// A vehicle already bound to an active job must be rejected with 409.
+// A vehicle already bound to an overlapping active job must be rejected with 409.
 func TestCreateDispatchJob_VehicleConflict(t *testing.T) {
 	h, pool := newDispatchHandler(t)
 
 	vehicle := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	pool.ExpectBegin()
 	pool.ExpectQuery(conflictQuery).
-		WithArgs("driver-2", &vehicle).
+		WithArgs("driver-2", &vehicle, (*time.Time)(nil), (*time.Time)(nil)).
 		WillReturnRows(pgxmock.NewRows([]string{"conflict"}).AddRow("vehicle"))
 	pool.ExpectRollback()
 
@@ -101,23 +101,38 @@ func TestCreateDispatchJob_VehicleConflict(t *testing.T) {
 	}
 }
 
-// No conflict → the insert commits and the job is returned.
+// ends_at before starts_at is rejected client-side (no DB call).
+func TestCreateDispatchJob_EndsBeforeStarts(t *testing.T) {
+	h, pool := newDispatchHandler(t)
+
+	rec := createJob(t, h, `{"driver_sub":"driver-1","starts_at":"2026-07-25T10:00:00Z","ends_at":"2026-07-25T09:00:00Z"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400 (body: %s)", rec.Code, rec.Body)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
+	}
+}
+
+// No conflict → the insert commits (with ends_at → shift_end) and the job is returned.
 func TestCreateDispatchJob_NoConflict(t *testing.T) {
 	h, pool := newDispatchHandler(t)
 
 	vehicle := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	created := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
+	starts := time.Date(2026, 7, 26, 8, 0, 0, 0, time.UTC)
+	ends := time.Date(2026, 7, 26, 16, 0, 0, 0, time.UTC)
 	pool.ExpectBegin()
 	pool.ExpectQuery(conflictQuery).
-		WithArgs("driver-3", &vehicle).
-		WillReturnRows(pgxmock.NewRows([]string{"conflict"})) // no active job
+		WithArgs("driver-3", &vehicle, &starts, &ends).
+		WillReturnRows(pgxmock.NewRows([]string{"conflict"})) // no overlapping active job
 	pool.ExpectQuery(`INSERT INTO infra\.dispatch_jobs`).
-		WithArgs("driver-3", &vehicle, "R10", (*time.Time)(nil)).
+		WithArgs("driver-3", &vehicle, "R10", &starts, &ends).
 		WillReturnRows(pgxmock.NewRows(jobCols).
-			AddRow("cccccccc-cccc-cccc-cccc-cccccccccccc", "driver-3", &vehicle, "R10", nil, "assigned", created, nil))
+			AddRow("cccccccc-cccc-cccc-cccc-cccccccccccc", "driver-3", &vehicle, "R10", &starts, &ends, "assigned", created, nil))
 	pool.ExpectCommit()
 
-	rec := createJob(t, h, `{"driver_sub":"driver-3","vehicle_id":"`+vehicle+`","route":"R10"}`)
+	rec := createJob(t, h, `{"driver_sub":"driver-3","vehicle_id":"`+vehicle+`","route":"R10","starts_at":"2026-07-26T08:00:00Z","ends_at":"2026-07-26T16:00:00Z"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("got %d, want 201 (body: %s)", rec.Code, rec.Body)
 	}
@@ -127,6 +142,73 @@ func TestCreateDispatchJob_NoConflict(t *testing.T) {
 	}
 	if j.Status != "assigned" || j.DriverSub != "driver-3" {
 		t.Fatalf("unexpected job payload: %+v", j)
+	}
+	if j.EndsAt == nil || !j.EndsAt.Equal(ends) {
+		t.Fatalf("ends_at (shift_end source) not echoed: %+v", j.EndsAt)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
+	}
+}
+
+// GET /v1/dispatch/jobs?driver_sub= must push the filter into SQL (the
+// mobile DriverScreen depends on it; previously silently ignored).
+func TestListDispatchJobs_DriverFilter(t *testing.T) {
+	h, pool := newDispatchHandler(t)
+
+	pool.ExpectQuery(`driver_sub = \$2`).
+		WithArgs("assigned", "driver-9").
+		WillReturnRows(pgxmock.NewRows(jobCols))
+
+	rec := httptest.NewRecorder()
+	h.ListDispatchJobs(rec, httptest.NewRequest(http.MethodGet, "/v1/dispatch/jobs?status=assigned&driver_sub=driver-9", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (body: %s)", rec.Code, rec.Body)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
+	}
+}
+
+// POST /v1/dispatch/jobs/{id}/cancel cancels an active job (delivers the
+// workflow's job-cancelled signal).
+func TestCancelDispatchJob(t *testing.T) {
+	h, pool := newDispatchHandler(t)
+
+	created := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
+	pool.ExpectQuery(`UPDATE infra\.dispatch_jobs`).
+		WithArgs("cccccccc-cccc-cccc-cccc-cccccccccccc").
+		WillReturnRows(pgxmock.NewRows(jobCols).
+			AddRow("cccccccc-cccc-cccc-cccc-cccccccccccc", "driver-3", nil, "R10", nil, nil, "cancelled", created, nil))
+
+	rec := httptest.NewRecorder()
+	req := withURLParams(httptest.NewRequest(http.MethodPost,
+		"/v1/dispatch/jobs/cccccccc-cccc-cccc-cccc-cccccccccccc/cancel", nil),
+		"id", "cccccccc-cccc-cccc-cccc-cccccccccccc")
+	h.CancelDispatchJob(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (body: %s)", rec.Code, rec.Body)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet db expectations: %v", err)
+	}
+}
+
+// Cancelling a completed/already-cancelled job conflicts.
+func TestCancelDispatchJob_NotActive(t *testing.T) {
+	h, pool := newDispatchHandler(t)
+
+	pool.ExpectQuery(`UPDATE infra\.dispatch_jobs`).
+		WithArgs("cccccccc-cccc-cccc-cccc-cccccccccccc").
+		WillReturnRows(pgxmock.NewRows(jobCols)) // no row → not active
+
+	rec := httptest.NewRecorder()
+	req := withURLParams(httptest.NewRequest(http.MethodPost,
+		"/v1/dispatch/jobs/cccccccc-cccc-cccc-cccc-cccccccccccc/cancel", nil),
+		"id", "cccccccc-cccc-cccc-cccc-cccccccccccc")
+	h.CancelDispatchJob(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409 (body: %s)", rec.Code, rec.Body)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet db expectations: %v", err)

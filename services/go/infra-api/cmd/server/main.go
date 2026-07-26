@@ -18,6 +18,7 @@ import (
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/config"
+	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/consumers"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/events"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/gate"
 	"github.com/munisp/hydrogenTransport/services/go/infra-api/internal/handlers"
@@ -75,6 +76,37 @@ func main() {
 		log.Fatal("ensure schema", zap.Error(err))
 	}
 
+	// maintenance.predicted → depot work orders (predictive-maintenance
+	// closed loop, BUSINESS_LOGIC_AUDIT §2). Offsets commit only after the
+	// work order is durably written.
+	go consumers.StartMaintenanceConsumer(ctx, cfg.KafkaBrokers, pool, log)
+
+	// Optional scheduled compliance generation (COMPLIANCE_REPORT_INTERVAL,
+	// e.g. "24h"); manual POST /v1/compliance/reports/generate always works.
+	if raw := os.Getenv("COMPLIANCE_REPORT_INTERVAL"); raw != "" {
+		if interval, err := time.ParseDuration(raw); err != nil || interval <= 0 {
+			log.Warn("invalid COMPLIANCE_REPORT_INTERVAL; scheduled generation disabled", zap.String("value", raw))
+		} else {
+			go func() {
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := h.GenerateScheduled(ctx); err != nil {
+							log.Error("scheduled compliance report failed", zap.Error(err))
+						} else {
+							log.Info("scheduled compliance report generated", zap.Duration("interval", interval))
+						}
+					}
+				}
+			}()
+			log.Info("scheduled compliance generation enabled", zap.Duration("interval", interval))
+		}
+	}
+
 	// The leak webhook accepts either a shared sensor token
 	// (LEAK_INGEST_TOKEN via X-Sensor-Token header) or a Keycloak JWT.
 	leakToken := os.Getenv("LEAK_INGEST_TOKEN")
@@ -103,6 +135,11 @@ func main() {
 		r.Get("/v1/stations/{id}", h.GetStation)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/stations", h.CreateStation)
 		r.With(jwtmw.RequireRole("operator")).Patch("/v1/stations/{id}/status", h.UpdateStationStatus)
+		// Queue management (SPEC §1 "queue mgmt").
+		r.Get("/v1/stations/{id}/queue", h.ListStationQueue)
+		r.With(jwtmw.RequireAuth).Post("/v1/stations/{id}/queue", h.JoinStationQueue)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/stations/{id}/queue/{entry}/complete", h.CompleteStationQueueEntry)
+		r.With(jwtmw.RequireAuth).Post("/v1/stations/{id}/queue/{entry}/leave", h.LeaveStationQueue)
 	})
 	// leak-detection module: incidents + sensor webhook
 	r.Group(func(r chi.Router) {
@@ -124,6 +161,7 @@ func main() {
 		r.Get("/v1/dispatch/jobs", h.ListDispatchJobs)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs", h.CreateDispatchJob)
 		r.With(jwtmw.RequireRole("driver")).Post("/v1/dispatch/jobs/{id}/accept", h.AcceptDispatchJob)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs/{id}/cancel", h.CancelDispatchJob)
 	})
 	// compliance-reporting module
 	r.Group(func(r chi.Router) {
@@ -139,8 +177,13 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "depot-management"))
 		r.Get("/v1/depot/bays", h.ListDepotBays)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/bays/{id}/assign", h.AssignDepotBay)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/bays/{id}/release", h.ReleaseDepotBay)
 		r.Get("/v1/depot/work-orders", h.ListWorkOrders)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders", h.CreateWorkOrder)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders/{id}/assign", h.AssignWorkOrder)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders/{id}/start", h.StartWorkOrder)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders/{id}/hold", h.HoldWorkOrder)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/depot/work-orders/{id}/close", h.CloseWorkOrder)
 	})
 

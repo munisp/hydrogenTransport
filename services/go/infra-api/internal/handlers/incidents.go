@@ -70,11 +70,15 @@ func (h *Handler) ListIncidents(w http.ResponseWriter, r *http.Request) {
 }
 
 type createIncidentRequest struct {
-	Type      string         `json:"type"`
-	Severity  string         `json:"severity"`
-	BusID     *string        `json:"bus_id"`
-	StationID *string        `json:"station_id"`
-	Meta      map[string]any `json:"meta"`
+	Type      string  `json:"type"`
+	Severity  string  `json:"severity"`
+	BusID     *string `json:"bus_id"`
+	StationID *string `json:"station_id"`
+	// Description is free-text reporter context (mobile DriverScreen and the
+	// PWA SafetyPage send it; it was previously dropped — BUSINESS_LOGIC_AUDIT
+	// §12). Persisted as meta.description so operators actually see it.
+	Description string         `json:"description"`
+	Meta        map[string]any `json:"meta"`
 }
 
 // OpenIncident handles POST /v1/incidents (Keycloak JWT).
@@ -86,6 +90,12 @@ func (h *Handler) OpenIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Severity == "" {
 		req.Severity = "medium"
+	}
+	if req.Description != "" {
+		if req.Meta == nil {
+			req.Meta = map[string]any{}
+		}
+		req.Meta["description"] = req.Description
 	}
 	i, err := h.insertIncident(r, req)
 	if err != nil {
@@ -136,7 +146,7 @@ func (h *Handler) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 	// Allow resolving open, in_progress and acknowledged incidents.
 	id := chi.URLParam(r, "id")
 	i, err := scanIncident(h.db.QueryRow(r.Context(), `
-		UPDATE infra.incidents SET status = 'resolved'
+		UPDATE infra.incidents SET status = 'resolved', resolved_at = now()
 		WHERE id = $1 AND status IN ('open','in_progress','acknowledged')
 		RETURNING `+incidentCols, id))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -164,29 +174,111 @@ type leakEventRequest struct {
 	Location  string   `json:"location"`
 }
 
+// severityRank orders the incident severity enum (must match the escalation
+// order in workflow/activities.go).
+var severityRank = map[string]int{"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+// severityFromPpm maps an H2 concentration reading to an incident severity
+// (BUSINESS_LOGIC_AUDIT §7: ppm was stored but never used). Bands are
+// anchored to the H2 lower explosive limit (LEL ≈ 4%vol = 40,000 ppm):
+//
+//	< 1,000 ppm          low      (trace / sensor noise band)
+//	1,000 – 5,000 ppm    medium   (2.5–12.5% LEL — investigate)
+//	5,000 – 20,000 ppm   high     (12.5–50% LEL — act now)
+//	>= 20,000 ppm        critical (>= 50% LEL — immediate danger)
+func severityFromPpm(ppm float64) string {
+	switch {
+	case ppm >= 20000:
+		return "critical"
+	case ppm >= 5000:
+		return "high"
+	case ppm >= 1000:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// leakSeverity derives the effective severity: the caller's value is never
+// trusted blindly — when h2_ppm is present the ppm-derived band RAISES the
+// floor (a sensor reading 30,000 ppm cannot be filed as "low"), while a
+// caller may still escalate above the band.
+func leakSeverity(caller string, ppm *float64) string {
+	if caller == "" {
+		caller = "high" // documented default when neither is supplied
+	}
+	if _, ok := severityRank[caller]; !ok {
+		caller = "high"
+	}
+	if ppm == nil {
+		return caller
+	}
+	derived := severityFromPpm(*ppm)
+	if severityRank[derived] > severityRank[caller] {
+		return derived
+	}
+	return caller
+}
+
+// leakDedupWindow bounds sensor flapping: a repeat reading from the same
+// sensor while an earlier leak incident is still active does not open a
+// second incident (BUSINESS_LOGIC_AUDIT §7: no dedup).
+const leakDedupWindow = "30 minutes"
+
 // IngestLeak handles POST /v1/safety/leak — the H2 sensor ingestion webhook
 // (leak-detection module; authenticated by sensor token or JWT at the router).
 // It opens an incident, publishes safety.leak.detected (SPEC §3.3) and signals
-// the Temporal incident-response workflow.
+// the Temporal incident-response workflow. Repeat readings from the same
+// sensor within the dedup window are folded into the still-active incident
+// (200 + deduplicated:true) instead of flooding infra.incidents.
 func (h *Handler) IngestLeak(w http.ResponseWriter, r *http.Request) {
 	var req leakEventRequest
 	if err := decodeJSON(w, r, &req); err != nil || req.SensorID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"sensor_id\""})
 		return
 	}
-	if req.Severity == "" {
-		req.Severity = "high"
+	severity := leakSeverity(req.Severity, req.H2Ppm)
+
+	// Per-sensor dedup: fold into the still-active incident for this sensor
+	// (and refresh its worst observed ppm/severity) instead of opening a new
+	// one per reading.
+	// Severity may only escalate on a repeat reading, never de-escalate.
+	existing, err := scanIncident(h.db.QueryRow(r.Context(), `
+		UPDATE infra.incidents
+		SET severity = CASE
+				WHEN array_position(ARRAY['low','medium','high','critical'], severity) <
+				     array_position(ARRAY['low','medium','high','critical'], $2)
+				THEN $2 ELSE severity END,
+			meta = meta || jsonb_build_object(
+				'h2_ppm', COALESCE(to_jsonb($3::float8), meta->'h2_ppm'),
+				'readings', COALESCE((meta->>'readings')::int, 1) + 1,
+				'last_reading_at', to_jsonb(now()))
+		WHERE type = 'h2_leak'
+		  AND meta->>'sensor_id' = $1
+		  AND status IN ('open','acknowledged','in_progress')
+		  AND opened_at > now() - interval '`+leakDedupWindow+`'
+		RETURNING `+incidentCols,
+		req.SensorID, severity, req.H2Ppm))
+	switch {
+	case err == nil:
+		// Folded into an active incident; no new row, no new workflow.
+		writeJSON(w, http.StatusOK, map[string]any{"incident": existing, "deduplicated": true})
+		return
+	case !errors.Is(err, pgx.ErrNoRows):
+		h.internal(w, "dedup leak event", err)
+		return
 	}
 
 	incident, err := h.insertIncident(r, createIncidentRequest{
 		Type:      "h2_leak",
-		Severity:  req.Severity,
+		Severity:  severity,
 		BusID:     req.BusID,
 		StationID: req.StationID,
 		Meta: map[string]any{
 			"sensor_id": req.SensorID,
 			"h2_ppm":    req.H2Ppm,
 			"location":  req.Location,
+			"readings":  1,
 		},
 	})
 	if err != nil {
