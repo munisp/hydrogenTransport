@@ -103,8 +103,18 @@ async fn apply_update(
     producer: &FutureProducer,
     t: &TelemetryEnriched,
 ) -> anyhow::Result<()> {
-    let state = TwinState::from_telemetry(t);
-    let key = format!("{}{}", TWIN_KEY_PREFIX, state.bus_id);
+    let key = format!("{}{}", TWIN_KEY_PREFIX, t.bus_id);
+    // Load the previous hot state as the trend baseline for status
+    // derivation (refueling is a TREND — h2 rising across consecutive
+    // readings — not a static snapshot label). A missing/corrupt previous
+    // state simply means "no baseline" (first sighting of the bus).
+    let prev: Option<TwinState> = redis
+        .get::<_, Option<String>>(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok());
+    let state = TwinState::from_telemetry(prev.as_ref(), t);
     let json = serde_json::to_string(&state).context("serialize twin")?;
     let ttl = cfg.twin_ttl.as_secs() as i64;
 
@@ -378,7 +388,7 @@ mod tests {
             depot_id: None,
             heading_deg: Some(270.0),
         };
-        let state = TwinState::from_telemetry(&t);
+        let state = TwinState::from_telemetry(None, &t);
         let hot_json = serde_json::to_string(&state).unwrap(); // Redis SET twin:<bus_id>
 
         let (ids, states, stale) =
