@@ -66,11 +66,16 @@ curl -s http://localhost:8088/realms/h2fleet/protocol/openid-connect/token \
   -d grant_type=password -d username=admin -d password="${KEYCLOAK_ADMIN_USER_PASSWORD:-admin123}" | jq -r .access_token
 ```
 
-**Payments without TigerBeetle:** the simulated ledger rejects negative
-balances and payment routes return `502 bad_gateway` (+ `fare.payment.failed`
-event) when the ledger or Mojaloop simulator is unreachable — that is
-expected behaviour, not a bug. Bring `tigerbeetle`/`mojaloop-simulator` up
-(they are in the default middleware profile) before testing payments.
+**Payments without TigerBeetle:** commerce-api refuses to start when
+`TIGERBEETLE_ADDR` is unset (fail-closed money path) unless you explicitly
+opt into the in-memory dev ledger with `H2_SIMULATED_LEDGER=true`. The
+simulated ledger rejects negative balances, and payment routes return
+`502 bad_gateway` (+ `fare.payment.failed` event) when the ledger or Mojaloop
+simulator is unreachable — that is expected behaviour, not a bug. Bring
+`tigerbeetle`/`mojaloop-simulator` up (they are in the default middleware
+profile) before testing payments. The Mojaloop leg similarly fails closed
+(`mojaloop_unavailable`) when `MOJALOOP_ENDPOINT` is unset, unless
+`H2_SIMULATED_MOJALOOP=true` is set (DEV ONLY).
 
 **Compose profiles**: default = middleware. `--profile apps` adds platform
 services, `--profile all` everything, `--profile fluvio` the optional edge

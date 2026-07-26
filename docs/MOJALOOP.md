@@ -103,14 +103,18 @@ Properties:
   mojaloop_quote_rejected`, `transfer_rejected → mojaloop_transfer_rejected`,
   `timeout → mojaloop_timeout`, `switch_unavailable → mojaloop_unavailable`.
   Persisted on `commerce.fare_payments.status`; events carry the reason.
-- **Simulated fallback preserved**: without `MOJALOOP_ENDPOINT` the handler
-  keeps returning clearly-labelled `ml-simulated-*` ids (SPEC §4).
+- **Simulated fallback env-gated**: without `MOJALOOP_ENDPOINT` the Mojaloop
+  leg fails closed (`mojaloop_unavailable`, classified via
+  `mojaloop.PaymentStatus`). The legacy clearly-labelled `ml-simulated-*` ids
+  (SPEC §4) are returned only behind the explicit dev opt-in
+  `H2_SIMULATED_MOJALOOP=true`.
 
 Env wiring (compose `MOJALOOP_ENDPOINT=http://mojaloop-simulator:8444`):
 
 | Env | Default | Meaning |
 |---|---|---|
-| `MOJALOOP_ENDPOINT` | (unset) | scheme-adapter/simulator base URL; unset → simulated fallback |
+| `MOJALOOP_ENDPOINT` | (unset) | scheme-adapter/simulator base URL; unset → Mojaloop leg fails closed (`mojaloop_unavailable`) |
+| `H2_SIMULATED_MOJALOOP` | (unset) | `true` opts into clearly-labelled `ml-simulated-*` transfer ids when `MOJALOOP_ENDPOINT` is unset (DEV ONLY) |
 | `MOJALOOP_DFSP_ID` | `h2fleet` | our DFSP id (`FSPIOP-Source`) |
 | `MOJALOOP_PAYEE_PARTY_ID` | `h2fleet-operator` | operator party at the switch |
 | `MOJALOOP_PAYEE_PARTY_TYPE` | `BUSINESS` | payee party id type |
