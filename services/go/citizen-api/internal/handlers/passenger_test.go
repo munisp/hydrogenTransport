@@ -60,9 +60,9 @@ func TestGetArrivals_UnknownStop(t *testing.T) {
 // nextArrivals is the schedule engine behind the endpoint: table tests pin
 // the service-window behaviour deterministically (independent of wall clock).
 func TestNextArrivals(t *testing.T) {
-	r10 := routes[0] // R10, headway 10min, S001 at offset 0
+	r10 := fallbackRoutes[0] // R10, headway 10min, S001 at offset 0
 	if r10.RouteID != "R10" {
-		t.Fatalf("seed data changed: routes[0] = %+v", r10)
+		t.Fatalf("seed data changed: fallbackRoutes[0] = %+v", r10)
 	}
 	loc := time.UTC
 	at := func(hh, mm int) time.Time { return time.Date(2026, 7, 24, hh, mm, 0, 0, loc) }
@@ -85,7 +85,7 @@ func TestNextArrivals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := nextArrivals(r10, tc.stopOffset, tc.now, 3)
+			got := nextArrivals(fallbackStops, r10, tc.stopOffset, tc.now, 3)
 			if len(got) != tc.wantCount {
 				t.Fatalf("got %d arrivals, want %d (%+v)", len(got), tc.wantCount, got)
 			}
@@ -107,12 +107,12 @@ func TestNextArrivals(t *testing.T) {
 
 // Stops and routes seed lists must stay non-empty (PWA depends on them).
 func TestSeedDataNonEmpty(t *testing.T) {
-	if len(stops) == 0 || len(routes) == 0 {
+	if len(fallbackStops) == 0 || len(fallbackRoutes) == 0 {
 		t.Fatal("GTFS seed data must not be empty")
 	}
-	for _, rt := range routes {
+	for _, rt := range fallbackRoutes {
 		for _, id := range rt.StopIDs {
-			if _, ok := stopByID(id); !ok {
+			if _, ok := stopByID(fallbackStops, id); !ok {
 				t.Fatalf("route %s references unknown stop %s", rt.RouteID, id)
 			}
 		}

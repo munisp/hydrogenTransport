@@ -13,11 +13,15 @@ toggle; a disabled module returns **404** (fail-closed).
 | GET  | `/v1/passenger/journey?from=&to=` (rule-based direct-route planner) | `passenger-pwa` | — |
 | GET  | `/v1/passenger/alerts` (GTFS-RT style service alerts) | `passenger-pwa` | — |
 | GET  | `/v1/mobile/config` (app bootstrap + citizen module states) | `mobile-app` | — |
-| POST | `/v1/drt/requests` → row in `citizen.drt_requests` + publishes `drt.requested` | `demand-responsive` | JWT |
+| POST | `/v1/drt/requests` `{pickup{lat,lon}, dropoff{lat,lon}, pickup_label, dropoff_label, passengers}` → row in `citizen.drt_requests` + publishes `drt.requested` | `demand-responsive` | JWT |
 | GET  | `/v1/drt/requests`, `/v1/drt/requests/{id}` | `demand-responsive` | JWT (list) |
+| POST | `/v1/drt/requests/{id}/cancel` (owner, or operator/platform-admin; non-owners get 404) | `demand-responsive` | JWT |
+| POST | `/v1/drt/requests/{id}/assign` `{vehicle_id, driver_sub}` — requested → assigned, publishes `drt.assigned` | `demand-responsive` | JWT (operator) |
+| POST | `/v1/drt/requests/{id}/start`, `/v1/drt/requests/{id}/complete` — assigned → enroute → completed | `demand-responsive` | JWT (driver\|operator) |
 | GET  | `/v1/carbon/credits?period=`, `/v1/carbon/credits/summary` | `carbon-credits` | — |
 | GET  | `/v1/opendata/datasets` (catalog) | `open-data-portal` | — |
 | GET  | `/v1/opendata/search?q=` (proxy → OpenSearch `_search`) | `open-data-portal` | — |
+| GET  | `/v1/opendata/gtfs` (full GTFS static feed as zip), `/v1/opendata/gtfs/{file}` (`stops.txt`, `routes.txt`, `trips.txt`, `stop_times.txt`, `frequencies.txt` as CSV) | `open-data-portal` | — |
 | GET  | `/healthz` | — | — |
 
 ## Event publishing (SPEC §3.5)
