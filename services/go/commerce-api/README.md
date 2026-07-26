@@ -55,7 +55,7 @@ Dockerfile builds on `golang:1.22-bookworm` and ships `distroless/cc`.
 | `TOGGLE_URL` | — | fail-closed when unset |
 | `KAFKA_BROKERS` | — | no-op logging publisher when unset |
 | `KEYCLOAK_ISSUER` | — | in-network realm URL; `KEYCLOAK_ISSUER_ALT` also accepted |
-| `TIGERBEETLE_ADDR`` | — | e.g. `tigerbeetle:3000`; **required — startup fails closed when unset** |
+| `TIGERBEETLE_ADDR` | — | e.g. `tigerbeetle:3000`; **required — startup fails closed when unset** |
 | `H2_SIMULATED_LEDGER` | — | `true` opts into the in-memory dev ledger instead of TigerBeetle (DEV ONLY; never in production) |
 | `WALLET_TOPUP_ENABLED` | `true` with the simulated ledger, `false` otherwise | gates `POST /v1/wallets/topup` (dev funding path; disable in production once real cash-in exists) |
 | `MOJALOOP_ENDPOINT` | — | e.g. `http://mojaloop:4040`; `use_mojaloop` payments fail closed (`mojaloop_unavailable`) when unset |

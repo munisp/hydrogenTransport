@@ -33,7 +33,10 @@ paths:
         fare.payment.settled. The paying rider is ALWAYS the authenticated JWT
         subject. The body's rider_sub is kept for backwards compatibility but
         is ignored for ledger/account operations; a rider_sub that does not
-        match the JWT subject is rejected with 403.
+        match the JWT subject is rejected with 403. Daily fare capping
+        (FARE_DAILY_CAP_MINOR, default 800 minor = €8.00; 0 disables): once
+        today's settled charges reach the cap, further rides settle at
+        charged_minor = 0 while the requested amount_minor is still recorded.
       operationId: createPayment
       security:
         - bearerAuth: []
@@ -54,7 +57,13 @@ paths:
                   description: >-
                     DEPRECATED/ignored: the rider is derived from the JWT
                     subject. A value not matching the JWT subject yields 403.
-                use_mojaloop: { type: boolean, default: false }
+                use_mojaloop:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Run the Mojaloop settlement leg; fails closed as
+                    mojaloop_unavailable when MOJALOOP_ENDPOINT is unset unless
+                    H2_SIMULATED_MOJALOOP=true (dev opt-in)
       responses:
         '200':
           description: Idempotent replay of an existing payment (same Idempotency-Key)
@@ -106,6 +115,38 @@ paths:
                     items: { $ref: '#/components/schemas/Payment' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/payments/{id}/refund:
+    post:
+      tags: [fare-payments]
+      summary: >-
+        Fully refund a settled payment (operator role). Reversal transfer
+        operator revenue → rider wallet for the charged (post-capping)
+        amount, loyalty points clawed back, fare.payment.refunded published.
+        Retries are idempotent (deterministic reversal transfer id); a fully
+        capped 0-charged payment refunds without a ledger posting.
+      operationId: refundPayment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Refunded payment (also the idempotent replay of an already-refunded payment)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Payment not found or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Only settled payments can be refunded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/payments/{id}:
     get:
       tags: [fare-payments]
@@ -135,8 +176,8 @@ paths:
         wallet from the platform cash-in account; the wallet
         (commerce.rider_accounts + TigerBeetle account) is provisioned lazily
         on first use. Enabled by default only with the simulated ledger
-        (TIGERBEETLE_ADDR unset) or WALLET_TOPUP_ENABLED=true; pending a real
-        Mojaloop cash-in flow.
+        (H2_SIMULATED_LEDGER=true) or WALLET_TOPUP_ENABLED=true; pending a
+        real Mojaloop cash-in flow.
       operationId: topUpWallet
       security:
         - bearerAuth: []
@@ -330,6 +371,33 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/energy/trades/{id}/cancel:
+    post:
+      tags: [energy-trading]
+      summary: >-
+        Cancel a proposed trade (operator role). Only proposed trades can be
+        cancelled — a proposed trade has not drawn surplus and not settled,
+        so cancellation is a pure status flip (executed/failed are terminal).
+        Publishes energy.trade.cancelled.
+      operationId: cancelTrade
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Cancelled trade
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trade' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '409':
+          description: Trade not found or not in proposed status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/gov/kpis:
     get:
       tags: [gov-dashboard]
@@ -353,8 +421,21 @@ paths:
       tags: [advertising]
       summary: List ad campaigns
       operationId: listCampaigns
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, active, paused, ended] }
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Campaign list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  campaigns:
+                    type: array
+                    items: { $ref: '#/components/schemas/Campaign' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
     post:
       tags: [advertising]
@@ -379,7 +460,11 @@ paths:
                 starts_at: { type: string, format: date-time }
                 ends_at: { type: string, format: date-time }
       responses:
-        '201': { $ref: '#/components/responses/JsonOk' }
+        '201':
+          description: Created campaign (starts in draft)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -392,7 +477,11 @@ paths:
       parameters:
         - $ref: '#/components/parameters/Id'
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Campaign
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
         '404':
           description: Campaign not found or module disabled
           content:
@@ -419,7 +508,11 @@ paths:
               properties:
                 status: { type: string, enum: [draft, active, paused, ended] }
       responses:
-        '200': { $ref: '#/components/responses/JsonOk' }
+        '200':
+          description: Updated campaign
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -430,6 +523,128 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: Invalid status transition (ended campaigns are terminal)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/ads/inventory:
+    get:
+      tags: [advertising]
+      summary: List ad inventory slots
+      operationId: listAdInventory
+      parameters:
+        - name: kind
+          in: query
+          schema: { type: string }
+        - name: active
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Inventory list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inventory:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdInventory' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+    post:
+      tags: [advertising]
+      summary: Create an ad inventory slot (operator role)
+      operationId: createAdInventory
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, label]
+              properties:
+                kind: { type: string }
+                bus_id: { type: string, format: uuid }
+                label: { type: string }
+      responses:
+        '201':
+          description: Created inventory slot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdInventory' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '422':
+          description: bus_id does not reference a known vehicle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/ads/placements:
+    get:
+      tags: [advertising]
+      summary: List ad placements
+      operationId: listAdPlacements
+      parameters:
+        - name: campaign_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: inventory_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Placement list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placements:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdPlacement' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+    post:
+      tags: [advertising]
+      summary: >-
+        Book a placement (operator role). Enforced: committed placement cost
+        + this cost must not exceed the campaign budget (409
+        budget_exceeded); no overlapping booking of the same inventory slot
+        (409 slot_already_booked); ended campaigns cannot take placements.
+      operationId: createAdPlacement
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaign_id, inventory_id, starts_at, ends_at, cost_minor]
+              properties:
+                campaign_id: { type: string, format: uuid }
+                inventory_id: { type: string, format: uuid }
+                starts_at: { type: string, format: date-time }
+                ends_at: { type: string, format: date-time }
+                cost_minor: { type: integer, minimum: 0 }
+      responses:
+        '201':
+          description: Booked placement
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdPlacement' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Campaign or inventory slot not found, or module disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: budget_exceeded, slot_already_booked, or campaign ended
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -464,7 +679,13 @@ components:
       properties:
         id: { type: string, format: uuid }
         rider_sub: { type: string, description: Always the authenticated JWT subject }
-        amount_minor: { type: integer }
+        amount_minor: { type: integer, description: Requested fare }
+        charged_minor:
+          type: integer
+          nullable: true
+          description: >-
+            Amount actually debited after daily fare capping (null on
+            pre-capping rows — treat as equal to amount_minor)
         currency: { type: string }
         mojaloop_transfer_id: { type: string }
         tb_transfer_id: { type: string }
@@ -478,9 +699,41 @@ components:
         kind: { type: string, enum: [h2-sale, h2-purchase, energy-export] }
         quantity_kg: { type: number }
         price_minor: { type: integer }
-        status: { type: string, enum: [proposed, executed, failed] }
+        status: { type: string, enum: [proposed, executed, failed, cancelled] }
         tb_transfer_id: { type: string, description: TigerBeetle transfer id (set once executed) }
         idempotency_key: { type: string }
+        created_at: { type: string, format: date-time }
+    Campaign:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        advertiser: { type: string }
+        budget_minor: { type: integer }
+        committed_minor: { type: integer, description: Sum of booked placement costs }
+        remaining_budget_minor: { type: integer, description: budget_minor − committed_minor }
+        status: { type: string, enum: [draft, active, paused, ended] }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    AdInventory:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, description: Slot kind (e.g. side-panel, interior-screen) }
+        bus_id: { type: string, format: uuid }
+        label: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    AdPlacement:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        campaign_id: { type: string, format: uuid }
+        inventory_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        cost_minor: { type: integer }
         created_at: { type: string, format: date-time }
     GovKPIs:
       type: object
