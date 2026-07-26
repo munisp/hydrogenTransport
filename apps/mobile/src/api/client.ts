@@ -93,7 +93,7 @@ export class ApiError extends Error {
 
 let accessToken: string | undefined;
 
-/** Set after OIDC login (wired in a later iteration of the auth flow). */
+/** Wired by src/auth/keycloak.ts on login/refresh/logout. */
 export function setAccessToken(token: string | undefined): void {
   accessToken = token;
 }
@@ -139,9 +139,19 @@ function unwrapList<T>(payload: unknown): T[] {
   return [];
 }
 
+/** citizen-api GET /v1/mobile/config — bootstrap config for this app. */
+export interface MobileConfig {
+  api_version: string;
+  /** Module toggle states (passenger-pwa, mobile-app, demand-responsive, ...). */
+  modules: Record<string, boolean>;
+}
+
 // ---- Citizen endpoints (citizen-api) ------------------------------------------
 
 export const api = {
+  /** Bootstrap: module states for the app (drives tab visibility). */
+  getMobileConfig: () => apiFetch<MobileConfig>("/api/citizen/v1/mobile/config"),
+
   listStops: () =>
     apiFetch<unknown>("/api/citizen/v1/passenger/stops").then((r) => unwrapList<Stop>(r)),
   listArrivals: (stopId: string) =>

@@ -49,9 +49,18 @@ const TAB_ICONS: Record<string, IoniconName> = {
  * disappears from navigation. The toggle map polls every 30s, fail-closed.
  */
 function Tabs() {
+  // Bootstrap config (GET /v1/mobile/config on citizen-api) carries the
+  // module toggle states for this app; fall back to the raw toggle feed when
+  // the gateway route is unreachable (fail-closed either way).
   const toggles = useQuery({
-    queryKey: ["toggles"],
-    queryFn: api.getToggles,
+    queryKey: ["mobile-config"],
+    queryFn: async (): Promise<Record<string, boolean>> => {
+      try {
+        return (await api.getMobileConfig()).modules ?? {};
+      } catch {
+        return api.getToggles();
+      }
+    },
     refetchInterval: config.togglesPollMs,
   });
   const t = toggles.data ?? {};

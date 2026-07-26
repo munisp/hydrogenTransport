@@ -12,6 +12,7 @@ import {
 import { useMutation } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "../api/client";
+import * as auth from "../auth/keycloak";
 import { colors } from "../theme";
 import { Button, Card, ErrorNotice, Screen, ScreenTitle } from "../components/ui";
 
@@ -50,6 +51,7 @@ const PERSONAS: PersonaDef[] = [
 
 type Stage =
   | { kind: "select" }
+  | { kind: "signin" }
   | { kind: "form"; persona: PersonaDef }
   | { kind: "pending"; persona: PersonaDef; email: string };
 
@@ -68,8 +70,11 @@ export default function OnboardingScreen({ onDone }: { onDone: () => void }) {
           {stage.kind === "select" ? (
             <PersonaSelect
               onSelect={(persona) => setStage({ kind: "form", persona })}
+              onSignIn={() => setStage({ kind: "signin" })}
               onSkip={onDone}
             />
+          ) : stage.kind === "signin" ? (
+            <SignInForm onBack={() => setStage({ kind: "select" })} onDone={onDone} />
           ) : stage.kind === "form" ? (
             <PersonaForm
               persona={stage.persona}
@@ -92,9 +97,11 @@ export default function OnboardingScreen({ onDone }: { onDone: () => void }) {
 
 function PersonaSelect({
   onSelect,
+  onSignIn,
   onSkip,
 }: {
   onSelect: (p: PersonaDef) => void;
+  onSignIn: () => void;
   onSkip: () => void;
 }) {
   return (
@@ -125,7 +132,68 @@ function PersonaSelect({
           <Ionicons name="chevron-forward" size={16} color={colors.textFaint} />
         </Pressable>
       ))}
+      <Button label="I already have an account — sign in" variant="secondary" onPress={onSignIn} />
       <Button label="Browse as guest for now" variant="secondary" onPress={onSkip} />
+    </View>
+  );
+}
+
+/**
+ * Existing-account sign-in: authenticates against the Keycloak realm token
+ * endpoint and wires the access token into the API client (setAccessToken)
+ * so authed endpoints (DRT, carbon, driver jobs) stop 401ing.
+ */
+function SignInForm({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const valid = EMAIL_RE.test(email.trim()) && password.length > 0;
+
+  const submit = useMutation({
+    mutationFn: () => auth.login(email, password),
+    onSuccess: onDone,
+  });
+
+  return (
+    <View>
+      <Pressable onPress={onBack} accessibilityRole="button" style={styles.backRow}>
+        <Ionicons name="chevron-back" size={16} color={colors.textMuted} />
+        <Text style={styles.backText}>Back</Text>
+      </Pressable>
+      <ScreenTitle title="Sign in" subtitle="Use the email and password from your H2Fleet account" />
+
+      <Card>
+        <Text style={styles.inputLabel}>Email</Text>
+        <TextInput
+          style={styles.input}
+          value={email}
+          onChangeText={setEmail}
+          placeholder="you@example.org"
+          placeholderTextColor={colors.textFaint}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoComplete="email"
+        />
+        <Text style={styles.inputLabel}>Password</Text>
+        <TextInput
+          style={styles.input}
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Your password"
+          placeholderTextColor={colors.textFaint}
+          secureTextEntry
+          autoComplete="current-password"
+        />
+      </Card>
+
+      {submit.isError ? <ErrorNotice error={submit.error} /> : null}
+
+      <Button
+        label="Sign in"
+        busy={submit.isPending}
+        disabled={!valid}
+        onPress={() => submit.mutate()}
+      />
     </View>
   );
 }
@@ -166,9 +234,21 @@ function PersonaForm({
         org: org.trim(),
       });
     },
-    onSuccess: () => {
-      if (persona.instant) onCitizenDone();
-      else onSubmitted(email.trim());
+    onSuccess: async () => {
+      if (persona.instant) {
+        // Sign straight in with the just-created credentials so authed
+        // endpoints (DRT, carbon credits) work from the first screen. If
+        // the IdP is momentarily unreachable the account still exists and
+        // the user can sign in manually.
+        try {
+          await auth.login(email.trim(), password);
+        } catch {
+          /* fall through to manual sign-in */
+        }
+        onCitizenDone();
+      } else {
+        onSubmitted(email.trim());
+      }
     },
   });
 
