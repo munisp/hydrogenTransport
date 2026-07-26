@@ -20,7 +20,7 @@ req GET "/api/citizen/v1/passenger/journey?from=Central&to=Riverside" "$CIT"
 expect_status 200 "plan journey via passenger API"
 
 drt="$(req POST /api/citizen/v1/drt/requests "$CIT" \
-  '{"pickup": "POINT(14.42 50.08)", "dropoff": "POINT(14.46 50.10)", "pax": 1}')"
+  '{"pickup": {"lat": 50.08, "lon": 14.42}, "dropoff": {"lat": 50.10, "lon": 14.46}, "pickup_label": "Depot", "dropoff_label": "Central Station", "passengers": 1}')"
 expect_status 201 "POST /api/citizen/v1/drt/requests"
 drt_id="$(echo "$drt" | jq -r '.id // empty')"
 [ -n "$drt_id" ] && ok "DRT request created ($drt_id)" || bad "DRT id missing"

@@ -9,6 +9,14 @@ Env:
   PWA_ORIGIN         rendered into ${{PWA_ORIGIN:=...}} placeholders
   OPENAPPSEC_MODE    "detect" or "prevent" — rendered into the openappsec
                      global rule (prod sets "prevent")
+  KEYCLOAK_SERVICES_CLIENT_SECRET
+                     required — rendered into the openid-connect client_secret
+                     placeholders; APISIX only expands ${{VAR}} in config.yaml,
+                     never in etcd-pushed route objects.
+  H2_PARTNER_API_KEY optional — rendered into the data-partner key-auth
+                     consumer. When unset the placeholder consumer is NOT
+                     pushed (fail-closed: no partner access) instead of
+                     publishing the REPLACE_ME placeholder as a working key.
 
 Runs in the apisix-etcd-sync one-shot (python:3.12-alpine + pyyaml).
 """
@@ -30,17 +38,53 @@ SRC = "/src/apisix.yaml"
 def load():
     with open(SRC, encoding="utf-8") as fh:
         text = fh.read()
-    # Render the two env placeholders the standalone file uses; APISIX only
+    # Render the env placeholders the standalone file uses; APISIX only
     # expands ${{VAR}} in config.yaml, not in etcd-pushed objects, so the sync
     # job must substitute before pushing.
     pwa_origin = os.environ.get("PWA_ORIGIN", "https://app.h2fleet.example.com")
     text = text.replace("${{PWA_ORIGIN:=http://localhost:3000}}", pwa_origin)
+    # openid-connect client_secret on every route: required — pushing the
+    # REPLACE_ME placeholder would leave the gateway with a broken (and
+    # publicly known) secret value.
+    kc_secret = os.environ.get("KEYCLOAK_SERVICES_CLIENT_SECRET")
+    if not kc_secret:
+        raise RuntimeError(
+            "KEYCLOAK_SERVICES_CLIENT_SECRET is required: refusing to push routes "
+            "with the REPLACE_ME openid-connect client_secret placeholder"
+        )
+    text = text.replace(
+        "${{KEYCLOAK_SERVICES_CLIENT_SECRET:=REPLACE_ME_VIA_KEYCLOAK_SERVICES_CLIENT_SECRET}}",
+        kc_secret,
+    )
     doc = yaml.safe_load(text)
+    # data-partner key-auth consumer: replace the placeholder key from env, or
+    # drop the consumer entirely (fail-closed) when no key was provisioned —
+    # never publish REPLACE_ME_PROVISION_PER_PARTNER as a working credential.
+    partner_key = os.environ.get("H2_PARTNER_API_KEY")
+    consumers = doc.get("consumers", []) or []
+    kept = []
+    for consumer in consumers:
+        key = (consumer.get("plugins", {}).get("key-auth") or {}).get("key")
+        if key == "REPLACE_ME_PROVISION_PER_PARTNER":
+            if not partner_key:
+                print(
+                    f"H2_PARTNER_API_KEY unset: dropping consumer {consumer.get('username')!r} "
+                    "(no partner access until a key is provisioned)",
+                    flush=True,
+                )
+                continue
+            consumer["plugins"]["key-auth"]["key"] = partner_key
+        kept.append(consumer)
+    doc["consumers"] = kept
     if os.environ.get("OPENAPPSEC_MODE"):
         for rule in doc.get("global_rules", []):
             oas = rule.get("plugins", {}).get("openappsec")
             if isinstance(oas, dict):
                 oas["mode"] = os.environ["OPENAPPSEC_MODE"]
+    # Safety net: nothing pushed to etcd may still contain a placeholder.
+    rendered = json.dumps(doc)
+    if "REPLACE_ME" in rendered or "${{" in rendered:
+        raise RuntimeError("unsubstituted placeholders remain after rendering; refusing to push")
     return doc
 
 

@@ -466,6 +466,12 @@ services:
       APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:-h2fleet-admin-key-change-me}
       PWA_ORIGIN: ${PWA_ORIGIN:-https://app.h2fleet.example.com}
       OPENAPPSEC_MODE: ${OPENAPPSEC_MODE:-prevent}
+      # Required: rendered into the openid-connect client_secret placeholders
+      # (sync job refuses to push without it). Optional H2_PARTNER_API_KEY
+      # provisions the data-partner key-auth consumer; unset => consumer
+      # dropped (fail-closed, no partner access).
+      KEYCLOAK_SERVICES_CLIENT_SECRET: ${KEYCLOAK_SERVICES_CLIENT_SECRET:?set_in_.env}
+      H2_PARTNER_API_KEY: ${H2_PARTNER_API_KEY:-}
     volumes:
       - ../infra/apisix/apisix.yaml:/src/apisix.yaml:ro
       - ../infra/prod/apisix/sync_routes.py:/src/sync_routes.py:ro

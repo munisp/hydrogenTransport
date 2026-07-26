@@ -62,7 +62,8 @@ scenarios:
           body: { email: "s4.citizen@example.org", display_name: "S4 Citizen" } }
       - { service: citizen-api, method: GET, path: /v1/passenger/journey }
       - { service: citizen-api, method: POST, path: /v1/drt/requests,
-          body: { pickup: "POINT(14.42 50.08)", dropoff: "POINT(14.46 50.10)", pax: 1 } }
+          body: { pickup: { lat: 50.08, lon: 14.42 }, dropoff: { lat: 50.10, lon: 14.46 },
+                  pickup_label: "Depot", dropoff_label: "Central Station", passengers: 1 } }
       - { service: citizen-api, method: GET, path: "/v1/drt/requests/{id}" }
       - { service: infra-api, method: GET, path: /v1/dispatch/jobs }
       - { service: infra-api, method: POST, path: "/v1/dispatch/jobs/{id}/accept" }
