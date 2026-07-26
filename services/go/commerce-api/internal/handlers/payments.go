@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,10 +22,14 @@ import (
 )
 
 // Payment mirrors commerce.fare_payments (fare-payments module).
+// AmountMinor is the requested fare; ChargedMinor is what was actually
+// debited after daily fare capping (null = uncapped legacy row, charged ==
+// amount_minor).
 type Payment struct {
 	ID                 string    `json:"id"`
 	RiderSub           string    `json:"rider_sub"`
 	AmountMinor        int64     `json:"amount_minor"`
+	ChargedMinor       *int64    `json:"charged_minor,omitempty"`
 	Currency           string    `json:"currency"`
 	MojaloopTransferID *string   `json:"mojaloop_transfer_id,omitempty"`
 	TBTransferID       *string   `json:"tb_transfer_id,omitempty"`
@@ -33,14 +38,40 @@ type Payment struct {
 	CreatedAt          time.Time `json:"created_at"`
 }
 
-const paymentCols = `id, rider_sub, amount_minor, currency, mojaloop_transfer_id,
+const paymentCols = `id, rider_sub, amount_minor, charged_minor, currency, mojaloop_transfer_id,
 	tb_transfer_id, idempotency_key, status, created_at`
 
 func scanPayment(row pgx.Row) (Payment, error) {
 	var p Payment
-	err := row.Scan(&p.ID, &p.RiderSub, &p.AmountMinor, &p.Currency,
+	err := row.Scan(&p.ID, &p.RiderSub, &p.AmountMinor, &p.ChargedMinor, &p.Currency,
 		&p.MojaloopTransferID, &p.TBTransferID, &p.IdempotencyKey, &p.Status, &p.CreatedAt)
 	return p, err
+}
+
+// effectiveCharged returns the debited amount (charged_minor when set, else
+// amount_minor for pre-capping rows).
+func (p Payment) effectiveCharged() int64 {
+	if p.ChargedMinor != nil {
+		return *p.ChargedMinor
+	}
+	return p.AmountMinor
+}
+
+// dailyCapMinor returns the per-rider daily fare cap in minor units
+// (FARE_DAILY_CAP_MINOR, default €8.00; 0 disables capping). Fare capping
+// (BUSINESS_LOGIC_AUDIT §16): a rider never pays more than the cap per UTC
+// day — once today's settled charges reach the cap, further rides settle at
+// 0 (a capped free ride is still recorded with its requested fare).
+func dailyCapMinor(getenv func(string) string) int64 {
+	raw := getenv("FARE_DAILY_CAP_MINOR")
+	if raw == "" {
+		return 800
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return 800
+	}
+	return n
 }
 
 type createPaymentRequest struct {
@@ -57,8 +88,9 @@ type createPaymentRequest struct {
 // header required). Flow: insert fare_payments row (idempotent on the key) →
 // TigerBeetle transfer rider wallet → operator revenue → publish
 // fare.payment.initiated / fare.payment.settled (SPEC §3.3). Optionally runs a
-// Mojaloop transfer (real HTTP POST when MOJALOOP_ENDPOINT is set, simulated
-// otherwise, SPEC §4).
+// Mojaloop transfer (real HTTP POST when MOJALOOP_ENDPOINT is set; without an
+// endpoint the payment fails closed as mojaloop_unavailable unless the
+// explicit dev opt-in H2_SIMULATED_MOJALOOP=true is set, SPEC §4).
 func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		idemKey := r.Header.Get("Idempotency-Key")
@@ -93,11 +125,29 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		}
 		req.RiderSub = subject
 
+		// Fare capping: compute today's already-settled spend for the rider
+		// and clamp the charge to the remaining daily allowance.
+		charge := req.AmountMinor
+		var spentToday int64
+		if cap := dailyCapMinor(os.Getenv); cap > 0 {
+			if err := h.db.QueryRow(r.Context(), `
+				SELECT COALESCE(sum(COALESCE(charged_minor, amount_minor)),0)
+				FROM commerce.fare_payments
+				WHERE rider_sub = $1 AND status = 'settled'
+				  AND created_at >= date_trunc('day', now())`, req.RiderSub).Scan(&spentToday); err != nil {
+				h.internal(w, "compute daily fare spend", err)
+				return
+			}
+			if remaining := cap - spentToday; remaining < charge {
+				charge = max(remaining, 0)
+			}
+		}
+
 		paymentID := uuid.NewString()
 		_, err := h.db.Exec(r.Context(), `
-			INSERT INTO commerce.fare_payments (id, rider_sub, amount_minor, currency, status, idempotency_key)
-			VALUES ($1, $2, $3, $4, 'initiated', $5)`,
-			paymentID, req.RiderSub, req.AmountMinor, req.Currency, idemKey)
+			INSERT INTO commerce.fare_payments (id, rider_sub, amount_minor, charged_minor, currency, status, idempotency_key)
+			VALUES ($1, $2, $3, $4, $5, 'initiated', $6)`,
+			paymentID, req.RiderSub, req.AmountMinor, charge, req.Currency, idemKey)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on idempotency_key
 			existing, qerr := scanPayment(h.db.QueryRow(r.Context(),
@@ -122,10 +172,17 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		}
 
 		event := map[string]any{
-			"payment_id":   paymentID,
-			"rider_sub":    req.RiderSub,
-			"amount_minor": req.AmountMinor,
-			"currency":     req.Currency,
+			"payment_id":    paymentID,
+			"rider_sub":     req.RiderSub,
+			"amount_minor":  req.AmountMinor,
+			"charged_minor": charge,
+			"currency":      req.Currency,
+		}
+		if charge < req.AmountMinor {
+			event["fare_cap"] = map[string]any{
+				"applied":           true,
+				"spent_today_minor": spentToday,
+			}
 		}
 		if err := h.pub.Publish(r.Context(), "fare.payment.initiated", event); err != nil {
 			h.log.Error("failed to publish fare.payment.initiated", zap.Error(err))
@@ -134,32 +191,36 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		// Ledger transfer: rider wallet (1xxx, persisted per-rider mapping) →
 		// operator revenue (2xxx). The TigerBeetle transfer ID is derived
 		// deterministically from the Idempotency-Key so client retries of the
-		// same request can never double-post the transfer.
-		account, err := h.riderAccount(r.Context(), req.RiderSub)
-		if err != nil {
-			h.internal(w, "ensure rider ledger account", err)
-			return
-		}
+		// same request can never double-post the transfer. A fully capped ride
+		// (charge == 0) settles without a ledger posting.
 		status := "settled"
 		var tbID *string
 		insufficientFunds := false
-		transferID, err := h.ledger.Transfer(
-			ledger.DeterministicTransferID(idemKey), account, ledger.OperatorRevenueAccount,
-			uint64(req.AmountMinor), ledger.CodeFare)
-		if err != nil {
-			h.log.Error("ledger transfer failed", zap.String("payment", paymentID), zap.Error(err))
-			status = "failed"
-			// An unfunded (but provisioned) rider wallet is a client-visible
-			// funding problem, not an upstream failure: mapped to 402 below.
-			insufficientFunds = errors.Is(err, ledger.ErrInsufficientFunds)
-		} else {
-			tbID = &transferID
+		if charge > 0 {
+			account, err := h.riderAccount(r.Context(), req.RiderSub)
+			if err != nil {
+				h.internal(w, "ensure rider ledger account", err)
+				return
+			}
+			transferID, err := h.ledger.Transfer(
+				ledger.DeterministicTransferID(idemKey), account, ledger.OperatorRevenueAccount,
+				uint64(charge), ledger.CodeFare)
+			if err != nil {
+				h.log.Error("ledger transfer failed", zap.String("payment", paymentID), zap.Error(err))
+				status = "failed"
+				// An unfunded (but provisioned) rider wallet is a client-visible
+				// funding problem, not an upstream failure: mapped to 402 below.
+				insufficientFunds = errors.Is(err, ledger.ErrInsufficientFunds)
+			} else {
+				tbID = &transferID
+			}
 		}
 
 		// Optional Mojaloop leg (full parties → quotes → transfers flow via
-		// internal/mojaloop when MOJALOOP_ENDPOINT is set; simulated fallback
-		// otherwise). A Mojaloop failure never fabricates a transfer id — the
-		// payment is marked with the classified mojaloop_* status instead.
+		// internal/mojaloop when MOJALOOP_ENDPOINT is set; fail-closed
+		// otherwise unless H2_SIMULATED_MOJALOOP=true). A Mojaloop failure
+		// never fabricates a transfer id — the payment is marked with the
+		// classified mojaloop_* status instead.
 		var mlID *string
 		var mlErr error
 		if req.UseMojaloop && status == "settled" {
@@ -219,11 +280,11 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		}
 
 		// Loyalty accrual (loyalty-marketplace module): 1 point per full €1
-		// (100 minor units) of settled fare. Idempotent on the payment id via
-		// commerce.loyalty_ledger.ref_id, so payment retries never double
-		// award. Accrual failure must not fail an already-settled payment —
-		// it is logged for reconciliation.
-		if err := h.accrueLoyaltyPoints(r.Context(), paymentID, req.RiderSub, req.AmountMinor); err != nil {
+		// (100 minor units) of settled fare actually charged after capping.
+		// Idempotent on the payment id via commerce.loyalty_ledger.ref_id, so
+		// payment retries never double award. Accrual failure must not fail an
+		// already-settled payment — it is logged for reconciliation.
+		if err := h.accrueLoyaltyPoints(r.Context(), paymentID, req.RiderSub, charge); err != nil {
 			h.log.Error("loyalty accrual failed",
 				zap.String("payment", paymentID), zap.Error(err))
 		}
@@ -275,12 +336,22 @@ func (h *Handler) riderAccount(ctx context.Context, riderSub string) (uint64, er
 // runs the full FSPIOP payer flow (GET /parties → POST /quotes →
 // POST /transfers) via internal/mojaloop, idempotent on the request's
 // Idempotency-Key, and returns the real switch transfer id. Without an
-// endpoint it returns a clearly-labelled simulated id (SPEC §4 simulated
-// fallback).
+// endpoint it fails closed (classified mojaloop_unavailable): a fabricated
+// transfer id is only ever returned behind the explicit dev opt-in
+// H2_SIMULATED_MOJALOOP=true (SPEC §4 simulated fallback, env-gated), and
+// even then it is clearly labelled.
 func (h *Handler) mojaloopTransfer(r *http.Request, endpoint, paymentID, idemKey string, req createPaymentRequest) (string, error) {
 	if endpoint == "" {
+		if envOr("H2_SIMULATED_MOJALOOP", "") != "true" {
+			return "", &mojaloop.Error{
+				Op:      "transfer",
+				Kind:    mojaloop.KindUnavailable,
+				Message: "MOJALOOP_ENDPOINT is not configured (set H2_SIMULATED_MOJALOOP=true to opt into the simulated dev transfer)",
+			}
+		}
 		id := "ml-simulated-" + uuid.NewString()
-		h.log.Info("mojaloop transfer simulated", zap.String("payment", paymentID), zap.String("transfer_id", id))
+		h.log.Warn("mojaloop transfer SIMULATED (H2_SIMULATED_MOJALOOP=true — no real switch transfer happened)",
+			zap.String("payment", paymentID), zap.String("transfer_id", id))
 		return id, nil
 	}
 	client, err := mojaloop.New(mojaloop.Config{
@@ -323,6 +394,87 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// RefundPayment handles POST /v1/payments/{id}/refund (Keycloak JWT,
+// operator). Full refund of a settled payment: reversal transfer operator
+// revenue (2001) → rider wallet (1xxx) for the charged amount, status →
+// 'refunded' with refunded_at stamped (migration 0005 S11), the loyalty
+// points accrued for the payment are clawed back, and fare.payment.refunded
+// is published. The reversal transfer id is deterministic per payment, so a
+// retried refund cannot double-refund. Fully capped (0-charged) payments are
+// refunded without a ledger posting.
+func (h *Handler) RefundPayment(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	p, err := scanPayment(h.db.QueryRow(r.Context(), `
+		SELECT `+paymentCols+` FROM commerce.fare_payments WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "payment not found"})
+		return
+	}
+	if err != nil {
+		h.internal(w, "load payment for refund", err)
+		return
+	}
+	if p.Status == "refunded" {
+		writeJSON(w, http.StatusOK, p) // idempotent replay
+		return
+	}
+	if p.Status != "settled" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "only settled payments can be refunded (status " + p.Status + ")"})
+		return
+	}
+
+	charged := p.effectiveCharged()
+	var tbID *string
+	if charged > 0 {
+		account, err := h.riderAccount(r.Context(), p.RiderSub)
+		if err != nil {
+			h.internal(w, "load rider ledger account", err)
+			return
+		}
+		transferID, err := h.ledger.Transfer(
+			ledger.DeterministicTransferID("refund:"+p.ID),
+			ledger.OperatorRevenueAccount, account, uint64(charged), ledger.CodeFare)
+		if err != nil {
+			h.internal(w, "refund ledger transfer", err)
+			return
+		}
+		tbID = &transferID
+	}
+
+	p, err = scanPayment(h.db.QueryRow(r.Context(), `
+		UPDATE commerce.fare_payments SET status = 'refunded', refunded_at = now()
+		WHERE id = $1 AND status = 'settled'
+		RETURNING `+paymentCols, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Lost a refund race — the other refund won; return its outcome.
+		p, err = scanPayment(h.db.QueryRow(r.Context(), `
+			SELECT `+paymentCols+` FROM commerce.fare_payments WHERE id = $1`, id))
+	}
+	if err != nil {
+		h.internal(w, "mark payment refunded", err)
+		return
+	}
+
+	// Loyalty clawback: reverse the points accrued for this payment
+	// (idempotent via ledger ref_id; balance never goes below 0).
+	if err := h.clawbackLoyaltyPoints(r.Context(), p.ID, p.RiderSub, charged); err != nil {
+		h.log.Error("loyalty clawback failed", zap.String("payment", p.ID), zap.Error(err))
+	}
+
+	if err := h.pub.Publish(r.Context(), "fare.payment.refunded", map[string]any{
+		"payment_id":     p.ID,
+		"rider_sub":      p.RiderSub,
+		"amount_minor":   charged,
+		"currency":       p.Currency,
+		"tb_transfer_id": tbID,
+		"refunded_at":    time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		h.log.Error("failed to publish fare.payment.refunded", zap.Error(err))
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 // GetPayment handles GET /v1/payments/{id} (Keycloak JWT, status polling).

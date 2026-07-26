@@ -82,6 +82,40 @@ func (h *Handler) accrueLoyaltyPoints(ctx context.Context, paymentID, riderSub s
 	return tx.Commit(ctx)
 }
 
+// clawbackLoyaltyPoints reverses the fare-accrual award for a refunded
+// payment: a negative ledger entry idempotent on "refund:<payment_id>", and
+// a balance decrement floored at 0 (points may already have been spent —
+// the ledger keeps the exact audit trail either way).
+func (h *Handler) clawbackLoyaltyPoints(ctx context.Context, paymentID, riderSub string, chargedMinor int64) error {
+	points := chargedMinor / 100
+	if points <= 0 || riderSub == "" {
+		return nil
+	}
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO commerce.loyalty_ledger (id, rider_sub, delta, reason, ref_id)
+		VALUES ($1, $2, $3, 'refund_clawback', $4)
+		ON CONFLICT (ref_id) DO NOTHING`,
+		uuid.NewString(), riderSub, -points, "refund:"+paymentID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE commerce.loyalty_accounts
+			SET points = GREATEST(0, points - $2), updated_at = now()
+			WHERE rider_sub = $1`, riderSub, points); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 // Offer is a marketplace reward offer.
 type Offer struct {
 	ID          string    `json:"id"`
