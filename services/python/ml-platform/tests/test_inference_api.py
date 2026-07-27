@@ -53,7 +53,7 @@ def test_models_listing(client):
     assert r.status_code == 200
     body = r.json()
     for model in ("maintenance_lstm", "demand_forecaster", "leak_autoencoder",
-                  "fleet_gcn", "carbon_forecaster"):
+                  "ev_thermal_autoencoder", "fleet_gcn", "carbon_forecaster"):
         assert body[model]["loaded"] is True
         assert body[model]["champion"]["version"]
         assert body[model]["champion"]["n_params"] <= 200_000
@@ -104,6 +104,36 @@ def test_leak_score(client):
     assert body["scores"][1] > body["scores"][0]  # leak scores higher
     assert body["is_anomaly"][1] is True
     assert body["is_anomaly"][0] is False
+    assert body["domain"] == "h2"  # default domain, backward compatible
+
+
+def test_leak_score_ev_thermal_domain(client):
+    # [cell_temp_c, cell_voltage_v, pack_current_a, ambient_c]
+    normal = [[26.0, 3.62, 40.0, 12.0]]
+    runaway = [[110.0, 2.90, 350.0, 12.0]]
+    r = client.post("/v1/ml/leak/score",
+                    json={"subject": "EV-003", "domain": "ev_thermal",
+                          "readings": normal + runaway})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["domain"] == "ev_thermal"
+    assert body["model_version"]
+    assert len(body["scores"]) == 2
+    assert body["scores"][1] > body["scores"][0]  # thermal event scores higher
+    assert body["is_anomaly"][1] is True
+    assert body["is_anomaly"][0] is False
+
+
+def test_leak_score_domain_validation(client):
+    # ev_thermal rows are 4-wide; h2 rows are 8-wide.
+    r = client.post("/v1/ml/leak/score",
+                    json={"subject": "EV-003", "domain": "ev_thermal",
+                          "readings": [[30.0, 20.0, 6.0, 35.0, 350.0, 0.02, 0.05, 12.0]]})
+    assert r.status_code == 422
+    r = client.post("/v1/ml/leak/score",
+                    json={"subject": "X", "domain": "cng",
+                          "readings": [[1.0, 2.0, 3.0, 4.0]]})
+    assert r.status_code == 422
 
 
 def test_fleet_propagate(client):
