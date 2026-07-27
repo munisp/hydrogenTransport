@@ -1,9 +1,15 @@
-"""Anomaly autoencoder over H2 leak-sensor vectors.
+"""Anomaly autoencoder over safety-domain sensor vectors.
 
-Input vector (LEAK_SENSOR_FEATURES): h2 ppm readings across the tank bay /
-fuel-cell bay / cabin / station dispenser zones plus pressure and flow-rate
-deltas. Trained on normal-operation vectors only; reconstruction error at
-inference is the leak anomaly score. Symmetric dense AE, ~2k params.
+Two domains share the same symmetric dense-AE architecture (reconstruction
+error = anomaly score, trained on normal-operation vectors only):
+
+* ``h2``        — LEAK_SENSOR_FEATURES: h2 ppm readings across the tank bay /
+  fuel-cell bay / cabin / station dispenser zones plus pressure and flow-rate
+  deltas (model name ``leak_autoencoder``, ~0.6k params).
+* ``ev_thermal`` — EV_THERMAL_FEATURES: battery-pack telemetry (cell
+  temperature / cell voltage / pack current / ambient) scored for
+  thermal-runaway precursors (model name ``ev_thermal_autoencoder``,
+  n_features=4 via the artifact's model_config).
 """
 
 from __future__ import annotations
@@ -21,6 +27,28 @@ LEAK_SENSOR_FEATURES: list[str] = [
     "flow_rate_kg_per_min",
     "ambient_temp_c",
 ]
+
+#: ev_thermal anomaly domain: battery-pack telemetry vector. Mirrors the
+#: leak_autoencoder feature_schema.json conventions (feature list + train
+#: stats + drift baseline + extra.anomaly_threshold).
+EV_THERMAL_FEATURES: list[str] = [
+    "cell_temp_c",
+    "cell_voltage_v",
+    "pack_current_a",
+    "ambient_c",
+]
+
+#: anomaly domain -> model name (serving + endpoint validation share this).
+ANOMALY_DOMAIN_MODELS: dict[str, str] = {
+    "h2": "leak_autoencoder",
+    "ev_thermal": "ev_thermal_autoencoder",
+}
+
+#: anomaly domain -> feature list.
+ANOMALY_DOMAIN_FEATURES: dict[str, list[str]] = {
+    "h2": LEAK_SENSOR_FEATURES,
+    "ev_thermal": EV_THERMAL_FEATURES,
+}
 
 
 class LeakAutoencoder(nn.Module):

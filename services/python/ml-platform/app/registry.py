@@ -27,6 +27,9 @@ MODEL_CLASSES = {
     "maintenance_lstm": MaintenanceLSTM,
     "demand_forecaster": DemandForecaster,
     "leak_autoencoder": LeakAutoencoder,
+    # ev_thermal safety domain pack: same AE architecture, 4-feature battery
+    # telemetry input (n_features carried in the artifact's model_config).
+    "ev_thermal_autoencoder": LeakAutoencoder,
     "fleet_gcn": FleetGCN,
     "carbon_forecaster": CarbonForecaster,
 }

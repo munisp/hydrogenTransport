@@ -1,4 +1,4 @@
-"""Artifact loading + CPU inference for all five models.
+"""Artifact loading + CPU inference for all six models.
 
 Loads champion (and challenger when a registry entry exists) per model at
 startup from MODEL_ARTIFACTS_DIR. Every predict path:
@@ -18,7 +18,7 @@ import threading
 import numpy as np
 import torch
 
-from models import normalize_adjacency
+from models import ANOMALY_DOMAIN_MODELS, normalize_adjacency
 from models.maintenance_lstm import COMPONENTS
 
 from .ab import assign_variant
@@ -149,14 +149,21 @@ class ModelServer:
                              for i, r in enumerate(riders)],
                 "variant": variant, "model_version": bundle.version}
 
-    def leak_score(self, subject: str, rows: np.ndarray) -> dict:
-        bundle, variant = self._pick("leak_autoencoder", subject)
-        self.monitors["leak_autoencoder"].observe(rows)
+    def leak_score(self, subject: str, rows: np.ndarray, domain: str = "h2") -> dict:
+        """Anomaly-domain scoring. domain='h2' -> leak_autoencoder (default,
+        unchanged); domain='ev_thermal' -> ev_thermal_autoencoder."""
+        model = ANOMALY_DOMAIN_MODELS.get(domain)
+        if model is None:
+            raise ValueError(f"unknown anomaly domain {domain!r} "
+                             f"(expected one of {sorted(ANOMALY_DOMAIN_MODELS)})")
+        bundle, variant = self._pick(model, subject)
+        self.monitors[model].observe(rows)
         xn = bundle.normalize(rows)
         with torch.no_grad():
             scores = bundle.net.anomaly_score(torch.tensor(xn)).tolist()
         threshold = float(bundle.schema.get("extra", {}).get("anomaly_threshold", 1.0))
-        return {"scores": [round(float(s), 5) for s in scores],
+        return {"domain": domain,
+                "scores": [round(float(s), 5) for s in scores],
                 "is_anomaly": [bool(s > threshold) for s in scores],
                 "threshold": threshold, "max_score": round(float(max(scores)), 5),
                 "variant": variant, "model_version": bundle.version}

@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 
 import numpy as np
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from models import (CARBON_FEATURES, DEMAND_FEATURES, GRAPH_NODE_FEATURES,
-                    LEAK_SENSOR_FEATURES, SEQ_FEATURES)
+from models import (ANOMALY_DOMAIN_FEATURES, CARBON_FEATURES, DEMAND_FEATURES,
+                    GRAPH_NODE_FEATURES, LEAK_SENSOR_FEATURES, SEQ_FEATURES)
 
 
 class MaintenanceScoreRequest(BaseModel):
@@ -63,17 +63,31 @@ class DemandForecastRequest(BaseModel):
 
 
 class LeakScoreRequest(BaseModel):
+    """Anomaly-domain scoring. domain='h2' (default) is the original h2_ppm
+    leak path; domain='ev_thermal' scores battery-pack telemetry for
+    thermal-runaway precursors (backward compatible: omitting `domain` keeps
+    the h2 contract unchanged)."""
+
     subject: str = Field("fleet", description="bus fleet_no / station name for A/B + logs")
+    domain: str = Field("h2", description="anomaly domain: h2 | ev_thermal")
     readings: list[list[float]] = Field(..., min_length=1, max_length=512)
 
-    @field_validator("readings")
+    @field_validator("domain")
     @classmethod
-    def _check(cls, r):
-        for row in r:
-            if len(row) != len(LEAK_SENSOR_FEATURES):
-                raise ValueError(f"each reading must have {len(LEAK_SENSOR_FEATURES)} values "
-                                 f"({LEAK_SENSOR_FEATURES})")
-        return r
+    def _check_domain(cls, d):
+        if d not in ANOMALY_DOMAIN_FEATURES:
+            raise ValueError(f"unknown anomaly domain {d!r} "
+                             f"(expected one of {sorted(ANOMALY_DOMAIN_FEATURES)})")
+        return d
+
+    @model_validator(mode="after")
+    def _check(self):
+        features = ANOMALY_DOMAIN_FEATURES[self.domain]
+        for row in self.readings:
+            if len(row) != len(features):
+                raise ValueError(f"each reading must have {len(features)} values "
+                                 f"for domain {self.domain!r} ({features})")
+        return self
 
 
 class FleetPropagateRequest(BaseModel):

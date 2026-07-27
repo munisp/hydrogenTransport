@@ -1,7 +1,7 @@
 """H2Fleet ml-platform inference server (port 8095).
 
-Serves the five trained models (maintenance LSTM, demand forecaster, leak
-autoencoder, fleet GCN, carbon forecaster) on CPU with:
+Serves the six trained models (maintenance LSTM, demand forecaster, leak
+autoencoder, ev_thermal autoencoder, fleet GCN, carbon forecaster) on CPU with:
 
 * champion/challenger A/B loading (registry.json + AB_SPLIT, deterministic
   per-subject assignment, variant-tagged responses and logs)
@@ -119,10 +119,11 @@ async def demand_forecast(req: DemandForecastRequest, request: Request):
           dependencies=[Depends(jwt_verifier.require_auth)])
 async def leak_score(req: LeakScoreRequest, request: Request):
     result = await asyncio.to_thread(
-        request.app.state.server.leak_score, req.subject, np.asarray(req.readings))
+        request.app.state.server.leak_score, req.subject,
+        np.asarray(req.readings), req.domain)
     if any(result["is_anomaly"]):
-        log.warning("leak anomaly subject=%s max_score=%.4f variant=%s",
-                    req.subject, result["max_score"], result["variant"])
+        log.warning("%s anomaly subject=%s max_score=%.4f variant=%s",
+                    req.domain, req.subject, result["max_score"], result["variant"])
     return result
 
 
