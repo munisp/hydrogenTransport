@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -27,6 +28,43 @@ const (
 	defaultReportDays = 30
 	maxReportDays     = 365
 )
+
+// compliancePack is one energy-domain template for the report sections that
+// differ per fleet energy vector (Wave 5). Sections that are identical for
+// every fleet (incident status/severity, MTTR, maintenance backlog, fleet
+// availability, station inventory) stay shared in buildReport.
+type compliancePack struct {
+	// LeakAging enables the unresolved-leak aging section over LeakTypes
+	// (H2 fleet: 'h2_leak'; CNG fleet: 'cng_leak').
+	LeakAging bool
+	LeakTypes []string
+	// BatteryThermal adds the battery-thermal incident section (open count +
+	// aging over 'battery_thermal' incidents) in place of leak aging.
+	BatteryThermal bool
+}
+
+// compliancePacks is the Wave-5 per-domain template map. 'h2' reproduces the
+// pre-Wave-5 report exactly (default — 100% backward compatible); battery
+// drops the H2 leak aging and adds battery-thermal incident categories;
+// diesel drops the leak sections entirely; cng keeps gas-leak aging over its
+// own incident type.
+var compliancePacks = map[string]compliancePack{
+	"h2":      {LeakAging: true, LeakTypes: []string{"h2_leak"}},
+	"battery": {BatteryThermal: true},
+	"diesel":  {},
+	"cng":     {LeakAging: true, LeakTypes: []string{"cng_leak"}},
+}
+
+// defaultComplianceDomain resolves the report domain when the caller does not
+// pass ?domain= : the fleet-config env COMPLIANCE_DOMAIN if valid, else 'h2'.
+func defaultComplianceDomain() string {
+	if d := os.Getenv("COMPLIANCE_DOMAIN"); d != "" {
+		if _, ok := compliancePacks[d]; ok {
+			return d
+		}
+	}
+	return "h2"
+}
 
 // ListComplianceReports handles GET /v1/compliance/reports.
 func (h *Handler) ListComplianceReports(w http.ResponseWriter, r *http.Request) {
@@ -74,16 +112,23 @@ func (h *Handler) GetComplianceReport(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildReport aggregates the full compliance picture over the trailing
-// `days` window: incident state, severity mix, unresolved-leak aging and
-// MTTR, maintenance-prediction backlog + open work orders, fleet
-// availability, and station inventory (BUSINESS_LOGIC_AUDIT §9: the report
-// was an incidents+stations rollup only). Every section degrades
-// independently — a failed rollup names itself in degraded instead of
-// failing the whole report.
-func (h *Handler) buildReport(ctx context.Context, days int) map[string]any {
+// `days` window: incident state, severity mix, MTTR, maintenance-prediction
+// backlog + open work orders, fleet availability, and station inventory
+// (BUSINESS_LOGIC_AUDIT §9: the report was an incidents+stations rollup
+// only). Wave 5: domain-specific sections come from the compliancePacks
+// template for `domain` (h2 = the pre-Wave-5 report, unchanged). Every
+// section degrades independently — a failed rollup names itself in degraded
+// instead of failing the whole report.
+func (h *Handler) buildReport(ctx context.Context, days int, domain string) map[string]any {
+	pack, ok := compliancePacks[domain]
+	if !ok {
+		pack = compliancePacks["h2"]
+		domain = "h2"
+	}
 	report := map[string]any{
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 		"standard":     "H2Fleet safety & compliance (SPEC §3.4 infra schema)",
+		"domain":       domain,
 		"period_days":  days,
 		"period_start": time.Now().AddDate(0, 0, -days).UTC().Format(time.RFC3339),
 	}
@@ -133,8 +178,11 @@ func (h *Handler) buildReport(ctx context.Context, days int) map[string]any {
 		}
 	}
 
-	// Unresolved-leak aging: how long open H2 leaks have been waiting.
-	{
+	// Unresolved-leak aging: how long open leaks have been waiting. Domain
+	// pack: h2 → 'h2_leak', cng → 'cng_leak'; battery/diesel packs drop this
+	// section (battery gets thermal categories below, diesel has no gas
+	// leak domain).
+	if pack.LeakAging {
 		var open int
 		var avgAgeH, oldestH *float64
 		if err := h.db.QueryRow(ctx, `
@@ -142,11 +190,34 @@ func (h *Handler) buildReport(ctx context.Context, days int) map[string]any {
 			       avg(EXTRACT(EPOCH FROM (now() - opened_at)) / 3600)::float8,
 			       max(EXTRACT(EPOCH FROM (now() - opened_at)) / 3600)::float8
 			FROM infra.incidents
-			WHERE type = 'h2_leak' AND status IN ('open','acknowledged','in_progress')`).
+			WHERE type = ANY($1) AND status IN ('open','acknowledged','in_progress')`,
+			pack.LeakTypes).
 			Scan(&open, &avgAgeH, &oldestH); err != nil {
 			degraded = append(degraded, "leak_aging")
 		} else {
 			report["unresolved_leaks"] = map[string]any{
+				"open":             open,
+				"avg_age_hours":    avgAgeH,
+				"oldest_age_hours": oldestH,
+			}
+		}
+	}
+
+	// Battery-thermal incident categories (battery pack only): open thermal
+	// events and their aging, the EV analogue of leak aging.
+	if pack.BatteryThermal {
+		var open int
+		var avgAgeH, oldestH *float64
+		if err := h.db.QueryRow(ctx, `
+			SELECT count(*),
+			       avg(EXTRACT(EPOCH FROM (now() - opened_at)) / 3600)::float8,
+			       max(EXTRACT(EPOCH FROM (now() - opened_at)) / 3600)::float8
+			FROM infra.incidents
+			WHERE type = 'battery_thermal' AND status IN ('open','acknowledged','in_progress')`).
+			Scan(&open, &avgAgeH, &oldestH); err != nil {
+			degraded = append(degraded, "battery_thermal")
+		} else {
+			report["battery_thermal_incidents"] = map[string]any{
 				"open":             open,
 				"avg_age_hours":    avgAgeH,
 				"oldest_age_hours": oldestH,
@@ -244,8 +315,8 @@ func (h *Handler) buildReport(ctx context.Context, days int) map[string]any {
 }
 
 // generateAndStore persists one report for the window and returns it.
-func (h *Handler) generateAndStore(ctx context.Context, days int) (*ComplianceReport, error) {
-	reportJSON, err := json.Marshal(h.buildReport(ctx, days))
+func (h *Handler) generateAndStore(ctx context.Context, days int, domain string) (*ComplianceReport, error) {
+	reportJSON, err := json.Marshal(h.buildReport(ctx, days, domain))
 	if err != nil {
 		return nil, fmt.Errorf("marshal compliance report: %w", err)
 	}
@@ -259,15 +330,19 @@ func (h *Handler) generateAndStore(ctx context.Context, days int) (*ComplianceRe
 	return &stored, nil
 }
 
-// GenerateScheduled stores one report for the default window; used by the
-// optional interval scheduler in main (COMPLIANCE_REPORT_INTERVAL).
+// GenerateScheduled stores one report for the default window and the
+// fleet-config domain; used by the optional interval scheduler in main
+// (COMPLIANCE_REPORT_INTERVAL).
 func (h *Handler) GenerateScheduled(ctx context.Context) error {
-	_, err := h.generateAndStore(ctx, defaultReportDays)
+	_, err := h.generateAndStore(ctx, defaultReportDays, defaultComplianceDomain())
 	return err
 }
 
-// GenerateComplianceReport handles POST /v1/compliance/reports/generate?days=
-// (Keycloak JWT). days defaults to 30 and is bounded to 1..365.
+// GenerateComplianceReport handles POST
+// /v1/compliance/reports/generate?days=&domain= (Keycloak JWT). days defaults
+// to 30 and is bounded to 1..365. Wave 5: domain selects the per-energy
+// template pack (h2|battery|diesel|cng); default is the COMPLIANCE_DOMAIN
+// fleet config, else h2.
 func (h *Handler) GenerateComplianceReport(w http.ResponseWriter, r *http.Request) {
 	days := defaultReportDays
 	if raw := r.URL.Query().Get("days"); raw != "" {
@@ -280,7 +355,17 @@ func (h *Handler) GenerateComplianceReport(w http.ResponseWriter, r *http.Reques
 		}
 		days = n
 	}
-	stored, err := h.generateAndStore(r.Context(), days)
+	domain := defaultComplianceDomain()
+	if raw := r.URL.Query().Get("domain"); raw != "" {
+		if _, ok := compliancePacks[raw]; !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "domain must be one of h2|battery|diesel|cng",
+			})
+			return
+		}
+		domain = raw
+	}
+	stored, err := h.generateAndStore(r.Context(), days, domain)
 	if err != nil {
 		h.internal(w, "generate compliance report", err)
 		return

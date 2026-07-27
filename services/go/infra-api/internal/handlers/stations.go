@@ -10,23 +10,33 @@ import (
 	"go.uber.org/zap"
 )
 
-// Station mirrors infra.stations (geom exposed as lat/lon).
+// Station mirrors infra.stations (geom exposed as lat/lon). Wave 5 (0008):
+// station_type names the energy domain; available_kwh/charger_count are the
+// EV inventory fields (NULL for pure H2 stations).
 type Station struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	CapacityKg  float64  `json:"capacity_kg"`
-	AvailableKg float64  `json:"available_kg"`
-	Status      string   `json:"status"`
-	Lat         *float64 `json:"lat,omitempty"`
-	Lon         *float64 `json:"lon,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	CapacityKg   float64  `json:"capacity_kg"`
+	AvailableKg  float64  `json:"available_kg"`
+	Status       string   `json:"status"`
+	StationType  string   `json:"station_type"` // h2|ev_charger|diesel|cng|mixed
+	AvailableKwh *float64 `json:"available_kwh,omitempty"`
+	ChargerCount *int     `json:"charger_count,omitempty"`
+	Lat          *float64 `json:"lat,omitempty"`
+	Lon          *float64 `json:"lon,omitempty"`
 }
 
+// stationTypes is the CHECK constraint domain of infra.stations.station_type.
+var stationTypes = map[string]bool{"h2": true, "ev_charger": true, "diesel": true, "cng": true, "mixed": true}
+
 const stationCols = `id, name, COALESCE(capacity_kg,0), COALESCE(available_kg,0),
-	COALESCE(status,'unknown'), ST_Y(geom)::float8, ST_X(geom)::float8`
+	COALESCE(status,'unknown'), COALESCE(station_type,'h2'), available_kwh, charger_count,
+	ST_Y(geom)::float8, ST_X(geom)::float8`
 
 func scanStation(row pgx.Row) (Station, error) {
 	var s Station
-	err := row.Scan(&s.ID, &s.Name, &s.CapacityKg, &s.AvailableKg, &s.Status, &s.Lat, &s.Lon)
+	err := row.Scan(&s.ID, &s.Name, &s.CapacityKg, &s.AvailableKg, &s.Status,
+		&s.StationType, &s.AvailableKwh, &s.ChargerCount, &s.Lat, &s.Lon)
 	return s, err
 }
 
@@ -73,12 +83,15 @@ func (h *Handler) GetStation(w http.ResponseWriter, r *http.Request) {
 }
 
 type createStationRequest struct {
-	Name        string   `json:"name"`
-	CapacityKg  float64  `json:"capacity_kg"`
-	AvailableKg float64  `json:"available_kg"`
-	Status      string   `json:"status"`
-	Lat         *float64 `json:"lat"`
-	Lon         *float64 `json:"lon"`
+	Name         string   `json:"name"`
+	CapacityKg   float64  `json:"capacity_kg"`
+	AvailableKg  float64  `json:"available_kg"`
+	Status       string   `json:"status"`
+	StationType  string   `json:"station_type"`
+	AvailableKwh *float64 `json:"available_kwh"`
+	ChargerCount *int     `json:"charger_count"`
+	Lat          *float64 `json:"lat"`
+	Lon          *float64 `json:"lon"`
 }
 
 // CreateStation handles POST /v1/stations (Keycloak JWT required).
@@ -95,22 +108,28 @@ func (h *Handler) CreateStation(w http.ResponseWriter, r *http.Request) {
 	if req.Status == "" {
 		req.Status = "online"
 	}
+	if req.StationType == "" {
+		req.StationType = "h2"
+	}
+	if !stationTypes[req.StationType] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "station_type must be one of h2|ev_charger|diesel|cng|mixed"})
+		return
+	}
 
 	var geomArg any
 	if req.Lat != nil && req.Lon != nil {
 		geomArg = pgxPoint{Lon: *req.Lon, Lat: *req.Lat}
 	}
 
-	var s Station
-	err := h.db.QueryRow(r.Context(), `
-		INSERT INTO infra.stations (name, capacity_kg, available_kg, status, geom)
-		VALUES ($1, $2, $3, $4,
-			CASE WHEN $5::jsonb IS NULL THEN NULL
+	s, err := scanStation(h.db.QueryRow(r.Context(), `
+		INSERT INTO infra.stations (name, capacity_kg, available_kg, status, station_type, available_kwh, charger_count, geom)
+		VALUES ($1, $2, $3, $4, $5, $6, $7,
+			CASE WHEN $8::jsonb IS NULL THEN NULL
 			     ELSE ST_SetSRID(ST_MakePoint(
-				($5::jsonb->>'lon')::float8, ($5::jsonb->>'lat')::float8), 4326) END)
+				($8::jsonb->>'lon')::float8, ($8::jsonb->>'lat')::float8), 4326) END)
 		RETURNING `+stationCols,
-		req.Name, req.CapacityKg, req.AvailableKg, req.Status, nullableJSON(geomArg)).Scan(
-		&s.ID, &s.Name, &s.CapacityKg, &s.AvailableKg, &s.Status, &s.Lat, &s.Lon)
+		req.Name, req.CapacityKg, req.AvailableKg, req.Status, req.StationType,
+		req.AvailableKwh, req.ChargerCount, nullableJSON(geomArg)))
 	if err != nil {
 		h.internal(w, "create station", err)
 		return
@@ -119,12 +138,14 @@ func (h *Handler) CreateStation(w http.ResponseWriter, r *http.Request) {
 }
 
 type stationStatusRequest struct {
-	Status      string   `json:"status"`
-	AvailableKg *float64 `json:"available_kg"`
+	Status       string   `json:"status"`
+	AvailableKg  *float64 `json:"available_kg"`
+	AvailableKwh *float64 `json:"available_kwh"` // Wave 5: EV inventory (ev_charger stations)
 }
 
 // UpdateStationStatus handles PATCH /v1/stations/{id}/status (Keycloak JWT).
-// Publishes station.status.changed (SPEC §3.3).
+// Publishes station.status.changed (SPEC §3.3; Wave 5 adds station_type and
+// available_kwh to the event — additive, H2 payload unchanged).
 func (h *Handler) UpdateStationStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req stationStatusRequest
@@ -133,19 +154,13 @@ func (h *Handler) UpdateStationStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var s Station
-	var err error
-	if req.AvailableKg != nil {
-		err = h.db.QueryRow(r.Context(), `
-			UPDATE infra.stations SET status = $2, available_kg = $3 WHERE id = $1
-			RETURNING `+stationCols, id, req.Status, *req.AvailableKg).Scan(
-			&s.ID, &s.Name, &s.CapacityKg, &s.AvailableKg, &s.Status, &s.Lat, &s.Lon)
-	} else {
-		err = h.db.QueryRow(r.Context(), `
-			UPDATE infra.stations SET status = $2 WHERE id = $1
-			RETURNING `+stationCols, id, req.Status).Scan(
-			&s.ID, &s.Name, &s.CapacityKg, &s.AvailableKg, &s.Status, &s.Lat, &s.Lon)
-	}
+	s, err := scanStation(h.db.QueryRow(r.Context(), `
+		UPDATE infra.stations SET
+			status        = $2,
+			available_kg  = CASE WHEN $3::float8 IS NULL THEN available_kg  ELSE $3::float8 END,
+			available_kwh = CASE WHEN $4::float8 IS NULL THEN available_kwh ELSE $4::float8 END
+		WHERE id = $1
+		RETURNING `+stationCols, id, req.Status, req.AvailableKg, req.AvailableKwh))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "station not found"})
 		return
@@ -155,11 +170,16 @@ func (h *Handler) UpdateStationStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.pub.Publish(r.Context(), "station.status.changed", map[string]any{
+	event := map[string]any{
 		"station_id":   s.ID,
 		"status":       s.Status,
 		"available_kg": s.AvailableKg,
-	}); err != nil {
+		"station_type": s.StationType,
+	}
+	if s.AvailableKwh != nil {
+		event["available_kwh"] = *s.AvailableKwh
+	}
+	if err := h.pub.Publish(r.Context(), "station.status.changed", event); err != nil {
 		h.log.Error("failed to publish station.status.changed", zap.Error(err))
 	}
 	writeJSON(w, http.StatusOK, s)

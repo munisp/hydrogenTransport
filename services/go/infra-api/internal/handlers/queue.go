@@ -19,6 +19,10 @@ import (
 // inventory besides energy-trade surplus sales.
 
 // QueueEntry mirrors infra.station_queue plus the caller's queue position.
+// Wave 5 (0008): the completion draw-down is energy-generic — DispensedUnit
+// names the unit (kg for h2/cng, kwh for ev_charger, liters for diesel) and
+// AvailableAfter is the station inventory left in that unit; the legacy
+// dispensed_kg/available_after_kg fields are still set for kg-unit stations.
 type QueueEntry struct {
 	ID               string    `json:"id"`
 	StationID        string    `json:"station_id"`
@@ -29,6 +33,27 @@ type QueueEntry struct {
 	EstWaitMinutes   int       `json:"est_wait_minutes,omitempty"`
 	DispensedKg      *float64  `json:"dispensed_kg,omitempty"`
 	AvailableAfterKg *float64  `json:"available_after_kg,omitempty"`
+	DispensedAmount  *float64  `json:"dispensed_amount,omitempty"`
+	DispensedUnit    string    `json:"dispensed_unit,omitempty"`
+	AvailableAfter   *float64  `json:"available_after,omitempty"`
+}
+
+// inventoryColumn resolves the station inventory column + unit a draw-down
+// applies to, branched by infra.stations.station_type (0008): h2/cng/mixed
+// draw available_kg in kg, diesel draws available_kg in liters, ev_charger
+// draws available_kwh in kwh. One numeric draw-down path; only the column
+// and the unit name differ.
+func inventoryColumn(stationType string) (column, unit string) {
+	switch stationType {
+	case "ev_charger":
+		return "available_kwh", "kwh"
+	case "diesel":
+		return "available_kg", "liters"
+	case "cng":
+		return "available_kg", "kg"
+	default: // h2, mixed, unknown → legacy H2 path
+		return "available_kg", "kg"
+	}
 }
 
 const queueEntryCols = `id, station_id, bus_id, joined_at, status`
@@ -196,21 +221,30 @@ func (h *Handler) advanceQueue(r *http.Request, stationID string) {
 }
 
 // CompleteStationQueueEntry handles POST
-// /v1/stations/{id}/queue/{entry}/complete {dispensed_kg} (Keycloak JWT,
-// operator): marks the serving entry completed and decrements
-// infra.stations.available_kg by the dispensed amount (409 when the recorded
-// inventory cannot cover it). The next waiting bus is promoted to serving.
+// /v1/stations/{id}/queue/{entry}/complete {dispensed_kg|dispensed_amount}
+// (Keycloak JWT, operator): marks the serving entry completed and draws down
+// the station inventory by the dispensed amount (409 when the recorded
+// inventory cannot cover it). Wave 5 (0008): the draw-down branches by
+// station_type — h2/cng/mixed decrement available_kg (unit kg), diesel
+// decrements available_kg (unit liters), ev_charger decrements
+// available_kwh (unit kwh); dispensed_amount is the energy-generic alias of
+// dispensed_kg. The next waiting bus is promoted to serving.
 func (h *Handler) CompleteStationQueueEntry(w http.ResponseWriter, r *http.Request) {
 	stationID, entryID := chi.URLParam(r, "id"), chi.URLParam(r, "entry")
 	var req struct {
-		DispensedKg *float64 `json:"dispensed_kg"`
+		DispensedKg     *float64 `json:"dispensed_kg"`
+		DispensedAmount *float64 `json:"dispensed_amount"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	if req.DispensedKg != nil && *req.DispensedKg < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "dispensed_kg must not be negative"})
+	amount := req.DispensedAmount
+	if amount == nil {
+		amount = req.DispensedKg
+	}
+	if amount != nil && *amount < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "dispensed amount must not be negative"})
 		return
 	}
 
@@ -223,15 +257,20 @@ func (h *Handler) CompleteStationQueueEntry(w http.ResponseWriter, r *http.Reque
 
 	var e QueueEntry
 	var available float64
+	var stationType string
 	err = tx.QueryRow(r.Context(), `
 		WITH done AS (
 			UPDATE infra.station_queue SET status = 'completed', completed_at = now()
 			WHERE id = $1 AND station_id = $2 AND status = 'serving'
 			RETURNING `+queueEntryCols+`
 		)
-		SELECT done.*, (SELECT COALESCE(available_kg,0) FROM infra.stations WHERE id = $2) FROM done`,
+		SELECT done.*, (
+			SELECT COALESCE(available_kg,0) FROM infra.stations WHERE id = $2
+		), (
+			SELECT COALESCE(station_type,'h2') FROM infra.stations WHERE id = $2
+		) FROM done`,
 		entryID, stationID).
-		Scan(&e.ID, &e.StationID, &e.BusID, &e.JoinedAt, &e.Status, &available)
+		Scan(&e.ID, &e.StationID, &e.BusID, &e.JoinedAt, &e.Status, &available, &stationType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "queue entry not found or not in serving status"})
 		return
@@ -241,25 +280,46 @@ func (h *Handler) CompleteStationQueueEntry(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if req.DispensedKg != nil && *req.DispensedKg > 0 {
-		if *req.DispensedKg > available+1e-9 {
+	if amount != nil && *amount > 0 {
+		column, unit := inventoryColumn(stationType)
+		if column == "available_kwh" {
+			// EV stations track deliverable kWh, not kg.
+			var availKwh float64
+			if err := tx.QueryRow(r.Context(),
+				`SELECT COALESCE(available_kwh,0) FROM infra.stations WHERE id = $1`, stationID).
+				Scan(&availKwh); err != nil {
+				h.internal(w, "load station kwh inventory", err)
+				return
+			}
+			available = availKwh
+		}
+		if *amount > available+1e-9 {
 			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":        "insufficient_inventory",
-				"message":      "dispensed_kg exceeds the station's recorded available_kg",
-				"available_kg": available,
-				"dispensed_kg": *req.DispensedKg,
+				"error":           "insufficient_inventory",
+				"message":         "dispensed amount exceeds the station's recorded " + column,
+				"available":       available,
+				"available_field": column,
+				"dispensed":       *amount,
+				"unit":            unit,
 			})
 			return
 		}
 		if err := tx.QueryRow(r.Context(), `
-			UPDATE infra.stations SET available_kg = available_kg - $2
-			WHERE id = $1 RETURNING COALESCE(available_kg,0)`, stationID, *req.DispensedKg).
+			UPDATE infra.stations SET `+column+` = `+column+` - $2
+			WHERE id = $1 RETURNING COALESCE(`+column+`,0)`, stationID, *amount).
 			Scan(&available); err != nil {
 			h.internal(w, "decrement station inventory", err)
 			return
 		}
-		e.DispensedKg = req.DispensedKg
-		e.AvailableAfterKg = &available
+		e.DispensedAmount = amount
+		e.DispensedUnit = unit
+		e.AvailableAfter = &available
+		if column == "available_kg" {
+			// Legacy kg fields (h2 backward compat; also kg/liters for
+			// cng/diesel which share the available_kg column).
+			e.DispensedKg = amount
+			e.AvailableAfterKg = &available
+		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		h.internal(w, "commit queue complete", err)

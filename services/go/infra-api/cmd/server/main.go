@@ -135,6 +135,11 @@ func main() {
 		r.Get("/v1/stations/{id}", h.GetStation)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/stations", h.CreateStation)
 		r.With(jwtmw.RequireRole("operator")).Patch("/v1/stations/{id}/status", h.UpdateStationStatus)
+		// OCPP charger read APIs (Wave 5; infra.charge_points/charging_sessions
+		// are written by the ocpp-gateway).
+		r.Get("/v1/stations/{id}/chargers", h.ListStationChargers)
+		r.Get("/v1/chargers", h.ListChargers)
+		r.Get("/v1/chargers/{ocpp_id}/sessions", h.ListChargerSessions)
 		// Queue management (SPEC §1 "queue mgmt").
 		r.Get("/v1/stations/{id}/queue", h.ListStationQueue)
 		r.With(jwtmw.RequireAuth).Post("/v1/stations/{id}/queue", h.JoinStationQueue)
