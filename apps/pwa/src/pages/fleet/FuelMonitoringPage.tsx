@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { listFuelReadings, listVehicles } from "../../api/fleet";
 import {
   Card,
+  EnergyTypeBadge,
+  energyUnit,
   ErrorState,
   PageHeader,
   ProgressBar,
@@ -10,15 +12,18 @@ import {
   Td,
   Th,
 } from "../../components/ui";
-import { formatDateTime, formatKg, formatNumber } from "../../lib/format";
+import { formatDateTime, formatNumber } from "../../lib/format";
 
-/** fuel-monitoring — H2 tank levels, consumption and range prediction. */
+/** fuel-monitoring — energy levels (H2/battery/diesel/CNG), consumption and range prediction. */
 export default function FuelMonitoringPage() {
   const readings = useQuery({ queryKey: ["fleet", "fuel", "readings"], queryFn: listFuelReadings, refetchInterval: 30_000 });
   const vehicles = useQuery({ queryKey: ["fleet", "vehicles"], queryFn: listVehicles });
 
   const fleetNo = new Map((vehicles.data ?? []).map((v) => [v.id, v.fleet_no]));
-  const low = (readings.data ?? []).filter((r) => r.h2_level_pct < 20).length;
+  const vehicleEnergyType = new Map((vehicles.data ?? []).map((v) => [v.id, v.energy_type]));
+  const levelPct = (r: { energy_level_pct?: number; h2_level_pct: number }) =>
+    r.energy_level_pct ?? r.h2_level_pct;
+  const low = (readings.data ?? []).filter((r) => levelPct(r) < 20).length;
 
   return (
     <div>
@@ -29,7 +34,7 @@ export default function FuelMonitoringPage() {
 
       {low > 0 ? (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          {low} bus{low === 1 ? "" : "es"} below 20% H2 — prioritize refueling dispatch.
+          {low} bus{low === 1 ? "" : "es"} below 20% energy — prioritize refueling dispatch.
         </div>
       ) : null}
 
@@ -44,7 +49,7 @@ export default function FuelMonitoringPage() {
               <tr>
                 <Th>Bus</Th>
                 <Th className="w-64">Tank level</Th>
-                <Th className="text-right">Onboard H2</Th>
+                <Th className="text-right">Onboard energy</Th>
                 <Th className="text-right">Estimated range</Th>
                 <Th>Last reading</Th>
               </tr>
@@ -58,27 +63,35 @@ export default function FuelMonitoringPage() {
                 </tr>
               ) : (
                 [...(readings.data ?? [])]
-                  .sort((a, b) => a.h2_level_pct - b.h2_level_pct)
-                  .map((r) => (
+                  .sort((a, b) => levelPct(a) - levelPct(b))
+                  .map((r) => {
+                    const energyType = r.energy_type ?? vehicleEnergyType.get(r.bus_id);
+                    return (
                     <tr key={r.bus_id} className="hover:bg-surface-sunken/60">
                       <Td className="font-medium text-stone-800">
-                        {r.fleet_no || fleetNo.get(r.bus_id) || r.bus_id.slice(0, 8)}
+                        <div className="flex items-center gap-2">
+                          {r.fleet_no || fleetNo.get(r.bus_id) || r.bus_id.slice(0, 8)}
+                          <EnergyTypeBadge energyType={energyType} />
+                        </div>
                       </Td>
                       <Td>
                         <div className="flex items-center gap-2">
-                          <ProgressBar valuePct={r.h2_level_pct} className="w-40" />
+                          <ProgressBar valuePct={levelPct(r)} className="w-40" />
                           <span className="text-xs tabular-nums text-stone-500">
-                            {formatNumber(r.h2_level_pct, 1)}%
+                            {formatNumber(levelPct(r), 1)}%
                           </span>
                         </div>
                       </Td>
-                      <Td className="text-right tabular-nums">{formatKg(r.h2_remaining_kg)}</Td>
+                      <Td className="text-right tabular-nums">
+                        {formatNumber(r.energy_remaining ?? r.h2_remaining_kg, 1)} {energyUnit(energyType)}
+                      </Td>
                       <Td className="text-right tabular-nums">
                         {formatNumber(r.estimated_range_km, 0)} km
                       </Td>
                       <Td className="text-stone-500">{formatDateTime(r.measured_at)}</Td>
                     </tr>
-                  ))
+                    );
+                  })
               )}
             </tbody>
           </Table>

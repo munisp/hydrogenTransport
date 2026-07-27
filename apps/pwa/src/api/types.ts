@@ -10,6 +10,9 @@ export interface GeoPoint {
 
 // ---- Fleet domain (fleet-api, /api/fleet) -----------------------------------
 
+/** Wave-5 multi-energy discriminator (migration 0008). Absent ⇒ legacy "h2". */
+export type EnergyType = "h2" | "battery" | "diesel" | "cng";
+
 /** fleet.vehicles */
 export interface Vehicle {
   id: string;
@@ -17,6 +20,7 @@ export interface Vehicle {
   vin: string;
   model: string;
   h2_capacity_kg: number;
+  energy_type?: EnergyType;
   status: "in_service" | "refueling" | "maintenance" | "depot" | "offline" | string;
   lat?: number | null;
   lon?: number | null;
@@ -31,6 +35,10 @@ export interface TelemetrySample {
   fuel_cell_kw: number;
   battery_soc_pct: number;
   odometer_km: number;
+  /** Wave-5 generic energy fields (h2 rows backfill these from the h2 columns). */
+  energy_level_pct?: number;
+  powertrain_kw?: number;
+  energy_type?: EnergyType;
   lat?: number | null;
   lon?: number | null;
 }
@@ -52,6 +60,10 @@ export interface FuelReading {
   fleet_no: string;
   h2_level_pct: number;
   h2_remaining_kg: number;
+  energy_type?: EnergyType;
+  energy_level_pct?: number;
+  /** Generic remaining energy (kg | kWh | liters depending on energy_type). */
+  energy_remaining?: number;
   estimated_range_km: number;
   measured_at: string;
 }
@@ -67,6 +79,10 @@ export interface TwinState {
   fuel_cell_kw: number;
   battery_soc_pct: number;
   odometer_km: number;
+  /** Wave-5 generic energy fields. */
+  energy_level_pct?: number;
+  powertrain_kw?: number;
+  energy_type?: EnergyType;
   lat: number;
   lon: number;
   route_id?: string | null;

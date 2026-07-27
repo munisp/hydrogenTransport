@@ -166,6 +166,52 @@ export function StatusBadge({ status, className }: { status: string; className?:
   );
 }
 
+// ---- Energy type (Wave-5 multi-energy) ---------------------------------------
+
+const energyTypeTones: Record<string, BadgeTone> = {
+  h2: "teal",
+  battery: "green",
+  diesel: "amber",
+  cng: "neutral",
+};
+
+const energyTypeLabels: Record<string, string> = {
+  h2: "H2",
+  battery: "Battery",
+  diesel: "Diesel",
+  cng: "CNG",
+};
+
+/** Badge for a vehicle's energy vector; undefined/unknown falls back to h2. */
+export function EnergyTypeBadge({
+  energyType,
+  className,
+}: {
+  energyType?: string | null;
+  className?: string;
+}) {
+  const et = energyType && energyType in energyTypeTones ? energyType : "h2";
+  return (
+    <Badge tone={energyTypeTones[et]} className={className}>
+      {energyTypeLabels[et]}
+    </Badge>
+  );
+}
+
+/** Unit for remaining/stored energy given the energy vector. */
+export function energyUnit(energyType?: string | null): "kg" | "kWh" | "liters" {
+  switch (energyType) {
+    case "battery":
+      return "kWh";
+    case "diesel":
+    case "cng":
+      return "liters";
+    case "h2":
+    default:
+      return "kg";
+  }
+}
+
 // ---- Stat card (KPI) --------------------------------------------------------
 
 export function StatCard({

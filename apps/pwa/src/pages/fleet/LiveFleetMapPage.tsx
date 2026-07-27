@@ -12,6 +12,7 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  EnergyTypeBadge,
   ErrorState,
   PageHeader,
   ProgressBar,
@@ -162,6 +163,9 @@ function TwinPanel({ bus, onClose }: { bus: BusOnMap; onClose: () => void }) {
           <p className="mt-0.5 text-xs text-stone-500">{bus.vehicle.model}</p>
         </div>
         <div className="flex items-center gap-2">
+          <EnergyTypeBadge
+            energyType={twin?.energy_type ?? bus.telemetry?.energy_type ?? bus.vehicle.energy_type}
+          />
           <StatusBadge status={bus.vehicle.status} />
           <button
             className="rounded-md p-1 text-stone-400 hover:bg-surface-sunken hover:text-stone-600"
@@ -182,10 +186,24 @@ function TwinPanel({ bus, onClose }: { bus: BusOnMap; onClose: () => void }) {
         ) : null}
 
         <div className="space-y-3">
-          <Metric label="H2 level">
-            <ProgressBar valuePct={twin?.h2_level_pct ?? bus.telemetry?.h2_level_pct ?? 0} />
+          <Metric label="Energy">
+            <ProgressBar
+              valuePct={
+                twin?.energy_level_pct ??
+                bus.telemetry?.energy_level_pct ??
+                twin?.h2_level_pct ??
+                bus.telemetry?.h2_level_pct ??
+                0
+              }
+            />
             <span className="text-xs tabular-nums text-stone-500">
-              {formatNumber(twin?.h2_level_pct ?? bus.telemetry?.h2_level_pct, 1)}%
+              {formatNumber(
+                twin?.energy_level_pct ??
+                  bus.telemetry?.energy_level_pct ??
+                  twin?.h2_level_pct ??
+                  bus.telemetry?.h2_level_pct,
+                1,
+              )}%
             </span>
           </Metric>
           <Metric label="Battery SoC">

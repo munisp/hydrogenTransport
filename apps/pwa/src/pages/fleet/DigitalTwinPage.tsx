@@ -67,10 +67,12 @@ export default function DigitalTwinPage() {
             <CardContent className="space-y-4">
               <div>
                 <div className="mb-1 flex justify-between text-xs text-stone-500">
-                  <span>H2 tank</span>
-                  <span className="tabular-nums">{formatNumber(twin.data.h2_level_pct, 1)}%</span>
+                  <span>Energy</span>
+                  <span className="tabular-nums">
+                    {formatNumber(twin.data.energy_level_pct ?? twin.data.h2_level_pct, 1)}%
+                  </span>
                 </div>
-                <ProgressBar valuePct={twin.data.h2_level_pct} />
+                <ProgressBar valuePct={twin.data.energy_level_pct ?? twin.data.h2_level_pct} />
               </div>
               <div>
                 <div className="mb-1 flex justify-between text-xs text-stone-500">
