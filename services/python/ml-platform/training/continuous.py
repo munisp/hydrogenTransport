@@ -81,7 +81,8 @@ def _mlflow_transition(model: str, version: str) -> None:
 
 def iterate(args) -> list[dict]:
     frames = ds.load_frames(args.source, args.data_dir, args.database_url,
-                            args.lakehouse_dir, days=args.days, seed=args.seed)
+                            args.lakehouse_dir, days=args.days, seed=args.seed,
+                            fleet_mix=getattr(args, "fleet_mix", "h2"))
     registry = read_registry(args.artifacts_dir)
     outcomes = []
     for model in args.models:
@@ -122,6 +123,9 @@ def main() -> None:
     ap.add_argument("--models", default=os.environ.get("CT_MODELS", ",".join(MODEL_NAMES)))
     ap.add_argument("--source", default="postgres",
                     choices=["synth", "postgres", "iceberg"])
+    ap.add_argument("--fleet-mix", default=os.environ.get("CT_FLEET_MIX", "h2"),
+                    choices=["h2", "battery", "diesel", "mixed"],
+                    help="energy mix for on-demand synth generation (source=synth)")
     ap.add_argument("--data-dir", default=os.environ.get("SYNTH_DATA_DIR", "data/synth_out"))
     ap.add_argument("--database-url", default=os.environ.get("DATABASE_URL", ""))
     ap.add_argument("--lakehouse-dir", default=os.environ.get("LAKEHOUSE_DIR", ""))

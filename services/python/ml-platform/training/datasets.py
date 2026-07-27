@@ -31,26 +31,34 @@ import numpy as np
 import pandas as pd
 
 from data.synth import FLEET_NOS, SynthConfig, generate
-from models import (CARBON_FEATURES, DEMAND_FEATURES, GRAPH_NODE_FEATURES,
-                    LEAK_SENSOR_FEATURES, SEQ_FEATURES)
+from models import (CARBON_FEATURES, DEMAND_FEATURES, EV_THERMAL_FEATURES,
+                    GRAPH_NODE_FEATURES, LEAK_SENSOR_FEATURES, SEQ_FEATURES)
 
 log = logging.getLogger("ml-platform.datasets")
 
 SYNTH_FILENAMES = ["telemetry", "ridership", "leak_sensors", "carbon_periods"]
+#: Wave-5 additive frame; optional on disk so older synth exports still load.
+OPTIONAL_SYNTH_FILENAMES = ["battery_thermal"]
 
 
 # ------------------------------------------------------------------ sources --
 def load_frames(source: str, data_dir: str, database_url: str = "",
-                lakehouse_dir: str = "", days: int = 42, seed: int = 42) -> dict[str, object]:
-    """Return {'telemetry','ridership','leak_sensors','carbon_periods','graph'}."""
+                lakehouse_dir: str = "", days: int = 42, seed: int = 42,
+                fleet_mix: str = "h2") -> dict[str, object]:
+    """Return {'telemetry','ridership','leak_sensors','battery_thermal',
+    'carbon_periods','graph'}."""
     if source == "synth":
         manifest = os.path.join(data_dir, "manifest.json")
         if not os.path.exists(manifest):
-            log.info("synthetic data not found in %s — generating (days=%d seed=%d)",
-                     data_dir, days, seed)
-            generate(SynthConfig(days=days, seed=seed), data_dir)
+            log.info("synthetic data not found in %s — generating (days=%d seed=%d mix=%s)",
+                     data_dir, days, seed, fleet_mix)
+            generate(SynthConfig(days=days, seed=seed, fleet_mix=fleet_mix), data_dir)
         frames = {name: pd.read_parquet(os.path.join(data_dir, f"{name}.parquet"))
                   for name in SYNTH_FILENAMES}
+        for name in OPTIONAL_SYNTH_FILENAMES:
+            path = os.path.join(data_dir, f"{name}.parquet")
+            frames[name] = (pd.read_parquet(path) if os.path.exists(path)
+                            else pd.DataFrame())
         graph = np.load(os.path.join(data_dir, "graph.npz"), allow_pickle=False)
         frames["graph"] = {k: graph[k] for k in graph.files}
         return frames
@@ -130,6 +138,7 @@ def _load_postgres(database_url: str) -> dict[str, object]:
     frames: dict[str, object] = {
         "telemetry": tel, "ridership": ridership,
         "leak_sensors": pd.DataFrame(columns=["ts", "fleet_no"] + LEAK_SENSOR_FEATURES + ["is_leak"]),
+        "battery_thermal": pd.DataFrame(columns=["ts", "fleet_no"] + EV_THERMAL_FEATURES + ["is_anomaly"]),
         "carbon_periods": _carbon_from_telemetry(tel),
         "graph": _graph_from_static(),
     }
@@ -171,7 +180,7 @@ def _load_iceberg(lakehouse_dir: str) -> dict[str, object]:
         raise ValueError("--source iceberg requires --lakehouse-dir or LAKEHOUSE_DIR "
                          "pointing at the lakehouse parquet export")
     frames: dict[str, object] = {}
-    for name in SYNTH_FILENAMES:
+    for name in SYNTH_FILENAMES + OPTIONAL_SYNTH_FILENAMES:
         part = os.path.join(lakehouse_dir, name)
         if os.path.isdir(part):
             frames[name] = pd.read_parquet(part)
@@ -292,6 +301,20 @@ def build_leak(leaks: pd.DataFrame):
     X = leaks[LEAK_SENSOR_FEATURES].to_numpy(np.float32)
     y = leaks["is_leak"].to_numpy(np.int64)
     groups = leaks["fleet_no"].to_numpy() if "fleet_no" in leaks else np.arange(len(leaks))
+    return X, y, groups
+
+
+def build_ev_thermal(thermal: pd.DataFrame):
+    """ev_thermal anomaly domain: battery-pack telemetry vectors -> (X, y, groups).
+
+    Same contract as build_leak (label column is ``is_anomaly``: 1 marks a
+    thermal-runaway precursor episode in synth / labelled incident in live
+    data); the autoencoder trains on normal rows only."""
+    if thermal.empty:
+        raise RuntimeError("battery_thermal frame is empty for the selected source")
+    X = thermal[EV_THERMAL_FEATURES].to_numpy(np.float32)
+    y = thermal["is_anomaly"].to_numpy(np.int64)
+    groups = thermal["fleet_no"].to_numpy() if "fleet_no" in thermal else np.arange(len(thermal))
     return X, y, groups
 
 
