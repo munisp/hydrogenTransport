@@ -4,8 +4,9 @@
     "demand_forecaster": "v1.0.0",
     "leak_autoencoder": "v1.0.0",
     "fleet_gcn": "v1.0.0",
-    "carbon_forecaster": "v1.0.0"
+    "carbon_forecaster": "v1.0.0",
+    "ev_thermal_autoencoder": "v1.0.0"
   },
   "challenger": {},
-  "updated_at": "2026-07-25T02:36:10.447569+00:00"
+  "updated_at": "2026-07-26T23:07:23.878570+00:00"
 }

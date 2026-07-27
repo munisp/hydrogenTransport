@@ -1,0 +1,16 @@
+{
+  "model": "ev_thermal_autoencoder",
+  "version": "v1.0.0",
+  "trained_at": "2026-07-26T23:07:23.835698+00:00",
+  "auc": 1.0,
+  "threshold": 0.20744487643241882,
+  "fpr_at_threshold": 0.009657009657009658,
+  "tpr_at_threshold": 1.0,
+  "domain": "ev_thermal",
+  "primary_metric": "auc",
+  "primary_value": 1.0,
+  "train_seconds": 2.65,
+  "source": "synth",
+  "data_note": "SYNTHETIC bootstrap data",
+  "n_params": 504
+}
