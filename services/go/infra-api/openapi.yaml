@@ -107,6 +107,8 @@ paths:
               required: [status]
               properties:
                 status: { type: string, example: online }
+                available_kg: { type: number, description: Optional H2 inventory update }
+                available_kwh: { type: number, description: Wave-5 optional EV inventory update (kWh) }
       responses:
         '200':
           description: Updated station
@@ -260,6 +262,77 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/ModuleDisabled' }
+  /v1/stations/{id}/chargers:
+    get:
+      tags: [refueling-stations]
+      summary: List the OCPP charge points installed at one station (Wave 5)
+      operationId: listStationChargers
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Charge points with live OCPP status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  charge_points:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChargePoint' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/chargers:
+    get:
+      tags: [refueling-stations]
+      summary: Fleet-wide OCPP charge-point inventory with status (Wave 5)
+      operationId: listChargers
+      parameters:
+        - name: station_id
+          in: query
+          description: Filter to one station
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Charge points
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  charge_points:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChargePoint' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/chargers/{ocpp_id}/sessions:
+    get:
+      tags: [refueling-stations]
+      summary: Charging sessions for one charge point, newest first (Wave 5)
+      operationId: listChargerSessions
+      parameters:
+        - name: ocpp_id
+          in: path
+          required: true
+          description: OCPP charge-point identity (infra.charge_points.ocpp_id)
+          schema: { type: string }
+        - name: status
+          in: query
+          description: Filter sessions by status
+          schema: { type: string, enum: [active, completed, failed] }
+      responses:
+        '200':
+          description: Charging sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChargingSession' }
+        '404': { $ref: '#/components/responses/ModuleDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
   /v1/stations/{id}/queue:
     get:
       tags: [refueling-stations]
@@ -329,9 +402,10 @@ paths:
     post:
       tags: [refueling-stations]
       summary: >-
-        Complete the serving entry (operator role). A positive dispensed_kg
-        decrements the station's recorded available_kg; the next waiting bus
-        is promoted to serving
+        Complete the serving entry (operator role). A positive dispensed
+        amount decrements the station's recorded inventory, branched by
+        station_type (Wave 5): available_kg for h2/cng/diesel, available_kwh
+        for ev_charger; the next waiting bus is promoted to serving
       operationId: completeStationQueueEntry
       security:
         - bearerAuth: []
@@ -344,7 +418,8 @@ paths:
             schema:
               type: object
               properties:
-                dispensed_kg: { type: number, minimum: 0 }
+                dispensed_kg: { type: number, minimum: 0, description: Legacy H2 amount (kg) }
+                dispensed_amount: { type: number, minimum: 0, description: Wave-5 energy-generic amount in the station's native unit (takes precedence) }
       responses:
         '200':
           description: Completed entry (with dispensed_kg / available_after_kg when given)
@@ -543,9 +618,17 @@ paths:
           in: query
           description: Report window in days (default 30, bounded 1..365)
           schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+        - name: domain
+          in: query
+          description: >-
+            Wave-5 energy-domain template pack (default: the COMPLIANCE_DOMAIN
+            fleet config, else h2). h2 = the pre-Wave-5 report; battery drops
+            H2 leak aging and adds battery-thermal incident categories; diesel
+            drops leak sections; cng keeps gas-leak aging over cng_leak.
+          schema: { type: string, enum: [h2, battery, diesel, cng], default: h2 }
       responses:
         '400':
-          description: days is not an integer in 1..365
+          description: days is not an integer in 1..365, or domain is not a known template pack
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -832,6 +915,40 @@ components:
         name: { type: string }
         status: { type: string }
         capacity_kg: { type: number }
+        available_kg: { type: number }
+        station_type:
+          type: string
+          enum: [h2, ev_charger, diesel, cng, mixed]
+          description: Wave-5 station energy domain (migration 0008); 'h2' for all pre-Wave-5 stations
+        available_kwh: { type: number, description: Wave-5 EV inventory in kWh (ev_charger stations); omitted when NULL }
+        charger_count: { type: integer, description: Wave-5 number of OCPP charge points; omitted when NULL }
+    ChargePoint:
+      type: object
+      description: One infra.charge_points row (written by the Wave-5 ocpp-gateway from OCPP 1.6J messages).
+      properties:
+        id: { type: string, format: uuid }
+        station_id: { type: string, format: uuid }
+        ocpp_id: { type: string }
+        vendor: { type: string }
+        model: { type: string }
+        status: { type: string, description: OCPP 1.6J charge-point status (Available|Charging|Unavailable|...) }
+        last_heartbeat: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    ChargingSession:
+      type: object
+      description: One infra.charging_sessions row (OCPP StartTransaction/StopTransaction).
+      properties:
+        id: { type: string, format: uuid }
+        charge_point_id: { type: string, format: uuid }
+        bus_id: { type: string }
+        connector_id: { type: integer }
+        id_tag: { type: string }
+        meter_start: { type: number }
+        meter_stop: { type: number }
+        kwh: { type: number }
+        started_at: { type: string, format: date-time }
+        stopped_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, completed, failed] }
     Incident:
       type: object
       properties:
@@ -866,8 +983,11 @@ components:
         status: { type: string, enum: [waiting, serving, completed, left] }
         position: { type: integer, description: 1-based queue position (waiting entries only) }
         est_wait_minutes: { type: integer, description: Estimated wait from the station's historical service time }
-        dispensed_kg: { type: number, description: Set on completion when a dispensed amount was recorded }
+        dispensed_kg: { type: number, description: Set on completion when a dispensed amount was recorded (kg-column stations) }
         available_after_kg: { type: number, description: Station available_kg after the dispensed draw-down }
+        dispensed_amount: { type: number, description: Wave-5 energy-generic dispensed amount (unit named by dispensed_unit) }
+        dispensed_unit: { type: string, enum: [kg, kwh, liters], description: Wave-5 unit from station_type (kg h2/cng, kwh ev_charger, liters diesel) }
+        available_after: { type: number, description: Wave-5 station inventory after the draw-down, in dispensed_unit }
     ComplianceReport:
       type: object
       properties:
