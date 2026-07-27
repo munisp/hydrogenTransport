@@ -25,3 +25,6 @@ models/*.pkl
 !models/.gitkeep
 apps/pwa/dev-dist/
 .pytest_cache/
+
+# --- generated ML synth data (regenerated on demand by data/synth.py) ---
+services/python/ml-platform/data/synth_out/
