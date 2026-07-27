@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,8 +20,11 @@ import (
 
 // Trade mirrors commerce.trades (energy-trading module).
 type Trade struct {
-	ID             string    `json:"id"`
-	Kind           string    `json:"kind"` // h2-sale|h2-purchase|energy-export
+	ID   string `json:"id"`
+	Kind string `json:"kind"` // h2-sale|h2-purchase|energy-export|ev-v2g-export|ev-charge-purchase
+	// QuantityKg is the traded amount in the kind's native unit — kg for the
+	// H2 kinds, kWh for the ev-* kinds (Wave 5; the column name is kept for
+	// backward compatibility, the kind names the unit).
 	QuantityKg     float64   `json:"quantity_kg"`
 	PriceMinor     int64     `json:"price_minor"`
 	Status         string    `json:"status"` // proposed|executed|failed
@@ -32,16 +36,29 @@ type Trade struct {
 const tradeCols = `id, kind, COALESCE(quantity_kg,0), COALESCE(price_minor,0), status,
 	tb_transfer_id, idempotency_key, created_at`
 
-// validTradeKinds enumerates the trade kinds from migration 0001.
+// validTradeKinds enumerates the trade kinds: migration 0001 plus the Wave-5
+// EV kinds (ev-v2g-export = fleet sells kWh to the grid; ev-charge-purchase
+// = inbound charging purchase).
 var validTradeKinds = map[string]bool{
 	"h2-sale": true, "h2-purchase": true, "energy-export": true,
+	"ev-v2g-export": true, "ev-charge-purchase": true,
 }
 
-// kindDrawsSurplus reports whether the trade kind consumes physical H2
-// station surplus (checked against — and decremented from —
-// infra.stations.available_kg). h2-purchase is inbound supply: recording the
-// physical receipt is station-ops' job, so it does not touch available_kg.
-func kindDrawsSurplus(kind string) bool { return kind != "h2-purchase" }
+// surplusColumn resolves the physical backing of a trade kind (Wave 5):
+// sale/export kinds consume station surplus — h2 kinds draw
+// infra.stations.available_kg (unit kg), ev-v2g-export draws available_kwh
+// (unit kwh). Purchase kinds are inbound supply: recording the physical
+// receipt is station-ops' job, so they touch no inventory.
+func surplusColumn(kind string) (column, unit string, draws bool) {
+	switch kind {
+	case "ev-v2g-export":
+		return "available_kwh", "kwh", true
+	case "h2-purchase", "ev-charge-purchase":
+		return "", "", false
+	default: // h2-sale, energy-export
+		return "available_kg", "kg", true
+	}
+}
 
 // ListTrades handles GET /v1/energy/trades.
 func (h *Handler) ListTrades(w http.ResponseWriter, r *http.Request) {
@@ -86,11 +103,11 @@ type createTradeRequest struct {
 // station H2 surplus.
 var errInsufficientSurplus = errors.New("insufficient station surplus")
 
-// stationDraw records how much H2 was drawn from one station so a failed
-// settlement can be compensated exactly.
+// stationDraw records how much energy was drawn from one station so a failed
+// settlement can be compensated exactly (amount in the draw column's unit).
 type stationDraw struct {
-	id string
-	kg float64
+	id     string
+	amount float64
 }
 
 // CreateTrade handles POST /v1/energy/trades (Keycloak JWT, operator,
@@ -120,7 +137,7 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validTradeKinds[req.Kind] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be one of h2-sale|h2-purchase|energy-export"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be one of h2-sale|h2-purchase|energy-export|ev-v2g-export|ev-charge-purchase"})
 		return
 	}
 	if req.QuantityKg <= 0 || req.PriceMinor <= 0 {
@@ -173,13 +190,15 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, statusCode, map[string]any{"error": code, "message": reason, "trade": t})
 	}
 
-	// Step 2: physical backing — draw down the station H2 surplus.
+	// Step 2: physical backing — draw down the station surplus (available_kg
+	// for H2 kinds, available_kwh for ev-v2g-export; purchases skip).
 	var draws []stationDraw
-	if kindDrawsSurplus(req.Kind) {
-		draws, err = h.drawDownSurplus(r.Context(), req.QuantityKg)
+	drawColumn, drawUnit, drawsSurplus := surplusColumn(req.Kind)
+	if drawsSurplus {
+		draws, err = h.drawDownSurplus(r.Context(), req.QuantityKg, drawColumn, drawUnit)
 		if errors.Is(err, errInsufficientSurplus) {
 			fail(http.StatusConflict, "insufficient_surplus",
-				fmt.Sprintf("trade quantity %.2f kg exceeds recorded station surplus", req.QuantityKg))
+				fmt.Sprintf("trade quantity %.2f %s exceeds recorded station surplus", req.QuantityKg, drawUnit))
 			return
 		}
 		if err != nil {
@@ -191,16 +210,18 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 	// Step 3: ledger settlement. Direction follows the trade kind
 	// (BUSINESS_LOGIC_AUDIT §18: no buyer/counterparty account existed, so
 	// clearing was never funded):
-	//   - h2-sale / energy-export: clearing (3001) → operator revenue (2001).
-	//     The clearing account is overdraft-protected, so a sale can only
-	//     settle against funds a purchase previously paid in — revenue is
-	//     never conjured from an unfunded clearing account.
-	//   - h2-purchase: operator revenue (2001) → clearing (3001). Buying
-	//     supply costs the operator and FUNDS the clearing account; this is
-	//     the buyer/counterparty settlement leg.
+	//   - sale/export kinds (h2-sale, energy-export, ev-v2g-export): clearing
+	//     (3001) → operator revenue (2001). The clearing account is
+	//     overdraft-protected, so a sale can only settle against funds a
+	//     purchase previously paid in — revenue is never conjured from an
+	//     unfunded clearing account.
+	//   - purchase kinds (h2-purchase, ev-charge-purchase): operator revenue
+	//     (2001) → clearing (3001). Buying supply costs the operator and
+	//     FUNDS the clearing account; this is the buyer/counterparty
+	//     settlement leg.
 	// The deterministic transfer id makes client retries safe.
 	debit, credit := ledger.EnergyTradeAccount, ledger.OperatorRevenueAccount
-	if req.Kind == "h2-purchase" {
+	if strings.HasSuffix(req.Kind, "-purchase") {
 		debit, credit = ledger.OperatorRevenueAccount, ledger.EnergyTradeAccount
 	}
 	transferID, err := h.ledger.Transfer(
@@ -209,8 +230,8 @@ func (h *Handler) CreateTrade(w http.ResponseWriter, r *http.Request) {
 		uint64(req.PriceMinor), ledger.CodeEnergy)
 	if err != nil {
 		h.log.Error("energy trade ledger transfer failed", zap.String("trade", tradeID), zap.Error(err))
-		// Compensate the physical draw-down so H2 is not lost from inventory.
-		if rerr := h.restoreSurplus(r.Context(), draws); rerr != nil {
+		// Compensate the physical draw-down so energy is not lost from inventory.
+		if rerr := h.restoreSurplus(r.Context(), draws, drawColumn); rerr != nil {
 			h.log.Error("failed to restore station surplus", zap.String("trade", tradeID), zap.Error(rerr))
 		}
 		if errors.Is(err, ledger.ErrInsufficientFunds) {
@@ -270,9 +291,11 @@ func (h *Handler) CancelTrade(w http.ResponseWriter, r *http.Request) {
 }
 
 // drawDownSurplus atomically verifies that the recorded station surplus
-// covers kg and decrements it greedily across stations (ordered, locked FOR
-// UPDATE). It returns the per-station allocations for exact compensation.
-func (h *Handler) drawDownSurplus(ctx context.Context, kg float64) ([]stationDraw, error) {
+// covers amount and decrements it greedily across stations (ordered, locked
+// FOR UPDATE). column is available_kg (unit kg) for the H2 kinds or
+// available_kwh (unit kwh) for ev-v2g-export — one numeric path, Wave 5.
+// It returns the per-station allocations for exact compensation.
+func (h *Handler) drawDownSurplus(ctx context.Context, amount float64, column, unit string) ([]stationDraw, error) {
 	tx, err := h.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -280,8 +303,8 @@ func (h *Handler) drawDownSurplus(ctx context.Context, kg float64) ([]stationDra
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, COALESCE(available_kg,0) FROM infra.stations
-		WHERE available_kg > 0 ORDER BY id FOR UPDATE`)
+		SELECT id, COALESCE(`+column+`,0) FROM infra.stations
+		WHERE `+column+` > 0 ORDER BY id FOR UPDATE`)
 	if err != nil {
 		return nil, err
 	}
@@ -289,37 +312,37 @@ func (h *Handler) drawDownSurplus(ctx context.Context, kg float64) ([]stationDra
 	var total float64
 	for rows.Next() {
 		var s stationDraw
-		if err := rows.Scan(&s.id, &s.kg); err != nil {
+		if err := rows.Scan(&s.id, &s.amount); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		stations = append(stations, s)
-		total += s.kg
+		total += s.amount
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if total+1e-9 < kg {
-		return nil, fmt.Errorf("%w (available %.2f kg, requested %.2f kg)", errInsufficientSurplus, total, kg)
+	if total+1e-9 < amount {
+		return nil, fmt.Errorf("%w (available %.2f %s, requested %.2f %s)", errInsufficientSurplus, total, unit, amount, unit)
 	}
 
-	remaining := kg
+	remaining := amount
 	draws := []stationDraw{}
 	for _, s := range stations {
 		if remaining <= 1e-9 {
 			break
 		}
-		take := s.kg
+		take := s.amount
 		if take > remaining {
 			take = remaining
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE infra.stations SET available_kg = available_kg - $2 WHERE id = $1`,
+			UPDATE infra.stations SET `+column+` = `+column+` - $2 WHERE id = $1`,
 			s.id, take); err != nil {
 			return nil, err
 		}
-		draws = append(draws, stationDraw{id: s.id, kg: take})
+		draws = append(draws, stationDraw{id: s.id, amount: take})
 		remaining -= take
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -330,11 +353,11 @@ func (h *Handler) drawDownSurplus(ctx context.Context, kg float64) ([]stationDra
 
 // restoreSurplus compensates a previous drawDownSurplus after a failed
 // settlement, returning the exact per-station allocations.
-func (h *Handler) restoreSurplus(ctx context.Context, draws []stationDraw) error {
+func (h *Handler) restoreSurplus(ctx context.Context, draws []stationDraw, column string) error {
 	for _, d := range draws {
 		if _, err := h.db.Exec(ctx, `
-			UPDATE infra.stations SET available_kg = available_kg + $2 WHERE id = $1`,
-			d.id, d.kg); err != nil {
+			UPDATE infra.stations SET `+column+` = `+column+` + $2 WHERE id = $1`,
+			d.id, d.amount); err != nil {
 			return err
 		}
 	}

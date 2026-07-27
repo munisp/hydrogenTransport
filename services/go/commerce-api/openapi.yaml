@@ -318,13 +318,20 @@ paths:
       summary: >-
         Execute an energy trade (operator role, Idempotency-Key required).
         Flow: proposed row (idempotent on the key) → physical backing check
-        (sale kinds draw down infra.stations.available_kg; a trade exceeding
+        (sale kinds draw down station surplus — infra.stations.available_kg
+        for the H2 kinds, available_kwh for ev-v2g-export; a trade exceeding
         the recorded surplus is rejected) → TigerBeetle settlement (energy
-        clearing 3001 → operator revenue 2001, deterministic transfer id).
+        clearing 3001 → operator revenue 2001 for sale/export kinds, reverse
+        for purchase kinds; deterministic transfer id).
         The clearing account is overdraft-protected: an unfunded trade lands
         in failed with energy.trade.failed (never cleared). On success the
         trade becomes executed with tb_transfer_id persisted and
         energy.trade.executed is published.
+        Wave 5 kinds: ev-v2g-export (fleet sells kWh to the grid — draws
+        available_kwh like h2-sale draws available_kg) and ev-charge-purchase
+        (inbound charging purchase — funds clearing like h2-purchase).
+        quantity_kg carries kWh for the ev-* kinds (column name kept for
+        backward compatibility; the kind names the unit).
       operationId: createTrade
       security:
         - bearerAuth: []
@@ -338,8 +345,8 @@ paths:
               type: object
               required: [kind, quantity_kg, price_minor]
               properties:
-                kind: { type: string, enum: [h2-sale, h2-purchase, energy-export] }
-                quantity_kg: { type: number, exclusiveMinimum: 0 }
+                kind: { type: string, enum: [h2-sale, h2-purchase, energy-export, ev-v2g-export, ev-charge-purchase] }
+                quantity_kg: { type: number, exclusiveMinimum: 0, description: Traded amount — kg for H2 kinds, kWh for ev-* kinds }
                 price_minor: { type: integer, minimum: 1 }
       responses:
         '200':
@@ -696,8 +703,8 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        kind: { type: string, enum: [h2-sale, h2-purchase, energy-export] }
-        quantity_kg: { type: number }
+        kind: { type: string, enum: [h2-sale, h2-purchase, energy-export, ev-v2g-export, ev-charge-purchase] }
+        quantity_kg: { type: number, description: Traded amount — kg for H2 kinds, kWh for ev-* kinds }
         price_minor: { type: integer }
         status: { type: string, enum: [proposed, executed, failed, cancelled] }
         tb_transfer_id: { type: string, description: TigerBeetle transfer id (set once executed) }
