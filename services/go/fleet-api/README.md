@@ -14,6 +14,17 @@ a disabled module returns **404** (fail-closed via the toggle-client SDK).
 | GET  | `/v1/fuel/levels` (latest H2 % + range estimate from `consumption_kg_per_100km` — learned per bus from `fuel.reading` events into `fleet.fuel_consumption`, else the 8 kg/100 km default; `consumption_source` = learned\|default) | `fuel-monitoring` | — |
 | GET  | `/healthz` | — | — |
 
+Wave 5 (migration 0008, multi-energy fleets): every vehicle response carries
+`energy_type` (`h2`\|`battery`\|`diesel`\|`cng`, default `h2` — the existing
+fleet is unchanged). Telemetry and fuel responses additionally expose the
+generic `energy_level_pct` / `powertrain_kw` / `energy_remaining` fields
+alongside the `h2_*` ones; for H2 buses the generic fields mirror the H2
+readings, for battery/diesel/cng buses they carry the native readings. The
+learned consumption rate is per bus (`fleet.fuel_consumption`), which already
+keys it per energy vector (one bus = one `energy_type`); `energy_type` names
+the native unit of `energy_remaining` (kg for h2/cng, kWh for battery,
+liters for diesel).
+
 Removed orphan routes (docs/BUSINESS_LOGIC_AUDIT.md — zero PWA/mobile
 callers): `GET /v1/vehicles/{id}`, `GET /v1/vehicles/{id}/telemetry`, and
 the digital-twin/route-optimizer proxies (`/v1/vehicles/{id}/twin`,

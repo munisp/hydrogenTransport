@@ -121,6 +121,10 @@ components:
         model: { type: string }
         h2_capacity_kg: { type: number }
         status: { type: string }
+        energy_type:
+          type: string
+          enum: [h2, battery, diesel, cng]
+          description: Wave-5 energy vector (migration 0008); 'h2' for all pre-Wave-5 buses
     TelemetryRow:
       type: object
       properties:
@@ -131,6 +135,9 @@ components:
         fuel_cell_kw: { type: number }
         battery_soc_pct: { type: number }
         odometer_km: { type: number }
+        energy_level_pct: { type: number, description: Wave-5 generic energy level; mirrors h2_level_pct for H2 buses }
+        powertrain_kw: { type: number, description: Wave-5 generic powertrain output; mirrors fuel_cell_kw for H2 buses }
+        energy_type: { type: string, enum: [h2, battery, diesel, cng] }
     Prediction:
       type: object
       properties:
@@ -143,9 +150,12 @@ components:
       properties:
         bus_id: { type: string, format: uuid }
         fleet_no: { type: string }
+        energy_type: { type: string, enum: [h2, battery, diesel, cng], description: Wave-5 energy vector; names the native unit domain }
         h2_level_pct: { type: number }
         h2_remaining_kg: { type: number, description: level% × vehicle h2_capacity_kg }
-        estimated_range_km: { type: number, description: remaining kg × 100 / consumption rate }
+        energy_level_pct: { type: number, description: Wave-5 generic level (energy_level_pct, falls back to h2_level_pct) }
+        energy_remaining: { type: number, description: remaining energy in the native unit (kg h2/cng, kwh battery, liters diesel) }
+        estimated_range_km: { type: number, description: remaining energy × 100 / consumption rate }
         consumption_kg_per_100km:
           type: number
           description: Rate behind the range estimate (learned from fuel.reading telemetry, else the fleet-wide default 8.0)

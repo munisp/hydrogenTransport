@@ -31,23 +31,26 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 
 // Vehicle mirrors fleet.vehicles (geom exposed as lat/lon).
 type Vehicle struct {
-	ID           string   `json:"id"`
-	FleetNo      string   `json:"fleet_no"`
-	VIN          string   `json:"vin"`
-	Model        string   `json:"model"`
-	H2CapacityKg float64  `json:"h2_capacity_kg"`
-	Status       string   `json:"status"`
-	Lat          *float64 `json:"lat,omitempty"`
-	Lon          *float64 `json:"lon,omitempty"`
+	ID           string  `json:"id"`
+	FleetNo      string  `json:"fleet_no"`
+	VIN          string  `json:"vin"`
+	Model        string  `json:"model"`
+	H2CapacityKg float64 `json:"h2_capacity_kg"`
+	Status       string  `json:"status"`
+	// EnergyType is the Wave-5 energy vector (0008: h2|battery|diesel|cng);
+	// 'h2' for every pre-Wave-5 bus via the column DEFAULT.
+	EnergyType string   `json:"energy_type"`
+	Lat        *float64 `json:"lat,omitempty"`
+	Lon        *float64 `json:"lon,omitempty"`
 }
 
 const vehicleCols = `id, fleet_no, COALESCE(vin,''), COALESCE(model,''),
-	COALESCE(h2_capacity_kg,0), COALESCE(status,'unknown'),
+	COALESCE(h2_capacity_kg,0), COALESCE(status,'unknown'), COALESCE(energy_type,'h2'),
 	ST_Y(geom)::float8, ST_X(geom)::float8`
 
 func scanVehicle(row pgx.Row) (Vehicle, error) {
 	var v Vehicle
-	err := row.Scan(&v.ID, &v.FleetNo, &v.VIN, &v.Model, &v.H2CapacityKg, &v.Status, &v.Lat, &v.Lon)
+	err := row.Scan(&v.ID, &v.FleetNo, &v.VIN, &v.Model, &v.H2CapacityKg, &v.Status, &v.EnergyType, &v.Lat, &v.Lon)
 	return v, err
 }
 
@@ -87,8 +90,14 @@ type TelemetrySample struct {
 	FuelCellKw    float64   `json:"fuel_cell_kw"`
 	BatterySocPct float64   `json:"battery_soc_pct"`
 	OdometerKm    float64   `json:"odometer_km"`
-	Lat           *float64  `json:"lat,omitempty"`
-	Lon           *float64  `json:"lon,omitempty"`
+	// Wave-5 generic energy fields (0008), exposed alongside the h2_* ones:
+	// for H2 buses they mirror h2_level_pct/fuel_cell_kw; for battery/diesel/
+	// cng buses they carry the native readings.
+	EnergyLevelPct float64  `json:"energy_level_pct"`
+	PowertrainKw   float64  `json:"powertrain_kw"`
+	EnergyType     string   `json:"energy_type"`
+	Lat            *float64 `json:"lat,omitempty"`
+	Lon            *float64 `json:"lon,omitempty"`
 }
 
 // LatestTelemetry handles GET /v1/telemetry/latest: the most recent telemetry
@@ -98,6 +107,9 @@ func (h *Handler) LatestTelemetry(w http.ResponseWriter, r *http.Request) {
 		SELECT DISTINCT ON (bus_id)
 		       bus_id, ts, COALESCE(speed_kph,0), COALESCE(h2_level_pct,0),
 		       COALESCE(fuel_cell_kw,0), COALESCE(battery_soc_pct,0), COALESCE(odometer_km,0),
+		       COALESCE(energy_level_pct, h2_level_pct, 0),
+		       COALESCE(powertrain_kw, fuel_cell_kw, 0),
+		       COALESCE(energy_type, 'h2'),
 		       ST_Y(geom)::float8, ST_X(geom)::float8
 		FROM fleet.telemetry
 		ORDER BY bus_id, ts DESC`)
@@ -111,7 +123,8 @@ func (h *Handler) LatestTelemetry(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s TelemetrySample
 		if err := rows.Scan(&s.BusID, &s.TS, &s.SpeedKph, &s.H2LevelPct, &s.FuelCellKw,
-			&s.BatterySocPct, &s.OdometerKm, &s.Lat, &s.Lon); err != nil {
+			&s.BatterySocPct, &s.OdometerKm, &s.EnergyLevelPct, &s.PowertrainKw, &s.EnergyType,
+			&s.Lat, &s.Lon); err != nil {
 			h.internal(w, "scan latest telemetry", err)
 			return
 		}

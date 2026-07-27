@@ -78,27 +78,41 @@ func (h *Handler) ListPredictions(w http.ResponseWriter, r *http.Request) {
 // constant was used for every bus).
 const defaultH2KgPer100Km = 8.0
 
-// FuelLevel is the latest H2 reading per vehicle (fuel-monitoring module).
+// FuelLevel is the latest energy reading per vehicle (fuel-monitoring
+// module). H2 fields are kept verbatim; the Wave-5 generic fields mirror
+// them for H2 buses and carry native readings for battery/diesel/cng buses.
 type FuelLevel struct {
-	BusID            string  `json:"bus_id"`
-	FleetNo          string  `json:"fleet_no"`
-	H2LevelPct       float64 `json:"h2_level_pct"`
-	H2RemainingKg    float64 `json:"h2_remaining_kg"`
+	BusID         string  `json:"bus_id"`
+	FleetNo       string  `json:"fleet_no"`
+	EnergyType    string  `json:"energy_type"` // h2|battery|diesel|cng (0008)
+	H2LevelPct    float64 `json:"h2_level_pct"`
+	H2RemainingKg float64 `json:"h2_remaining_kg"`
+	// EnergyLevelPct is the generic level (energy_level_pct falling back to
+	// h2_level_pct) and EnergyRemaining the remaining energy in the bus's
+	// native unit (kg for h2/cng, kwh for battery, liters for diesel — the
+	// capacity column is shared; EnergyType names the unit domain).
+	EnergyLevelPct   float64 `json:"energy_level_pct"`
+	EnergyRemaining  float64 `json:"energy_remaining"`
 	EstimatedRangeKm float64 `json:"estimated_range_km"`
 	// ConsumptionKgPer100Km is the rate behind the range estimate and
 	// ConsumptionSource says whether it was learned from fuel.reading
-	// telemetry or is the fleet-wide default.
+	// telemetry or is the fleet-wide default. The learned rate is per-bus
+	// (fleet.fuel_consumption), so it is already keyed per energy_type
+	// implicitly: a bus has exactly one energy vector.
 	ConsumptionKgPer100Km float64   `json:"consumption_kg_per_100km"`
 	ConsumptionSource     string    `json:"consumption_source"` // learned|default
 	MeasuredAt            time.Time `json:"measured_at"`
 }
 
-// ListFuelLevels handles GET /v1/fuel/levels: latest H2 level per vehicle plus
-// a deterministic range estimate (remaining kg × 100 / 8 kg per 100 km).
+// ListFuelLevels handles GET /v1/fuel/levels: latest energy level per vehicle
+// plus a deterministic range estimate (remaining × 100 / rate per 100 km).
 func (h *Handler) ListFuelLevels(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `
 		SELECT DISTINCT ON (t.bus_id)
-		       t.bus_id, v.fleet_no, COALESCE(t.h2_level_pct,0), COALESCE(v.h2_capacity_kg,0), t.ts,
+		       t.bus_id, v.fleet_no, COALESCE(v.energy_type,'h2'),
+		       COALESCE(t.h2_level_pct,0),
+		       COALESCE(t.energy_level_pct, t.h2_level_pct, 0),
+		       COALESCE(v.h2_capacity_kg,0), t.ts,
 		       fc.kg_per_100km
 		FROM fleet.telemetry t
 		JOIN fleet.vehicles v ON v.id = t.bus_id
@@ -113,16 +127,17 @@ func (h *Handler) ListFuelLevels(w http.ResponseWriter, r *http.Request) {
 	levels := []FuelLevel{}
 	for rows.Next() {
 		var (
-			busID, fleetNo string
-			pct, capacity  float64
-			ts             time.Time
-			learned        *float64
+			busID, fleetNo, energyType string
+			pct, energyPct, capacity   float64
+			ts                         time.Time
+			learned                    *float64
 		)
-		if err := rows.Scan(&busID, &fleetNo, &pct, &capacity, &ts, &learned); err != nil {
+		if err := rows.Scan(&busID, &fleetNo, &energyType, &pct, &energyPct, &capacity, &ts, &learned); err != nil {
 			h.internal(w, "scan fuel level", err)
 			return
 		}
 		remainingKg := pct / 100 * capacity
+		energyRemaining := energyPct / 100 * capacity
 		rate, source := defaultH2KgPer100Km, "default"
 		if learned != nil && *learned > 0 {
 			rate, source = *learned, "learned"
@@ -130,9 +145,12 @@ func (h *Handler) ListFuelLevels(w http.ResponseWriter, r *http.Request) {
 		levels = append(levels, FuelLevel{
 			BusID:                 busID,
 			FleetNo:               fleetNo,
+			EnergyType:            energyType,
 			H2LevelPct:            pct,
 			H2RemainingKg:         remainingKg,
-			EstimatedRangeKm:      remainingKg * 100 / rate,
+			EnergyLevelPct:        energyPct,
+			EnergyRemaining:       energyRemaining,
+			EstimatedRangeKm:      energyRemaining * 100 / rate,
 			ConsumptionKgPer100Km: rate,
 			ConsumptionSource:     source,
 			MeasuredAt:            ts,
