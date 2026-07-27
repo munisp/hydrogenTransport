@@ -1,6 +1,6 @@
 # ml-platform (Python, port 8095)
 
-Real AI/ML/DL/GNN stack for H2Fleet: five pure-PyTorch models (all ≤ 200k
+Real AI/ML/DL/GNN stack for H2Fleet: six pure-PyTorch models (all ≤ 200k
 params, CPU-first), a synthetic-data bootstrap, a full training pipeline, an
 inference server with champion/challenger A/B and drift monitoring, continuous
 training with promote-only-if-better, and a Neo4j graph bridge.
@@ -18,13 +18,16 @@ training with promote-only-if-better, and a Neo4j graph bridge.
 | `maintenance_lstm` | LSTM + risk/days heads | (T,5) telemetry window: h2_level, fuel_cell_kw, battery_soc, speed, ambient temp | per component (fuel_cell, compressor, tank_valve, battery): risk 0..1 + days-to-failure | 5,256 |
 | `demand_forecaster` | GRU + linear decode | (72h,8) ridership history + calendar/weather | next-24h ridership per route | 19,928 |
 | `leak_autoencoder` | dense AE (8→16→8→4) | 8-dim H2 sensor vector | reconstruction-error anomaly score | 636 |
+| `ev_thermal_autoencoder` | dense AE (4→16→8→4) | 4-dim battery-pack vector (cell_temp_c, cell_voltage_v, pack_current_a, ambient_c) | thermal-runaway anomaly score | 504 |
 | `fleet_gcn` | 2-layer GCN, manual D^-1/2(A+I)D^-1/2 | route/station/depot graph, 7 node features | per-node delay (min) + H2 impact (kg) | 434 |
 | `carbon_forecaster` | dense MLP | 8 period features | kg CO2 avoided next period | 4,801 |
 
 ## Layout
 
 ```
-models/       the five nn.Modules + feature lists + adjacency normalisation
+models/       the six nn.Modules + feature lists + adjacency normalisation
+              (ev_thermal_autoencoder reuses the leak AE architecture with
+              n_features=4 carried in the artifact model_config)
 data/synth.py synthetic generator (seeded from infra/sql/002_seed.sql schema)
 training/
   train.py       training CLI (--source synth|postgres|iceberg, --finetune-from,
@@ -35,7 +38,7 @@ training/
 app/          FastAPI inference server (main, serving, registry, drift, ab, schemas)
 artifacts/    <model>/<version>/{weights.pt, metrics.json, feature_schema.json}
               + registry.json (champion/challenger)
-tests/        pytest suite (35 tests)
+tests/        pytest suite (54 tests)
 ```
 
 ## Quickstart
@@ -62,7 +65,8 @@ the path — `tests/conftest.py` wires both).
 |---|---|---|
 | `POST /v1/ml/maintenance/score` | `{bus_id, window: [[5] x T]}` | per-component risk + days, variant, version |
 | `POST /v1/ml/demand/forecast` | `{route_id, history: [{ts,ridership,temp_c?,precip_mm?} x >=72]}` | 24 hourly ridership points |
-| `POST /v1/ml/leak/score` | `{subject, readings: [[8] x N]}` | anomaly scores, flags, threshold |
+| `POST /v1/ml/leak/score` | `{subject, domain?, readings: [[8] x N]}` | anomaly scores, flags, threshold, domain |
+| `POST /v1/ml/leak/score` (ev_thermal) | `{subject, domain: "ev_thermal", readings: [[4] x N]}` | thermal-runaway scores via `ev_thermal_autoencoder` |
 | `POST /v1/ml/fleet/propagate` | `{node_features: [[7] x N], adjacency?}` | per-node delay + H2 impact |
 | `POST /v1/ml/carbon/forecast` | `{subject, periods: [[8] x N]}` | kg CO2 avoided per period |
 | `GET /v1/ml/models` | — | loaded versions, metrics, params, registry |
@@ -102,7 +106,30 @@ python -m training.train --model all --source iceberg --lakehouse-dir /mnt/lakeh
 
 # distributed runtime (automatic local fallback when ray isn't installed)
 python -m training.train --model all --ray
+
+# multi-energy synth generation (h2|battery|diesel|mixed) — the ev_thermal
+# domain trains on battery_thermal.parquet regardless of mix
+python -m training.train --model ev_thermal_autoencoder --source synth \
+    --fleet-mix mixed --epochs 8 --register
 ```
+
+### Safety domain packs (h2 + ev_thermal)
+
+`POST /v1/ml/leak/score` is an anomaly-DOMAIN endpoint: `domain='h2'` (default,
+backward compatible) scores the h2_ppm leak vector with `leak_autoencoder`;
+`domain='ev_thermal'` accepts battery telemetry
+(`cell_temp_c, cell_voltage_v, pack_current_a, ambient_c` per row) and scores
+thermal-runaway risk with `ev_thermal_autoencoder` — same AE architecture,
+same artifact layout (`weights.pt` + `metrics.json` + `feature_schema.json`
+with `extra.anomaly_threshold`), same drift-monitor wiring.
+
+> **Honest status:** the shipped `ev_thermal_autoencoder` v1.0.0 weights are
+> trained on **synthetic battery-fleet data** (`data/synth.py`,
+> rare-but-clustered runaway-precursor episodes; `metrics.json` says
+> `source: synth`). The platform has no real pack telemetry yet — the
+> continuous-training loop (`training/continuous.py`, model name
+> `ev_thermal_autoencoder`) fine-tunes and promotes from live data via
+> `--source postgres` / `--source iceberg` once `battery_thermal` rows exist.
 
 - splits: group-aware (bus/route) for maintenance/leak/carbon, chronological
   for demand, node-holdout for the GCN — no leakage into test metrics
