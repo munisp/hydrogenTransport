@@ -8,6 +8,8 @@
     "ts": "2025-01-15T08:34:58Z",
     "h2_level_pct": 63.8,
     "consumption_kg_per_100km": 8.1,
-    "estimated_range_km": 296.0
+    "estimated_range_km": 296.0,
+    "energy_level_pct": 63.8,
+    "energy_unit": "kg"
   }
 }

@@ -6,6 +6,7 @@
   "data": {
     "station_id": "c9e7d5b3-2f4a-4b6c-9d8e-7f6a5b4c3d2e",
     "status": "maintenance",
-    "available_kg": 790.0
+    "available_kg": 790.0,
+    "station_type": "h2"
   }
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://h2fleet.example/schemas/twin.updated.json",
   "title": "twin.updated",
-  "description": "Digital-twin state change notification (hot state lives in Redis twin:<bus_id>). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "description": "Digital-twin state change notification (hot state lives in Redis twin:<bus_id>). CloudEvents-ish envelope (SPEC.md §3.3).",
   "type": "object",
   "properties": {
     "id": {

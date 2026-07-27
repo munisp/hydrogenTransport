@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://h2fleet.example/schemas/fuel.reading.json",
   "title": "fuel.reading",
-  "description": "H2 tank level / consumption reading (fuel-monitoring). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "description": "H2 tank level / consumption reading (fuel-monitoring). CloudEvents-ish envelope (SPEC.md §3.3).",
   "type": "object",
   "properties": {
     "id": {
@@ -43,6 +43,17 @@
         },
         "estimated_range_km": {
           "type": "number"
+        },
+        "energy_level_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Wave-5 additive: generic energy level (h2_level_pct mirror for H2 buses, SOC% for battery, tank% for diesel/CNG)."
+        },
+        "energy_unit": {
+          "type": "string",
+          "enum": ["kg", "kwh", "liters"],
+          "description": "Wave-5 additive: unit of the energy inventory (kg for H2/CNG, kwh for battery, liters for diesel)."
         }
       },
       "required": [

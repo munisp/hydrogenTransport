@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://h2fleet.example/schemas/telemetry.enriched.json",
   "title": "telemetry.enriched",
-  "description": "Validated telemetry enriched with route/depot lookup by telemetry-ingest. CloudEvents-ish envelope (SPEC.md \u00a73.3).",
+  "description": "Validated telemetry enriched with route/depot lookup by telemetry-ingest. CloudEvents-ish envelope (SPEC.md §3.3).",
   "type": "object",
   "properties": {
     "id": {
@@ -51,6 +51,21 @@
         },
         "odometer_km": {
           "type": "number"
+        },
+        "energy_level_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Wave-5 additive: generic energy level (h2_level_pct mirror for H2 buses, SOC% for battery, tank% for diesel/CNG)."
+        },
+        "powertrain_kw": {
+          "type": "number",
+          "description": "Wave-5 additive: generic powertrain output (fuel_cell_kw mirror for H2 buses)."
+        },
+        "energy_type": {
+          "type": "string",
+          "enum": ["h2", "battery", "diesel", "cng"],
+          "description": "Wave-5 additive: vehicle energy vector; defaults to 'h2' for the existing fleet."
         },
         "lat": {
           "type": "number",
