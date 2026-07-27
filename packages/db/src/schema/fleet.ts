@@ -1,5 +1,5 @@
 // fleet schema (migration 0001_core.sql + 0004_telemetry_dedup.sql +
-// 0007_wave4_business_rules.sql).
+// 0007_wave4_business_rules.sql + 0008_energy_vectors.sql).
 // fleet.telemetry is a TimescaleDB hypertable with UNIQUE(bus_id, ts),
 // 90-day retention and 7-day compression — modeled here as a plain table;
 // the hypertable/policy DDL stays in goose migrations.
@@ -16,6 +16,10 @@ export const vehicles = fleet.table("vehicles", {
   model: text("model"),
   h2CapacityKg: numeric("h2_capacity_kg"),
   status: text("status").notNull().default("active"), // active|maintenance|depot|retired
+  // 0008: vehicle energy vector (Wave-5 multi-energy fleets); the existing
+  // fleet stays 'h2'. CHECK (energy_type IN ('h2','battery','diesel','cng'))
+  // lives in the goose migration.
+  energyType: text("energy_type").notNull().default("h2"), // h2|battery|diesel|cng
   geom: geometryPoint("geom"),
 });
 
@@ -29,6 +33,11 @@ export const telemetry = fleet.table(
     fuelCellKw: numeric("fuel_cell_kw"),
     batterySocPct: numeric("battery_soc_pct"),
     odometerKm: numeric("odometer_km"),
+    // 0008 (additive, nullable): generic energy fields — H2 buses write both
+    // the h2_* columns and these mirrors; battery/diesel/cng write only these.
+    energyLevelPct: numeric("energy_level_pct"),
+    powertrainKw: numeric("powertrain_kw"),
+    energyType: text("energy_type"), // h2|battery|diesel|cng
     geom: geometryPoint("geom"),
   },
   (t) => ({

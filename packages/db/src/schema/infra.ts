@@ -1,7 +1,7 @@
 // infra schema (migrations 0001_core.sql + 0003_supplemental.sql + 0005_missing_schemas.sql +
-// 0007_wave4_business_rules.sql).
+// 0007_wave4_business_rules.sql + 0008_energy_vectors.sql).
 import { sql } from "drizzle-orm";
-import { index, jsonb, numeric, pgSchema, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, numeric, pgSchema, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 import { geometryPoint } from "./columns";
 import { maintenancePredictions, vehicles } from "./fleet";
@@ -14,8 +14,54 @@ export const stations = infra.table("stations", {
   capacityKg: numeric("capacity_kg"),
   availableKg: numeric("available_kg"),
   status: text("status").notNull().default("online"), // online|offline|maintenance
+  // 0008 (Wave-5): station energy domain — existing stations stay 'h2'.
+  // CHECK (station_type IN ('h2','ev_charger','diesel','cng','mixed')) lives
+  // in the goose migration.
+  stationType: text("station_type").notNull().default("h2"), // h2|ev_charger|diesel|cng|mixed
+  availableKwh: numeric("available_kwh"), // EV inventory (ev_charger stations)
+  chargerCount: integer("charger_count"), // number of charge points (ev_charger/mixed)
   geom: geometryPoint("geom"),
 });
+
+// 0008 (Wave-5): OCPP charge-point inventory, written by
+// services/python/ocpp-gateway (W4).
+export const chargePoints = infra.table(
+  "charge_points",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    stationId: uuid("station_id").notNull().references(() => stations.id),
+    ocppId: text("ocpp_id").notNull().unique(),
+    vendor: text("vendor"),
+    model: text("model"),
+    status: text("status").notNull().default("Unavailable"), // OCPP 1.6J charge-point status
+    lastHeartbeat: timestamp("last_heartbeat", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    stationIdx: index("charge_points_station_idx").on(t.stationId),
+  }),
+);
+
+// 0008 (Wave-5): OCPP charging sessions (StartTransaction/StopTransaction).
+export const chargingSessions = infra.table(
+  "charging_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chargePointId: uuid("charge_point_id").notNull().references(() => chargePoints.id),
+    busId: text("bus_id"), // free-text from OCPP idTag/vehicle mapping, may be NULL
+    connectorId: integer("connector_id").notNull(),
+    idTag: text("id_tag"),
+    meterStart: numeric("meter_start").notNull(),
+    meterStop: numeric("meter_stop"),
+    kwh: numeric("kwh"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    status: text("status").notNull().default("active"), // active|completed|failed
+  },
+  (t) => ({
+    cpIdx: index("charging_sessions_cp_idx").on(t.chargePointId, t.startedAt),
+  }),
+);
 
 export const incidents = infra.table(
   "incidents",

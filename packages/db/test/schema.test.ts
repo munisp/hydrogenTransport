@@ -8,9 +8,12 @@ import { desc, sql } from "drizzle-orm";
 import {
   auditLog,
   carbonCredits,
+  chargePoints,
+  chargingSessions,
   farePayments,
   featureToggles,
   incidents,
+  stations,
   telemetry,
   trades,
   vehicles,
@@ -29,6 +32,38 @@ describe("@h2fleet/db schema", () => {
     for (const t of [featureToggles, vehicles, telemetry, incidents, workOrders, carbonCredits, farePayments, auditLog]) {
       expect(t).toBeDefined();
     }
+  });
+
+  it("mirrors 0008 (Wave-5 energy vectors) columns and tables", () => {
+    // fleet.vehicles.energy_type (NOT NULL DEFAULT 'h2')
+    expect(vehicles.energyType.name).toBe("energy_type");
+    expect(vehicles.energyType.notNull).toBe(true);
+    // fleet.telemetry additive generic energy columns
+    expect(telemetry.energyLevelPct.name).toBe("energy_level_pct");
+    expect(telemetry.powertrainKw.name).toBe("powertrain_kw");
+    expect(telemetry.energyType.name).toBe("energy_type");
+    // infra.stations type + EV inventory
+    expect(stations.stationType.name).toBe("station_type");
+    expect(stations.availableKwh.name).toBe("available_kwh");
+    expect(stations.chargerCount.name).toBe("charger_count");
+    // new OCPP contract tables (written by the Wave-5 ocpp-gateway)
+    expect(chargePoints).toBeDefined();
+    expect(chargingSessions).toBeDefined();
+    expect(chargePoints.ocppId.name).toBe("ocpp_id");
+    expect(chargingSessions.chargePointId.name).toBe("charge_point_id");
+    expect(chargingSessions.meterStart.notNull).toBe(true);
+  });
+
+  it("builds a parameterized select over charge points", async () => {
+    const { db, query } = mockDb([{ ocpp_id: "CP-0001", status: "Available" }]);
+    const rows = await db
+      .select({ ocppId: chargePoints.ocppId, status: chargePoints.status })
+      .from(chargePoints)
+      .limit(10);
+    expect(rows).toHaveLength(1);
+    const [cfg, params] = query.mock.calls[0] as [{ text: string }, unknown[]];
+    expect(cfg.text).toContain('"infra"."charge_points"');
+    expect(params).toContain(10);
   });
 
   it("maps snake_case columns to camelCase fields", () => {
