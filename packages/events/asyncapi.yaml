@@ -217,6 +217,9 @@ components:
               fuel_cell_kw: 84.0
               battery_soc_pct: 73.5
               odometer_km: 41230.7
+              energy_level_pct: 61.2
+              powertrain_kw: 84.0
+              energy_type: h2
               lat: 52.5200
               lon: 13.4050
     TelemetryEnriched:

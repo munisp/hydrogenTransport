@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://h2fleet.example/schemas/station.status.changed.json",
   "title": "station.status.changed",
-  "description": "Refueling station status/inventory change (refueling-stations). CloudEvents-ish envelope (SPEC.md §3.3).",
+  "description": "Refueling station status/inventory change (refueling-stations). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
   "type": "object",
   "properties": {
     "id": {

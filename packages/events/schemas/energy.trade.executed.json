@@ -35,7 +35,9 @@
             "h2_sale",
             "h2_purchase",
             "energy_sale",
-            "energy_purchase"
+            "energy_purchase",
+            "ev-v2g-export",
+            "ev-charge-purchase"
           ]
         },
         "quantity_kg": {

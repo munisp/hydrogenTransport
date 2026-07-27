@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://h2fleet.example/schemas/telemetry.enriched.json",
   "title": "telemetry.enriched",
-  "description": "Validated telemetry enriched with route/depot lookup by telemetry-ingest. CloudEvents-ish envelope (SPEC.md §3.3).",
+  "description": "Validated telemetry enriched with route/depot lookup by telemetry-ingest. CloudEvents-ish envelope (SPEC.md \u00a73.3).",
   "type": "object",
   "properties": {
     "id": {

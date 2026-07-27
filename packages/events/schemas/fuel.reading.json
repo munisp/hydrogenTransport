@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://h2fleet.example/schemas/fuel.reading.json",
   "title": "fuel.reading",
-  "description": "H2 tank level / consumption reading (fuel-monitoring). CloudEvents-ish envelope (SPEC.md §3.3).",
+  "description": "H2 tank level / consumption reading (fuel-monitoring). CloudEvents-ish envelope (SPEC.md \u00a73.3).",
   "type": "object",
   "properties": {
     "id": {

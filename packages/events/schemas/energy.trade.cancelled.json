@@ -31,7 +31,7 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["h2-sale", "h2-purchase", "energy-export"]
+          "enum": ["h2-sale", "h2-purchase", "energy-export", "ev-v2g-export", "ev-charge-purchase"]
         },
         "quantity_kg": {
           "type": "number",
