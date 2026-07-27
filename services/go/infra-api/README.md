@@ -8,13 +8,16 @@ a disabled module returns **404** (fail-closed).
 
 | Method | Path | Module gate | Auth |
 |--------|------|-------------|------|
-| GET   | `/v1/stations` | `refueling-stations` | — |
+| GET   | `/v1/stations` (Wave 5: `station_type` + `available_kwh`/`charger_count`) | `refueling-stations` | — |
 | GET   | `/v1/stations/{id}` | `refueling-stations` | — |
-| POST  | `/v1/stations` | `refueling-stations` | JWT |
-| PATCH | `/v1/stations/{id}/status` → publishes `station.status.changed` | `refueling-stations` | JWT |
+| POST  | `/v1/stations` (`station_type` h2\|ev_charger\|diesel\|cng\|mixed, default h2) | `refueling-stations` | JWT |
+| PATCH | `/v1/stations/{id}/status` (+ optional `available_kg`/`available_kwh`) → publishes `station.status.changed` (Wave 5: + `station_type`, `available_kwh`) | `refueling-stations` | JWT |
+| GET   | `/v1/stations/{id}/chargers` — OCPP charge points at the station (Wave 5) | `refueling-stations` | — |
+| GET   | `/v1/chargers?station_id=` — fleet-wide charge-point inventory with status (Wave 5) | `refueling-stations` | — |
+| GET   | `/v1/chargers/{ocpp_id}/sessions?status=` — charging sessions, newest first (Wave 5) | `refueling-stations` | — |
 | GET   | `/v1/stations/{id}/queue` — active entries with position + estimated wait | `refueling-stations` | — |
 | POST  | `/v1/stations/{id}/queue` — join (waiting, or serving immediately when empty) | `refueling-stations` | JWT |
-| POST  | `/v1/stations/{id}/queue/{entry}/complete` — `{dispensed_kg}` decrements station `available_kg`; promotes next waiting bus | `refueling-stations` | JWT (operator) |
+| POST  | `/v1/stations/{id}/queue/{entry}/complete` — `{dispensed_kg\|dispensed_amount}` draws down station inventory branched by `station_type` (Wave 5: `available_kg` for h2/cng/diesel-in-liters, `available_kwh` for ev_charger; response names `dispensed_unit`); promotes next waiting bus | `refueling-stations` | JWT (operator) |
 | POST  | `/v1/stations/{id}/queue/{entry}/leave` — waiting/serving → left; promotes next waiting bus | `refueling-stations` | JWT |
 | GET   | `/v1/incidents?status=` | `leak-detection` | — |
 | POST  | `/v1/incidents` | `leak-detection` | JWT |
@@ -26,7 +29,16 @@ a disabled module returns **404** (fail-closed).
 | POST  | `/v1/dispatch/jobs/{id}/accept` | `dispatch-workforce` | JWT (driver) |
 | POST  | `/v1/dispatch/jobs/{id}/cancel` → signals `job-cancelled` to the workflow | `dispatch-workforce` | JWT (operator) |
 | GET   | `/v1/compliance/reports`, `/v1/compliance/reports/{id}` | `compliance-reporting` | — |
-| POST  | `/v1/compliance/reports/generate?days=` (default 30, 1..365; sections: incidents by status/severity, unresolved leaks, MTTR, maintenance predictions, open work orders, fleet availability, station inventory; scheduled via `COMPLIANCE_REPORT_INTERVAL`) | `compliance-reporting` | JWT |
+| POST  | `/v1/compliance/reports/generate?days=&domain=` (days default 30, 1..365; sections: incidents by status/severity, MTTR, maintenance predictions, open work orders, fleet availability, station inventory + domain-pack sections; scheduled via `COMPLIANCE_REPORT_INTERVAL`) | `compliance-reporting` | JWT |
+
+Wave 5 compliance template packs (`?domain=`, default fleet config
+`COMPLIANCE_DOMAIN`, else `h2` — the pre-Wave-5 report is unchanged):
+`h2` adds unresolved-leak aging over `h2_leak`; `battery` drops leak aging
+and adds battery-thermal incident categories (`battery_thermal`); `diesel`
+drops leak sections; `cng` keeps gas-leak aging over `cng_leak`. The report
+body names the selected pack in `domain`. The OCPP charge-point tables
+(`infra.charge_points`, `infra.charging_sessions`, migration 0008) are
+written by the Wave-5 ocpp-gateway; this service only reads them.
 | GET   | `/v1/depot/bays` | `depot-management` | — |
 | POST  | `/v1/depot/bays/{id}/assign`, `/v1/depot/bays/{id}/release` | `depot-management` | JWT (operator) |
 | GET   | `/v1/depot/work-orders?status=` | `depot-management` | — |

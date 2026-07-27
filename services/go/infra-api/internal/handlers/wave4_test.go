@@ -174,8 +174,8 @@ func TestCompleteStationQueueEntry_InsufficientInventory(t *testing.T) {
 	pool.ExpectBegin()
 	pool.ExpectQuery(`WITH done AS`).
 		WithArgs(entry, station).
-		WillReturnRows(pgxmock.NewRows(append(queueCols, "available")).
-			AddRow(entry, station, "22222222-2222-2222-2222-222222222222", joined, "completed", 10.0))
+		WillReturnRows(pgxmock.NewRows(append(queueCols, "available", "station_type")).
+			AddRow(entry, station, "22222222-2222-2222-2222-222222222222", joined, "completed", 10.0, "h2"))
 	pool.ExpectRollback()
 
 	rec := httptest.NewRecorder()
