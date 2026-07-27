@@ -37,8 +37,9 @@ from torch import nn
 from app.registry import (MODEL_CLASSES, MODEL_NAMES, artifact_dir,
                           new_version, read_registry, save_artifact,
                           write_registry)
-from models import (CARBON_FEATURES, DEMAND_FEATURES, GRAPH_NODE_FEATURES,
-                    LEAK_SENSOR_FEATURES, SEQ_FEATURES, normalize_adjacency)
+from models import (CARBON_FEATURES, DEMAND_FEATURES, EV_THERMAL_FEATURES,
+                    GRAPH_NODE_FEATURES, LEAK_SENSOR_FEATURES, SEQ_FEATURES,
+                    normalize_adjacency)
 from models.maintenance_lstm import COMPONENTS
 from training import datasets as ds
 
@@ -304,6 +305,56 @@ def train_leak(frames, args, device):
     return net, metrics, schema, {"n_features": len(LEAK_SENSOR_FEATURES)}
 
 
+def train_ev_thermal(frames, args, device):
+    """ev_thermal safety domain pack: same AE recipe as train_leak over
+    battery-pack telemetry (EV_THERMAL_FEATURES), label column is_anomaly.
+
+    Honest status: the shipped weights are trained on SYNTHETIC battery-fleet
+    data (data/synth.py); continuous training (--source postgres/iceberg once
+    live pack telemetry accumulates) is the path to real-data weights."""
+    X, y, groups = ds.build_ev_thermal(frames["battery_thermal"])
+    m_tr, m_va, m_te = ds.split_by_group(groups, seed=args.seed)
+    m_tr = m_tr & (y == 0)          # autoencoder trains on NORMAL data only
+    stats = ds.feature_stats_from_tensor(X[m_tr], EV_THERMAL_FEATURES)
+    Xn = ds.zscore(X, stats, EV_THERMAL_FEATURES)
+
+    net = MODEL_CLASSES["ev_thermal_autoencoder"](n_features=len(EV_THERMAL_FEATURES))
+    if args.finetune_from:
+        _load_finetune("ev_thermal_autoencoder", net, args.finetune_from, args.artifacts_dir)
+    net.to(device)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+    mse = nn.MSELoss()
+    rng = np.random.default_rng(args.seed)
+    tr_idx = np.where(m_tr)[0]
+    for epoch in range(args.epochs):
+        net.train()
+        rng.shuffle(tr_idx)
+        for i in range(0, len(tr_idx), args.batch_size):
+            b = tr_idx[i:i + args.batch_size]
+            opt.zero_grad()
+            loss = mse(net(_t(Xn[b], device)), _t(Xn[b], device))
+            loss.backward()
+            opt.step()
+        log.info("epoch %d train_loss=%.5f", epoch, loss.item())
+
+    net.eval()
+    with torch.no_grad():
+        err_va = ((net(_t(Xn[m_va], device)) - _t(Xn[m_va], device)) ** 2).mean(1).cpu().numpy()
+        err_te = ((net(_t(Xn[m_te], device)) - _t(Xn[m_te], device)) ** 2).mean(1).cpu().numpy()
+    normal_va = err_va[y[m_va] == 0]
+    threshold = float(np.quantile(normal_va, 0.99)) if len(normal_va) else float(err_va.mean())
+    auc = _safe_auc(y[m_te], err_te)
+    fpr = float((err_te[y[m_te] == 0] > threshold).mean()) if (y[m_te] == 0).any() else float("nan")
+    tpr = float((err_te[y[m_te] == 1] > threshold).mean()) if (y[m_te] == 1).any() else float("nan")
+    metrics = {"auc": auc, "threshold": threshold, "fpr_at_threshold": fpr,
+               "tpr_at_threshold": tpr, "domain": "ev_thermal",
+               "primary_metric": "auc", "primary_value": auc}
+    schema = {"features": EV_THERMAL_FEATURES, "stats": stats,
+              "baseline": baseline_histograms(X[m_tr], EV_THERMAL_FEATURES),
+              "extra": {"anomaly_threshold": threshold, "domain": "ev_thermal"}}
+    return net, metrics, schema, {"n_features": len(EV_THERMAL_FEATURES)}
+
+
 def train_gcn(frames, args, device):
     adj, X, delay_y, energy_y, node_names = ds.build_graph(frames["graph"])
     stats = ds.feature_stats_from_tensor(X, GRAPH_NODE_FEATURES)
@@ -405,6 +456,7 @@ TRAINERS = {
     "maintenance_lstm": train_maintenance,
     "demand_forecaster": train_demand,
     "leak_autoencoder": train_leak,
+    "ev_thermal_autoencoder": train_ev_thermal,
     "fleet_gcn": train_gcn,
     "carbon_forecaster": train_carbon,
 }
@@ -414,6 +466,7 @@ DEFAULT_LR = {
     "maintenance_lstm": 1e-3,
     "demand_forecaster": 3e-3,
     "leak_autoencoder": 1e-3,
+    "ev_thermal_autoencoder": 1e-3,
     "fleet_gcn": 5e-3,
     "carbon_forecaster": 3e-3,
 }
@@ -458,6 +511,9 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, choices=MODEL_NAMES + ["all"])
     ap.add_argument("--source", default="synth", choices=["synth", "postgres", "iceberg"])
+    ap.add_argument("--fleet-mix", default="h2",
+                    choices=["h2", "battery", "diesel", "mixed"],
+                    help="energy mix for on-demand synth generation (source=synth)")
     ap.add_argument("--data-dir", default=os.environ.get("SYNTH_DATA_DIR", "data/synth_out"))
     ap.add_argument("--database-url", default=os.environ.get("DATABASE_URL", ""))
     ap.add_argument("--lakehouse-dir", default=os.environ.get("LAKEHOUSE_DIR", ""))
@@ -485,7 +541,8 @@ def main() -> None:
         device = "cpu"
 
     frames = ds.load_frames(args.source, args.data_dir, args.database_url,
-                            args.lakehouse_dir, days=args.days, seed=args.seed)
+                            args.lakehouse_dir, days=args.days, seed=args.seed,
+                            fleet_mix=args.fleet_mix)
     models = MODEL_NAMES if args.model == "all" else [args.model]
     results = [run_one(m, frames, args, device) for m in models]
     print(json.dumps(results, indent=2))
