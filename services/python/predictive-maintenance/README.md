@@ -34,6 +34,23 @@ per-component `risk_score` + `predicted_failure_at`, and the Kafka loop
 (`maintenance.predicted`) works with any of the three backends. Set
 `MODEL_ARTIFACTS_DIR` to the shared ml-platform artifacts volume to enable (1).
 
+## Safety domain packs (Wave-5)
+
+Leak/thermal anomaly scoring is served by the ml-platform anomaly-domain
+endpoint (`POST /v1/ml/leak/score`, same `ml_artifacts` volume this service
+loads its LSTM from): `domain='h2'` (default, unchanged) runs the h2_ppm
+`leak_autoencoder`; `domain='ev_thermal'` accepts battery telemetry
+(`cell_temp_c, cell_voltage_v, pack_current_a, ambient_c`) and scores
+thermal-runaway risk with `ev_thermal_autoencoder` (same AE architecture and
+artifact layout, registered as a separate model in
+`artifacts/registry.json`).
+
+> **Honest status:** the shipped `ev_thermal_autoencoder` weights are trained
+> on **synthetic battery-fleet data** (ml-platform `data/synth.py`;
+> `metrics.json` is labelled `source: synth`). The ml-platform
+> continuous-training loop improves them from live data (model name
+> `ev_thermal_autoencoder`) once real pack telemetry accumulates.
+
 The aggregate feature engineering lives in `app/features.py` (24h aggregates over
 `fleet.telemetry`: load volatility, max/avg fuel-cell kW, H2 min/avg, refuel
 cycles via `LAG`, battery SoC stats, km driven).

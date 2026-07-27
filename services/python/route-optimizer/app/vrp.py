@@ -1,15 +1,22 @@
-"""OR-Tools VRP core with H2 range constraints + deterministic refuel planner.
+"""OR-Tools VRP core with energy-range constraints + deterministic refuel planner.
 
 Phase 1 (CP-SAT routing): assign/order daily stops across buses minimizing
 total distance, with a per-vehicle distance dimension capped at each bus's
-current H2 range (kg on board / consumption). Vehicles start at their actual
-positions and end at the depot; stops that cannot fit any range budget are
-dropped with a penalty and reported.
+current energy range (units on board / consumption). Vehicles start at their
+actual positions and end at the depot; stops that cannot fit any range budget
+are dropped with a penalty and reported.
 
 Phase 2 (deterministic refuel insertion): walk each route; whenever the next
-leg would breach the safety range, insert the nearest reachable station with
+leg would breach the safety range, insert the nearest reachable COMPATIBLE
+station (station_type matches the bus energy_type; 'mixed' serves all but is
+weighted by MIXED_STATION_DETOUR_FACTOR vs an exact-type station) with
 sufficient inventory (inventory is decremented, so concurrent refuels respect
 station stock).
+
+Consumption is per energy_type (kg/100km h2+cng, kWh/100km battery,
+L/100km diesel); the learned per-bus rate (fleet.fuel_consumption, Wave-4)
+wins over the fleet defaults. For an h2 bus with no learned rate the math is
+identical to the pre-Wave-5 H2-only behaviour.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from dataclasses import dataclass, field
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 from .config import settings
-from .models import Bus, Problem, RefuelEvent, Station, Stop
+from .models import Bus, Problem, RefuelEvent, Station, Stop, station_serves
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -38,8 +45,22 @@ class RawRoute:
     km: float = 0.0
 
 
+def consumption_per_km(bus: Bus) -> float:
+    """Consumption in the bus's energy unit per km: learned per-bus rate
+    (fleet.fuel_consumption) when available, fleet default per energy_type
+    otherwise."""
+    if bus.consumption_per_100km and bus.consumption_per_100km > 0:
+        return bus.consumption_per_100km / 100.0
+    return {
+        "h2": settings.h2_consumption_kg_per_km,
+        "battery": settings.battery_consumption_kwh_per_km,
+        "diesel": settings.diesel_consumption_l_per_km,
+        "cng": settings.cng_consumption_kg_per_km,
+    }.get(bus.energy_type, settings.h2_consumption_kg_per_km)
+
+
 def range_km(bus: Bus) -> float:
-    return bus.h2_kg / settings.h2_consumption_kg_per_km
+    return bus.level_units / consumption_per_km(bus)
 
 
 def solve_vrp(problem: Problem) -> tuple[list[RawRoute], list[str], str]:
@@ -135,16 +156,44 @@ def _max_refill_km(problem: Problem) -> float:
     (only when stations exist with stock)."""
     if not problem.stations:
         return 0.0
-    max_capacity = max((b.h2_capacity_kg for b in problem.buses), default=0.0)
-    return max_capacity / settings.h2_consumption_kg_per_km
+    return max((b.capacity_units / consumption_per_km(b) for b in problem.buses),
+               default=0.0)
+
+
+def _station_stock(st: Station, energy_type: str) -> float:
+    """Stock relevant to the consuming energy_type: battery draws kWh
+    (available_kwh column, 0008); everything else draws available_kg
+    (litres for diesel stations — same numeric stock column)."""
+    if energy_type == "battery" and st.available_kwh is not None:
+        return st.available_kwh
+    return st.available_kg
+
+
+def _station_take(st: Station, energy_type: str, units: float) -> None:
+    """Decrement stock in the unit the bus consumed (see _station_stock)."""
+    if energy_type == "battery" and st.available_kwh is not None:
+        st.available_kwh -= units
+    else:
+        st.available_kg -= units
+
+
+def _station_weight(st: Station, energy_type: str) -> float:
+    """Exact-type stations are preferred; 'mixed' serves all but is weighted
+    by MIXED_STATION_DETOUR_FACTOR (a mixed station must be meaningfully
+    closer to beat a dedicated one)."""
+    if st.station_type == "mixed":
+        return settings.mixed_station_detour_factor
+    return 1.0
 
 
 def plan_refuels(route: RawRoute, stations: list[Station], depot: Stop) -> tuple[list[RefuelEvent], float, bool, list[str]]:
-    """Phase 2. Returns (refuels, h2_end_kg, feasible, notes). Decrements
-    `available_kg` on the shared Station objects so concurrent refuels across
-    buses respect station stock."""
+    """Phase 2. Returns (refuels, energy_end, feasible, notes) where
+    energy_end is in the bus's energy unit. Decrements stock on the shared
+    Station objects so concurrent refuels across buses respect station stock.
+    Only stations whose station_type serves the bus's energy_type are
+    considered ('mixed' serves all, weighted by the detour factor)."""
     bus = route.bus
-    consumption = settings.h2_consumption_kg_per_km
+    consumption = consumption_per_km(bus)
     safety = settings.range_safety_km
     notes: list[str] = []
     refuels: list[RefuelEvent] = []
@@ -157,36 +206,40 @@ def plan_refuels(route: RawRoute, stations: list[Station], depot: Stop) -> tuple
     for seq, (stop_id, lat, lon) in enumerate(waypoints):
         leg = haversine_km(*cur, lat, lon)
         if remaining_km - leg < safety:
-            # Need hydrogen before this leg: pick nearest reachable station
-            # with enough stock to make the stop worthwhile.
-            needed_kg = bus.h2_capacity_kg - remaining_km * consumption
+            # Need energy before this leg: pick the nearest reachable
+            # compatible station with enough stock to make the stop worthwhile.
+            needed_units = bus.capacity_units - remaining_km * consumption
             candidates = []
             for st in stations:
+                if not station_serves(st.station_type, bus.energy_type):
+                    continue  # incompatible station_type for this energy_type
                 d_to = haversine_km(*cur, st.lat, st.lon)
                 if d_to > remaining_km - safety:
                     continue  # cannot reach safely
-                if st.available_kg < min(needed_kg, 5.0):
+                if _station_stock(st, bus.energy_type) < min(needed_units, 5.0):
                     continue  # not enough stock
-                candidates.append((d_to, st))
+                candidates.append((d_to * _station_weight(st, bus.energy_type), d_to, st))
             if not candidates:
                 notes.append(
                     f"no reachable station with stock before {stop_id} "
-                    f"(remaining {remaining_km:.1f} km)"
+                    f"(compatible with {bus.energy_type}; remaining {remaining_km:.1f} km)"
                 )
                 return refuels, remaining_km * consumption, False, notes
-            d_to, st = min(candidates, key=lambda c: c[0])
-            kg_taken = min(needed_kg, st.available_kg)
-            st.available_kg -= kg_taken
+            _, d_to, st = min(candidates, key=lambda c: (c[0], c[1]))
+            units_taken = min(needed_units, _station_stock(st, bus.energy_type))
+            _station_take(st, bus.energy_type, units_taken)
             refuels.append(
                 RefuelEvent(
                     station_id=st.station_id,
                     station_name=st.name,
-                    kg_taken=round(kg_taken, 2),
+                    kg_taken=round(units_taken, 2),
                     at_stop_sequence=seq,
                     remaining_range_km_before=round(remaining_km, 1),
+                    station_type=st.station_type,
+                    energy_unit=bus.energy_unit,
                 )
             )
-            remaining_km = (remaining_km - d_to) + kg_taken / consumption
+            remaining_km = (remaining_km - d_to) + units_taken / consumption
             cur = (st.lat, st.lon)
             leg = haversine_km(*cur, lat, lon)
             if remaining_km - leg < safety:

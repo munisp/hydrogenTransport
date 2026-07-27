@@ -57,8 +57,7 @@ async def load_stops(pool, date: dt.date) -> list[Stop]:
     return [Stop(**dict(r)) for r in rows]
 
 
-async def _load_buses(pool, bus_ids: list[str] | None) -> list[Bus]:
-    sql = """
+_BUSES_SQL = """
         SELECT v.id::text                                   AS bus_id,
                v.fleet_no,
                coalesce(t.lat, ST_Y(v.geom))                AS lat,
@@ -75,23 +74,83 @@ async def _load_buses(pool, bus_ids: list[str] | None) -> list[Bus]:
         ) t ON true
         WHERE v.status = 'active'
     """
-    args: list = []
-    if bus_ids:
-        sql += " AND v.id = ANY($1::uuid[])"
-        args.append(bus_ids)
-    rows = await pool.fetch(sql, *args)
-    return [Bus(**dict(r)) for r in rows]
 
+# Wave-5 variant: energy_type (0008) + learned per-bus consumption
+# (fleet.fuel_consumption, Wave-4; fleet-api GET /v1/fuel/levels exposes the
+# same rate). energy_level_pct (0008) is preferred for non-h2 buses.
+_BUSES_SQL_ENERGY = """
+        SELECT v.id::text                                   AS bus_id,
+               v.fleet_no,
+               coalesce(t.lat, ST_Y(v.geom))                AS lat,
+               coalesce(t.lon, ST_X(v.geom))                AS lon,
+               v.h2_capacity_kg::float8,
+               coalesce(t.energy_level_pct, t.h2_level_pct, 100)::float8 AS h2_level_pct,
+               coalesce(v.energy_type, 'h2')                AS energy_type,
+               fc.kg_per_100km::float8                      AS learned_per_100km
+        FROM fleet.vehicles v
+        LEFT JOIN LATERAL (
+            SELECT h2_level_pct, energy_level_pct,
+                   ST_Y(tel.geom) AS lat, ST_X(tel.geom) AS lon
+            FROM fleet.telemetry tel
+            WHERE tel.bus_id = v.id
+            ORDER BY tel.ts DESC
+            LIMIT 1
+        ) t ON true
+        LEFT JOIN fleet.fuel_consumption fc ON fc.bus_id = v.id
+        WHERE v.status = 'active'
+    """
 
-async def _load_stations(pool) -> list[Station]:
-    rows = await pool.fetch(
-        """
+_STATIONS_SQL = """
         SELECT id::text AS station_id, name, ST_Y(geom) AS lat, ST_X(geom) AS lon,
                available_kg::float8
         FROM infra.stations
         WHERE status = 'online' AND available_kg > 0
         """
-    )
+
+# Wave-5 variant: station_type + kWh inventory (0008).
+_STATIONS_SQL_ENERGY = """
+        SELECT id::text AS station_id, name, ST_Y(geom) AS lat, ST_X(geom) AS lon,
+               available_kg::float8,
+               coalesce(station_type, 'h2') AS station_type,
+               available_kwh::float8
+        FROM infra.stations
+        WHERE status = 'online'
+          AND (available_kg > 0 OR available_kwh > 0)
+        """
+
+
+async def _load_buses(pool, bus_ids: list[str] | None) -> list[Bus]:
+    args: list = []
+    clause = ""
+    if bus_ids:
+        clause = " AND v.id = ANY($1::uuid[])"
+        args.append(bus_ids)
+    try:
+        rows = await pool.fetch(_BUSES_SQL_ENERGY + clause, *args)
+    except (asyncpg.exceptions.UndefinedColumnError,
+            asyncpg.exceptions.UndefinedTableError):
+        log.info("energy_type/fuel_consumption not present (pre-0008/0007); "
+                 "using legacy H2 bus query")
+        rows = await pool.fetch(_BUSES_SQL + clause, *args)
+    buses = []
+    for r in rows:
+        d = dict(r)
+        learned = d.pop("learned_per_100km", None)
+        bus = Bus(**d)
+        if learned and learned > 0:
+            bus.consumption_per_100km = float(learned)
+            bus.consumption_source = "learned"
+        buses.append(bus)
+    return buses
+
+
+async def _load_stations(pool) -> list[Station]:
+    try:
+        rows = await pool.fetch(_STATIONS_SQL_ENERGY)
+    except asyncpg.exceptions.UndefinedColumnError:
+        log.info("infra.stations station_type/available_kwh not present "
+                 "(pre-0008); using legacy H2 station query")
+        rows = await pool.fetch(_STATIONS_SQL)
     return [Station(**dict(r)) for r in rows]
 
 
@@ -145,20 +204,41 @@ def seed_problem(bus_ids: list[str] | None, date: dt.date) -> Problem:
 
 async def write_back_inventory(pool, plans) -> None:
     """Atomically apply the planned refuel draw-down to infra.stations.
-    Refuels whose recorded stock no longer covers the planned kg are skipped
-    and annotated on the plan (never a negative available_kg)."""
+    Refuels whose recorded stock no longer covers the planned amount are
+    skipped and annotated on the plan (never negative stock). kWh refuels
+    draw from available_kwh (migration 0008), everything else from
+    available_kg."""
     async with pool.acquire() as conn:
+        # Probe once (outside the tx body a failed UPDATE would poison it).
+        has_kwh = bool(await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'infra' AND table_name = 'stations' "
+            "AND column_name = 'available_kwh')"))
         async with conn.transaction():
             for plan in plans:
                 for refuel in plan.refuels:
-                    result = await conn.execute(
-                        """
-                        UPDATE infra.stations SET available_kg = available_kg - $2
-                        WHERE station_id = $1 AND available_kg >= $2
-                        """,
-                        refuel.station_id, refuel.kg_taken,
-                    )
+                    if refuel.energy_unit == "kwh":
+                        if not has_kwh:
+                            plan.notes.append(
+                                f"inventory write-back skipped for station {refuel.station_id}: "
+                                "available_kwh not present (pre-0008 schema)")
+                            continue
+                        result = await conn.execute(
+                            """
+                            UPDATE infra.stations SET available_kwh = available_kwh - $2
+                            WHERE station_id = $1 AND available_kwh >= $2
+                            """,
+                            refuel.station_id, refuel.kg_taken,
+                        )
+                    else:
+                        result = await conn.execute(
+                            """
+                            UPDATE infra.stations SET available_kg = available_kg - $2
+                            WHERE station_id = $1 AND available_kg >= $2
+                            """,
+                            refuel.station_id, refuel.kg_taken,
+                        )
                     if result.endswith(" 0"):
                         plan.notes.append(
                             f"inventory write-back skipped for station {refuel.station_id}: "
-                            "insufficient recorded available_kg")
+                            "insufficient recorded stock")

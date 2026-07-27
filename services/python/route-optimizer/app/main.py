@@ -1,8 +1,11 @@
 """route-optimizer API (port 8091).
 
 POST /v1/optimize/route {bus_ids?, date} -> OR-Tools VRP route + refuel plan
-with H2 range constraints. Deterministic seed-data fallback when the DB has
-no fleet yet. Gated on the `route-energy-optimizer` toggle (404 when off).
+with per-energy-type range constraints (h2 kg / battery kWh / diesel L /
+cng kg; learned per-bus consumption when fleet.fuel_consumption has one) and
+station_type-compatible refuel stops ('mixed' stations serve all).
+Deterministic seed-data fallback when the DB has no fleet yet. Gated on the
+`route-energy-optimizer` toggle (404 when off).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from .config import settings
 from .data import load_problem
 from .models import BusPlan, LegOut, OptimizeRequest, OptimizeResponse
 from .data import write_back_inventory
-from .vrp import haversine_km, plan_refuels, range_km, solve_vrp
+from .vrp import consumption_per_km, haversine_km, plan_refuels, range_km, solve_vrp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("route-optimizer")
@@ -82,16 +85,18 @@ async def optimize_route(req: OptimizeRequest, request: Request):
 
     routes, dropped, status = await _solve_in_thread(problem)
 
-    # Phase 2: refuel insertion against shared station inventory.
+    # Phase 2: refuel insertion against shared station inventory (only
+    # stations compatible with each bus's energy_type are considered).
     inventory = {s.station_id: s for s in problem.stations}
     plans: list[BusPlan] = []
     for route in routes:
-        refuels, h2_end, feasible, notes = plan_refuels(route, list(inventory.values()), problem.depot)
-        if h2_end < -1e-9:
+        refuels, energy_end, feasible, notes = plan_refuels(route, list(inventory.values()), problem.depot)
+        if energy_end < -1e-9:
             # A bus that cannot finish the route is STRANDED, never a plan
-            # with silently-negative H2 (BUSINESS_LOGIC_AUDIT §5).
+            # with silently-negative energy (BUSINESS_LOGIC_AUDIT §5).
             feasible = False
-            notes.append("stranded: route exceeds remaining H2 range (h2_end_kg < 0)")
+            notes.append(f"stranded: route exceeds remaining range "
+                         f"({route.bus.energy_unit} end < 0)")
         legs = [
             LegOut(sequence=i, stop_id=s.stop_id, stop_name=s.name, cumulative_km=0.0)
             for i, s in enumerate(route.stops)
@@ -105,6 +110,7 @@ async def optimize_route(req: OptimizeRequest, request: Request):
             leg.cumulative_km = round(cum, 2)
             cur = (stop.lat, stop.lon)
 
+        consumption_per_100 = round(consumption_per_km(route.bus) * 100.0, 3)
         plans.append(
             BusPlan(
                 bus_id=route.bus.bus_id,
@@ -112,11 +118,15 @@ async def optimize_route(req: OptimizeRequest, request: Request):
                 feasible=feasible,
                 notes=notes,
                 total_route_km=round(route.km, 2),
-                h2_start_kg=round(route.bus.h2_kg, 2),
-                h2_end_kg=round(h2_end, 2),
+                h2_start_kg=round(route.bus.level_units, 2),
+                h2_end_kg=round(energy_end, 2),
                 range_start_km=round(range_km(route.bus), 1),
                 legs=legs,
                 refuels=refuels,
+                energy_type=route.bus.energy_type,
+                energy_unit=route.bus.energy_unit,
+                consumption_per_100km=consumption_per_100,
+                consumption_source=route.bus.consumption_source,
             )
         )
 
