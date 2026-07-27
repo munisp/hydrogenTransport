@@ -38,6 +38,15 @@ pub struct TelemetryRaw {
     pub odometer_km: f64,
     pub lat: f64,
     pub lon: f64,
+    // Wave 5 (multi-energy fleet generalization): additive optional generic
+    // energy fields. Absent for legacy H2 publishers — see
+    // normalize_energy_fields for the compat mapping.
+    #[serde(default)]
+    pub energy_level_pct: Option<f64>,
+    #[serde(default)]
+    pub powertrain_kw: Option<f64>,
+    #[serde(default)]
+    pub energy_type: Option<String>,
 }
 
 /// `telemetry.enriched` data payload — raw fields + route/depot lookup.
@@ -75,6 +84,10 @@ pub enum ValidationError {
     Odometer(f64),
     #[error("fuel_cell_kw negative: {0}")]
     FuelCell(f64),
+    #[error("energy_level_pct out of range: {0}")]
+    EnergyLevel(f64),
+    #[error("powertrain_kw negative: {0}")]
+    Powertrain(f64),
 }
 
 impl TelemetryRaw {
@@ -102,7 +115,40 @@ impl TelemetryRaw {
         if self.fuel_cell_kw < 0.0 {
             return Err(ValidationError::FuelCell(self.fuel_cell_kw));
         }
+        if let Some(e) = self.energy_level_pct {
+            if !(0.0..=100.0).contains(&e) {
+                return Err(ValidationError::EnergyLevel(e));
+            }
+        }
+        if let Some(p) = self.powertrain_kw {
+            if p < 0.0 {
+                return Err(ValidationError::Powertrain(p));
+            }
+        }
         Ok(())
+    }
+
+    /// Wave 5 compat mapping: fill the generic energy fields from the
+    /// H2-specific ones when a publisher did not send them, so downstream
+    /// generic consumers (and the new nullable hypertable columns) always
+    /// have data:
+    ///
+    /// - `energy_type` absent → `'h2'` (the platform's legacy fleet);
+    /// - `energy_level_pct` absent → mirror `h2_level_pct`;
+    /// - `powertrain_kw` absent → mirror `fuel_cell_kw`.
+    ///
+    /// Fields already present (mixed/non-h2 publishers) are never
+    /// overwritten.
+    pub fn normalize_energy_fields(&mut self) {
+        if self.energy_type.is_none() {
+            self.energy_type = Some("h2".to_string());
+        }
+        if self.energy_level_pct.is_none() {
+            self.energy_level_pct = Some(self.h2_level_pct);
+        }
+        if self.powertrain_kw.is_none() {
+            self.powertrain_kw = Some(self.fuel_cell_kw);
+        }
     }
 }
 
@@ -121,6 +167,9 @@ mod tests {
             odometer_km: 12_345.6,
             lat: 52.52,
             lon: 13.405,
+            energy_level_pct: None,
+            powertrain_kw: None,
+            energy_type: None,
         }
     }
 
@@ -267,5 +316,112 @@ mod tests {
         assert_eq!(v["route_id"], serde_json::json!("R10"));
         assert!(v.get("raw").is_none(), "raw must be flattened, not nested");
         assert_eq!(v["depot_id"], serde_json::Value::Null);
+    }
+
+    // ---- Wave 5: additive generic energy fields ----
+
+    #[test]
+    fn envelope_without_energy_fields_parses_and_normalizes_to_h2_compat() {
+        // Compat path: a legacy h2-only payload (pre-Wave-5 shape) parses
+        // with the new fields absent, and normalization mirrors the h2 values
+        // into the generic fields so downstream consumers always have data.
+        let env: Envelope<TelemetryRaw> =
+            serde_json::from_str(&envelope_json(raw_json())).expect("legacy payload must parse");
+        let mut data = env.data;
+        assert!(data.energy_level_pct.is_none());
+        assert!(data.powertrain_kw.is_none());
+        assert!(data.energy_type.is_none());
+        data.validate().expect("legacy payload must validate");
+        data.normalize_energy_fields();
+        assert_eq!(data.energy_type.as_deref(), Some("h2"));
+        assert_eq!(data.energy_level_pct, Some(63.5));
+        assert_eq!(data.powertrain_kw, Some(55.0));
+        // h2-specific fields are untouched by the mirror.
+        assert!((data.h2_level_pct - 63.5).abs() < f64::EPSILON);
+        assert!((data.fuel_cell_kw - 55.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn envelope_with_energy_fields_parses_and_is_not_overwritten() {
+        // Generic path: a battery bus sends the additive fields; they parse,
+        // validate, and normalization leaves them (and the h2 fields) alone.
+        let mut d = raw_json();
+        d["energy_level_pct"] = serde_json::json!(47.25);
+        d["powertrain_kw"] = serde_json::json!(118.0);
+        d["energy_type"] = serde_json::json!("battery");
+        let env: Envelope<TelemetryRaw> =
+            serde_json::from_str(&envelope_json(d)).expect("mixed-fleet payload must parse");
+        let mut data = env.data;
+        data.validate().expect("mixed-fleet payload must validate");
+        data.normalize_energy_fields();
+        assert_eq!(data.energy_type.as_deref(), Some("battery"));
+        assert_eq!(data.energy_level_pct, Some(47.25));
+        assert_eq!(data.powertrain_kw, Some(118.0));
+    }
+
+    #[test]
+    fn partial_energy_fields_are_individually_mirrored() {
+        // A publisher that sends only energy_type still gets the level/power
+        // mirror from the h2 fields (each field falls back independently).
+        let mut d = raw_json();
+        d["energy_type"] = serde_json::json!("diesel");
+        let env: Envelope<TelemetryRaw> =
+            serde_json::from_str(&envelope_json(d)).expect("partial payload must parse");
+        let mut data = env.data;
+        data.validate().expect("partial payload must validate");
+        data.normalize_energy_fields();
+        assert_eq!(data.energy_type.as_deref(), Some("diesel"));
+        assert_eq!(data.energy_level_pct, Some(63.5));
+        assert_eq!(data.powertrain_kw, Some(55.0));
+    }
+
+    #[test]
+    fn implausible_energy_fields_are_rejected() {
+        // The new optional fields get the same plausibility treatment as
+        // their h2 counterparts when present.
+        let mut t = valid_raw();
+        t.energy_level_pct = Some(100.1);
+        assert!(matches!(
+            t.validate(),
+            Err(ValidationError::EnergyLevel(_))
+        ));
+        let mut t = valid_raw();
+        t.energy_level_pct = Some(-0.1);
+        assert!(matches!(
+            t.validate(),
+            Err(ValidationError::EnergyLevel(_))
+        ));
+        let mut t = valid_raw();
+        t.powertrain_kw = Some(-1.0);
+        assert!(matches!(
+            t.validate(),
+            Err(ValidationError::Powertrain(_))
+        ));
+        // Boundaries are valid.
+        let mut t = valid_raw();
+        t.energy_level_pct = Some(100.0);
+        t.powertrain_kw = Some(0.0);
+        t.validate().expect("boundary values must validate");
+    }
+
+    #[test]
+    fn enriched_carries_normalized_energy_fields() {
+        // After the compat mirror the republished telemetry.enriched payload
+        // always exposes the generic fields for downstream consumers.
+        let mut raw = valid_raw();
+        raw.normalize_energy_fields();
+        let enriched = TelemetryEnriched {
+            raw,
+            route_id: Some("R10".to_string()),
+            depot_id: None,
+            heading_deg: Some(270.0),
+        };
+        let v = serde_json::to_value(&enriched).unwrap();
+        assert_eq!(v["energy_type"], serde_json::json!("h2"));
+        assert_eq!(v["energy_level_pct"], serde_json::json!(63.5));
+        assert_eq!(v["powertrain_kw"], serde_json::json!(55.0));
+        // h2 fields remain (unchanged, H2 writes both).
+        assert_eq!(v["h2_level_pct"], serde_json::json!(63.5));
+        assert_eq!(v["fuel_cell_kw"], serde_json::json!(55.0));
     }
 }

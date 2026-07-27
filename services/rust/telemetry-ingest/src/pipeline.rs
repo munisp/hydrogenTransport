@@ -155,11 +155,16 @@ fn parse_and_validate(payload: &[u8], expected_topic: &str) -> Option<TelemetryR
         return None;
     }
     tracing::trace!(event_id = %env.id, source = %env.source, event_time = %env.time, "accepted telemetry record");
-    if let Err(err) = env.data.validate() {
+    let mut data = env.data;
+    if let Err(err) = data.validate() {
         tracing::warn!(error = %err, event_id = %env.id, "dropping implausible telemetry record");
         return None;
     }
-    Some(env.data)
+    // Wave 5 compat: legacy h2-only payloads get the generic energy fields
+    // mirrored in before persistence/republish (mixed/non-h2 payloads are
+    // passed through untouched).
+    data.normalize_energy_fields();
+    Some(data)
 }
 
 async fn flush(

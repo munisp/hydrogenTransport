@@ -387,6 +387,9 @@ mod tests {
             route_id: Some("R10".to_string()),
             depot_id: None,
             heading_deg: Some(270.0),
+            energy_level_pct: None,
+            powertrain_kw: None,
+            energy_type: None,
         };
         let state = TwinState::from_telemetry(None, &t);
         let hot_json = serde_json::to_string(&state).unwrap(); // Redis SET twin:<bus_id>
