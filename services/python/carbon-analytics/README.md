@@ -5,13 +5,26 @@ CO2-avoidance accounting and credit issuance (module `carbon-credits`, Domain 3 
 ## Method
 
 Fleet distance per period = sum over buses of `max(odometer_km) - min(odometer_km)`
-from `fleet.telemetry` within `[period start, period end)`. H2 buses have zero tailpipe
-CO2, so:
+from `fleet.telemetry` within `[period start, period end)`, grouped by
+`fleet.vehicles.energy_type` (migration 0008; pre-0008 databases fall back to
+the legacy all-h2 aggregate). Credits use a **diesel-reference baseline per
+energy_type**:
 
 ```
-kg_co2_avoided = total_km * 1.2            # diesel baseline (SPEC/mission)
-credits        = kg_co2_avoided / 1000     # 1 credit = 1 tonne (CREDIT_KG_CO2)
+h2:      avoided = km * 1.2                                   # zero tailpipe
+battery: avoided = km * (1.2 - EV_KWH_PER_KM * GRID_CO2_KG_PER_KWH)
+         # diesel reference minus grid-electricity footprint, floor 0
+diesel:  avoided = 0        # diesel IS the reference baseline
+cng:     avoided = km * (1.2 - CNG_KG_CO2_PER_KM)             # floor 0
+credits  = kg_co2_avoided / CREDIT_KG_CO2   # 1 credit = 1 tonne by default
 ```
+
+The per-type breakdown (`baseline_by_energy_type`) is attached to the issued
+credit and the `carbon.credit.issued` event payload so the CARBON_FUND
+ledger-leg consumer (commerce-api) reconciles against the right baseline per
+bus energy_type. Grid factor is config-driven (`GRID_CO2_KG_PER_KWH`, default
+0.35 kg CO2/kWh ≈ EU grid average; `EV_KWH_PER_KM` default 1.1 for a city bus)
+until per-bus learned kWh/km exists.
 
 Writes `citizen.carbon_credits` (**idempotent per period**: delete + insert in one
 transaction) and publishes `carbon.credit.issued` (SPEC §3.3 envelope, key = period).
@@ -52,6 +65,9 @@ issuers, default `http://localhost:8088/realms/h2fleet`).
 | `TOGGLE_URL` | `http://localhost:8080` |
 | `OUTPUT_TOPIC` | `carbon.credit.issued` |
 | `DIESEL_BASELINE_KG_CO2_PER_KM` | `1.2` |
+| `GRID_CO2_KG_PER_KWH` | `0.35` |
+| `EV_KWH_PER_KM` | `1.1` |
+| `CNG_KG_CO2_PER_KM` | `1.0` |
 | `CREDIT_KG_CO2` | `1000.0` |
 
 ## Run

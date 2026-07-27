@@ -104,4 +104,5 @@ async def compute(req: ComputeRequest, request: Request):
         "credits": result.credits,
         "credit_id": result.credit_id,
         "event_published": result.event_published,
+        "baseline_by_energy_type": result.baseline_by_energy_type,
     }

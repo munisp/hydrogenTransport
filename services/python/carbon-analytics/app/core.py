@@ -1,9 +1,22 @@
 """CO2-avoidance accounting core (shared by CLI batch and the read API).
 
 Method: fleet distance per period is derived from odometer deltas in
-fleet.telemetry (max - min per bus, robust to individual row loss). Diesel
-baseline factor: 1.2 kg CO2 / km (SPEC/mission). H2 fleet tailpipe emissions
-are zero, so avoided = distance * baseline. One credit = `credit_kg_co2` kg.
+fleet.telemetry (max - min per bus, robust to individual row loss), grouped
+by vehicle energy_type (fleet.vehicles.energy_type, migration 0008; pre-0008
+databases fall back to the legacy all-h2 aggregate). Baseline methodology is
+per energy_type, credited against the diesel-reference baseline:
+
+  h2      avoided = km * DIESEL_BASELINE_KG_CO2_PER_KM   (zero tailpipe)
+  battery avoided = km * (diesel_baseline - EV_KWH_PER_KM * GRID_CO2_KG_PER_KWH)
+          — diesel-reference credit minus the grid-electricity footprint of
+          the energy consumed (documented, config-driven factors; floor 0)
+  diesel  avoided = 0 — diesel IS the reference baseline (no credit)
+  cng     avoided = km * (diesel_baseline - CNG_KG_CO2_PER_KM), floor 0
+
+One credit = `credit_kg_co2` kg. The per-type breakdown is attached to the
+issued event so the CARBON_FUND ledger-leg consumer (commerce-api) and other
+downstreams can reconcile the issuance against the right baseline per bus
+energy_type.
 
 Idempotency (BUSINESS_LOGIC_AUDIT §14): citizen.carbon_credits has
 UNIQUE(period) (migration 0005), and issuance is a single
@@ -23,6 +36,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
+import asyncpg
 from aiokafka import AIOKafkaProducer
 
 from .config import settings
@@ -43,6 +57,24 @@ def credit_id_for_period(period: str) -> str:
     return str(uuid.uuid5(_CREDIT_NS, f"carbon-credit:{period}"))
 
 
+def baseline_kg_co2_avoided(energy_type: str, km: float,
+                            cfg=settings) -> float:
+    """Per-energy-type credit baseline (kg CO2 avoided for `km` driven).
+
+    diesel-reference methodology: every type is credited against what a
+    comparable diesel bus would have emitted for the same distance."""
+    et = (energy_type or "h2").strip().lower()
+    if et == "diesel":
+        return 0.0  # diesel IS the reference baseline
+    if et == "battery":
+        electric = cfg.ev_kwh_per_km * cfg.grid_co2_kg_per_kwh
+        return km * max(cfg.diesel_baseline_kg_co2_per_km - electric, 0.0)
+    if et == "cng":
+        return km * max(cfg.diesel_baseline_kg_co2_per_km - cfg.cng_kg_co2_per_km, 0.0)
+    # h2 (and unknown/legacy types): zero tailpipe -> full diesel baseline.
+    return km * cfg.diesel_baseline_kg_co2_per_km
+
+
 _DISTANCE_SQL = """
 SELECT coalesce(sum(km), 0)::float8 AS total_km, count(*)::int AS bus_count
 FROM (
@@ -61,6 +93,42 @@ FROM (
 ) d
 """
 
+# Same distance math, grouped by vehicle energy_type (migration 0008).
+_DISTANCE_BY_TYPE_SQL = """
+SELECT coalesce(v.energy_type, 'h2') AS energy_type,
+       coalesce(sum(d.km), 0)::float8 AS total_km, count(*)::int AS bus_count
+FROM (
+    SELECT bus_id, km FROM (
+        SELECT bus_id, sum(d) AS km FROM (
+            SELECT bus_id,
+                   odometer_km - lag(odometer_km) OVER (PARTITION BY bus_id ORDER BY ts) AS d
+            FROM fleet.telemetry
+            WHERE ts >= $1 AND ts < $2
+        ) deltas WHERE d > 0
+        GROUP BY bus_id
+    ) positive
+    FROM fleet.telemetry
+    WHERE ts >= $1 AND ts < $2
+    GROUP BY bus_id
+) d
+JOIN fleet.vehicles v ON v.id = d.bus_id
+GROUP BY 1
+"""
+
+
+async def _distance_by_energy_type(pool, start: dt.datetime, end: dt.datetime) -> list[tuple[str, float, int]]:
+    """[(energy_type, total_km, bus_count)]. Falls back to the legacy all-h2
+    aggregate on pre-0008 databases (no fleet.vehicles.energy_type column)."""
+    try:
+        rows = await pool.fetch(_DISTANCE_BY_TYPE_SQL, start, end)
+        return [(str(r["energy_type"]), float(r["total_km"]), int(r["bus_count"]))
+                for r in rows]
+    except asyncpg.exceptions.UndefinedColumnError:
+        log.info("fleet.vehicles.energy_type not present (pre-0008); "
+                 "falling back to all-h2 baseline")
+        row = await pool.fetchrow(_DISTANCE_SQL, start, end)
+        return [("h2", float(row["total_km"]), int(row["bus_count"]))]
+
 
 @dataclass
 class PeriodResult:
@@ -71,6 +139,9 @@ class PeriodResult:
     credits: float
     credit_id: str = field(default="")
     event_published: bool = False
+    # energy_type -> {total_km, bus_count, kg_co2_avoided} (per-type baseline
+    # breakdown; attached to the issued event for downstream reconciliation).
+    baseline_by_energy_type: dict = field(default_factory=dict)
 
 
 def period_bounds(period: str) -> tuple[dt.datetime, dt.datetime]:
@@ -100,6 +171,7 @@ def build_envelope(result: PeriodResult) -> bytes:
                 "period": result.period,
                 "kg_co2_avoided": result.kg_co2_avoided,
                 "credits": result.credits,
+                "baseline_by_energy_type": result.baseline_by_energy_type,
                 "issued_at": now.isoformat().replace("+00:00", "Z"),
             },
         }
@@ -109,10 +181,20 @@ def build_envelope(result: PeriodResult) -> bytes:
 async def compute_period(pool, period: str, publish: bool = True) -> PeriodResult:
     """Compute + persist + publish carbon credit for one YYYY-MM period."""
     start, end = period_bounds(period)
-    row = await pool.fetchrow(_DISTANCE_SQL, start, end)
-    total_km = float(row["total_km"])
-    bus_count = int(row["bus_count"])
-    kg_avoided = round(total_km * settings.diesel_baseline_kg_co2_per_km, 3)
+    by_type = await _distance_by_energy_type(pool, start, end)
+    total_km = sum(km for _, km, _ in by_type)
+    bus_count = sum(n for _, _, n in by_type)
+    breakdown: dict[str, dict] = {}
+    kg_avoided = 0.0
+    for energy_type, km, n in by_type:
+        kg = baseline_kg_co2_avoided(energy_type, km)
+        kg_avoided += kg
+        breakdown[energy_type] = {
+            "total_km": round(km, 3),
+            "bus_count": n,
+            "kg_co2_avoided": round(kg, 3),
+        }
+    kg_avoided = round(kg_avoided, 3)
     credits = round(kg_avoided / settings.credit_kg_co2, 6)
 
     result = PeriodResult(
@@ -121,6 +203,7 @@ async def compute_period(pool, period: str, publish: bool = True) -> PeriodResul
         bus_count=bus_count,
         kg_co2_avoided=kg_avoided,
         credits=credits,
+        baseline_by_energy_type=breakdown,
     )
 
     credit_id = credit_id_for_period(period)
