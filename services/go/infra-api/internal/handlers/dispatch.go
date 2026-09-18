@@ -389,12 +389,12 @@ func (h *Handler) SwapDispatchVehicle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.pub.Publish(r.Context(), "dispatch.vehicle_swapped", map[string]any{
-		"job_id":         job.ID,
-		"driver_sub":     job.DriverSub,
-		"old_vehicle_id": job.VehicleID,
-		"new_vehicle_id": req.VehicleID,
-		"reason":         req.Reason,
-		"swapped_at":     time.Now().UTC().Format(time.RFC3339),
+		"job_id":          job.ID,
+		"driver_sub":      job.DriverSub,
+		"old_vehicle_id":  job.VehicleID,
+		"new_vehicle_id":  req.VehicleID,
+		"reason":          req.Reason,
+		"swapped_at":      time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		h.log.Error("failed to publish dispatch.vehicle_swapped", zap.Error(err))
 	}
