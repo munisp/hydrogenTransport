@@ -179,6 +179,12 @@ func main() {
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs/{id}/cancel", h.CancelDispatchJob)
 		// Wave-6 A1-05: mid-shift vehicle breakdown swap.
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs/{id}/swap-vehicle", h.SwapDispatchVehicle)
+		// Wave-7 A2-09: charter/school block bookings — multi-vehicle
+		// reservations backed by dispatch jobs (route='charter:<reference>').
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/charters", h.CreateCharter)
+		r.With(jwtmw.RequireRole("operator")).Get("/v1/charters", h.ListCharters)
+		r.With(jwtmw.RequireRole("operator")).Get("/v1/charters/{id}", h.GetCharter)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/charters/{id}/cancel", h.CancelCharter)
 	})
 	// compliance-reporting module
 	r.Group(func(r chi.Router) {

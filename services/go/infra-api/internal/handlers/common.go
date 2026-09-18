@@ -94,6 +94,28 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 			('Riverside Depot', 'P-02', 'parking', 'occupied'),
 			('Riverside Depot', 'W-01', 'workshop', 'out_of_service')
 		ON CONFLICT (depot, label) DO NOTHING`,
+		// Wave-7 A2-09 parity with migration 0010 (dev databases that never
+		// ran goose): charter/school block bookings + per-vehicle links.
+		`CREATE TABLE IF NOT EXISTS infra.charter_bookings (
+			id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			reference     text NOT NULL UNIQUE,
+			customer_name text NOT NULL,
+			contact       text NOT NULL DEFAULT '',
+			starts_at     timestamptz NOT NULL,
+			ends_at       timestamptz NOT NULL,
+			status        text NOT NULL DEFAULT 'confirmed',
+			notes         text NOT NULL DEFAULT '',
+			created_by    text NOT NULL DEFAULT '',
+			created_at    timestamptz NOT NULL DEFAULT now(),
+			cancelled_at  timestamptz,
+			CHECK (ends_at > starts_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS infra.charter_vehicles (
+			booking_id      uuid NOT NULL REFERENCES infra.charter_bookings(id) ON DELETE CASCADE,
+			vehicle_id      uuid NOT NULL,
+			dispatch_job_id uuid NOT NULL UNIQUE,
+			PRIMARY KEY (booking_id, vehicle_id)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := h.db.Exec(ctx, s); err != nil {
