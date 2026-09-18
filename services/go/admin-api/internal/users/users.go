@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/httpx"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/keycloak"
 )
@@ -105,6 +106,28 @@ type rolesBody struct {
 	Remove []string `json:"remove"`
 }
 
+// soleEnabledPlatformAdmin reports whether targetID is the ONLY enabled
+// platform-admin account. Disabling or demoting that account would brick the
+// admin plane — no one left to approve onboarding, manage users or flip
+// toggles (Wave-10 W10-1).
+func (h *Handler) soleEnabledPlatformAdmin(r *http.Request, targetID string) (bool, error) {
+	admins, err := h.kc.ListUsers(r.Context(), "", "platform-admin", 1000)
+	if err != nil {
+		return false, err
+	}
+	enabled := 0
+	targetIsEnabledAdmin := false
+	for _, a := range admins {
+		if a.Enabled {
+			enabled++
+		}
+		if a.ID == targetID && a.Enabled {
+			targetIsEnabledAdmin = true
+		}
+	}
+	return targetIsEnabledAdmin && enabled <= 1, nil
+}
+
 // UpdateRoles handles PUT /v1/users/{id}/roles with {add: [...], remove: [...]}
 // to assign/revoke Keycloak realm roles.
 func (h *Handler) UpdateRoles(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +140,22 @@ func (h *Handler) UpdateRoles(w http.ResponseWriter, r *http.Request) {
 	if len(body.Add) == 0 && len(body.Remove) == 0 {
 		httpx.Error(w, http.StatusBadRequest, "provide add and/or remove role lists")
 		return
+	}
+	// W10-1: never demote the last enabled platform-admin.
+	for _, role := range body.Remove {
+		if role != "platform-admin" {
+			continue
+		}
+		sole, err := h.soleEnabledPlatformAdmin(r, id)
+		if err != nil {
+			h.log.Error("platform-admin count", zap.Error(err))
+			httpx.Error(w, http.StatusBadGateway, "failed to verify platform-admin accounts")
+			return
+		}
+		if sole {
+			httpx.Error(w, http.StatusConflict, "cannot revoke platform-admin from the last enabled platform-admin account")
+			return
+		}
 	}
 	for _, role := range body.Add {
 		if err := h.kc.AssignRealmRole(r.Context(), id, role); err != nil {
@@ -147,6 +186,25 @@ func (h *Handler) Enable(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
 	id := chi.URLParam(r, "id")
+	if !enabled {
+		// W10-1: lockout guards. Self-disable is refused (almost always a
+		// mistake; another admin can do it if truly intended), and the last
+		// enabled platform-admin can never be disabled.
+		if id == auth.Subject(r.Context()) {
+			httpx.Error(w, http.StatusConflict, "cannot disable your own account; another platform-admin must do this")
+			return
+		}
+		sole, err := h.soleEnabledPlatformAdmin(r, id)
+		if err != nil {
+			h.log.Error("platform-admin count", zap.Error(err))
+			httpx.Error(w, http.StatusBadGateway, "failed to verify platform-admin accounts")
+			return
+		}
+		if sole {
+			httpx.Error(w, http.StatusConflict, "cannot disable the last enabled platform-admin account")
+			return
+		}
+	}
 	if err := h.kc.SetEnabled(r.Context(), id, enabled); err != nil {
 		h.log.Error("set user enabled", zap.String("user_id", id), zap.Bool("enabled", enabled), zap.Error(err))
 		httpx.Error(w, http.StatusBadGateway, "failed to update user")

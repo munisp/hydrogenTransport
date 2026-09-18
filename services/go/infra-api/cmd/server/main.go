@@ -180,6 +180,9 @@ func main() {
 		// registers them; without an infra.drivers row no job can be assigned.
 		r.With(jwtmw.RequireRole("driver")).Post("/v1/drivers/register", h.RegisterDriver)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/drivers", h.CreateDriver)
+		// Wave-10 W10-2: driver offboarding/lifecycle (suspend immediately
+		// blocks job acceptance).
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/drivers/{sub}/status", h.SetDriverStatus)
 		r.Get("/v1/dispatch/jobs", h.ListDispatchJobs)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs", h.CreateDispatchJob)
 		r.With(jwtmw.RequireRole("driver")).Post("/v1/dispatch/jobs/{id}/accept", h.AcceptDispatchJob)

@@ -276,6 +276,25 @@ func (h *Handler) AcceptDispatchJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	// Wave-10 W10-2: only ACTIVE drivers may accept. A suspended driver keeps
+	// their JWT and realm role until Keycloak-side offboarding catches up —
+	// the drivers table is the operational source of truth and is checked on
+	// every acceptance.
+	var driverStatus string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT status FROM infra.drivers WHERE sub = $1`, caller).Scan(&driverStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "driver not registered (POST /v1/drivers/register first)"})
+		return
+	}
+	if err != nil {
+		h.internal(w, "check driver status", err)
+		return
+	}
+	if driverStatus != "active" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "driver is not active (status=" + driverStatus + ")"})
+		return
+	}
 	j, err := scanDispatchJob(h.db.QueryRow(r.Context(), `
 		UPDATE infra.dispatch_jobs
 		SET status = 'accepted', accepted_at = now()

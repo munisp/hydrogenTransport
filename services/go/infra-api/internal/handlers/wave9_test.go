@@ -34,10 +34,10 @@ func chiURLParam(r *http.Request, key, val string) *http.Request {
 func TestRegisterDriverSelfService(t *testing.T) {
 	h, pool := newDispatchHandler(t)
 
-	// Fresh registration inserts the row (xmax = 0 → true) → 201.
+	// Fresh registration inserts the row → 201.
 	pool.ExpectQuery(`INSERT INTO infra\.drivers`).
 		WithArgs("driver-1", "Dan Driver", "DL-123456").
-		WillReturnRows(pgxmock.NewRows([]string{"inserted"}).AddRow(true))
+		WillReturnRows(pgxmock.NewRows([]string{"sub"}).AddRow("driver-1"))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/drivers/register",
@@ -47,17 +47,22 @@ func TestRegisterDriverSelfService(t *testing.T) {
 		t.Fatalf("first register got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Re-registration updates name/licence (xmax != 0 → false) → 200.
+	// Wave-10 W10-3: re-registration is INSERT-ONLY (ON CONFLICT DO NOTHING →
+	// no row returned) → 200 already_registered, and crucially the stored
+	// name/licence are NOT overwritten by the caller.
 	pool.ExpectQuery(`INSERT INTO infra\.drivers`).
-		WithArgs("driver-1", "Dan Driver", "DL-123456").
-		WillReturnRows(pgxmock.NewRows([]string{"inserted"}).AddRow(false))
+		WithArgs("driver-1", "Forged Name", "FORGED-1").
+		WillReturnRows(pgxmock.NewRows([]string{"sub"}))
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/v1/drivers/register",
-		strings.NewReader(`{"name":"Dan Driver","license_no":"DL-123456"}`))
+		strings.NewReader(`{"name":"Forged Name","license_no":"FORGED-1"}`))
 	h.RegisterDriver(rec, withSub(req, "driver-1"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("re-register got %d want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "already_registered") {
+		t.Fatalf("re-register must report already_registered: %s", rec.Body.String())
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("pgxmock: %v", err)
@@ -116,7 +121,11 @@ func jobRow(id, driverSub string) *pgxmock.Rows {
 func TestAcceptDispatchJobOwnership(t *testing.T) {
 	h, pool := newDispatchHandler(t)
 
-	// The assignee can accept.
+	// The assignee (active) can accept: status pre-check (W10-2) then the
+	// ownership-scoped UPDATE (W9-7).
+	pool.ExpectQuery(`SELECT status FROM infra\.drivers`).
+		WithArgs("driver-1").
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("active"))
 	pool.ExpectQuery(`UPDATE infra\.dispatch_jobs`).
 		WithArgs("job-1", "driver-1").
 		WillReturnRows(jobRow("job-1", "driver-1"))
@@ -127,8 +136,11 @@ func TestAcceptDispatchJobOwnership(t *testing.T) {
 		t.Fatalf("assignee accept got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// A different driver gets 404 — and the UPDATE is scoped by driver_sub
+	// A different ACTIVE driver gets 404 — the UPDATE is scoped by driver_sub
 	// (no cross-driver acceptance, no existence leak).
+	pool.ExpectQuery(`SELECT status FROM infra\.drivers`).
+		WithArgs("driver-2").
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("active"))
 	pool.ExpectQuery(`UPDATE infra\.dispatch_jobs`).
 		WithArgs("job-1", "driver-2").
 		WillReturnRows(pgxmock.NewRows(jobCols))
