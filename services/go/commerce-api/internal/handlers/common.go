@@ -131,6 +131,31 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 			CHECK (ends_at > starts_at)
 		)`,
 		`ALTER TABLE commerce.ad_placements ADD COLUMN IF NOT EXISTS cost_minor bigint NOT NULL DEFAULT 0`,
+		// Wave-6 parity with migration 0009 (dev databases that never ran
+		// goose): fare products & entitlements (A2-01), partial-refund
+		// accumulation (A2-02).
+		`CREATE TABLE IF NOT EXISTS commerce.fare_products (
+			id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			code          text NOT NULL UNIQUE,
+			kind          text NOT NULL CHECK (kind IN ('pass','discount','free')),
+			discount_pct  integer CHECK (discount_pct BETWEEN 0 AND 100),
+			price_minor   bigint NOT NULL DEFAULT 0 CHECK (price_minor >= 0),
+			duration_days integer NOT NULL CHECK (duration_days > 0),
+			description   text NOT NULL DEFAULT '',
+			active        boolean NOT NULL DEFAULT true,
+			created_at    timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS commerce.rider_entitlements (
+			id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			rider_sub  text NOT NULL,
+			product_id uuid NOT NULL REFERENCES commerce.fare_products(id),
+			valid_from timestamptz NOT NULL DEFAULT now(),
+			valid_to   timestamptz NOT NULL,
+			created_by text NOT NULL DEFAULT '',
+			created_at timestamptz NOT NULL DEFAULT now(),
+			CHECK (valid_to > valid_from)
+		)`,
+		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS refunded_minor bigint NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := h.db.Exec(ctx, s); err != nil {

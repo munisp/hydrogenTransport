@@ -94,6 +94,17 @@ func main() {
 		// Dev/simulated wallet funding (see handlers.TopUpEnabled; pending a
 		// real Mojaloop cash-in flow).
 		r.With(jwtmw.RequireAuth).Post("/v1/wallets/topup", h.TopUpWallet)
+		// Fare products & entitlements (Wave-6 A2-01): passes, concessions,
+		// free travel. Catalog reads are open to any authenticated caller;
+		// product management and grants are operator-only.
+		r.With(jwtmw.RequireAuth).Get("/v1/fare-products", h.ListFareProducts)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("fare_product.create", "fare_product", "", true)).
+			Post("/v1/fare-products", h.CreateFareProduct)
+		r.With(jwtmw.RequireAuth).Get("/v1/entitlements", h.ListEntitlements)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("entitlement.grant", "rider_entitlement", "", true)).
+			Post("/v1/entitlements", h.GrantEntitlement)
 	})
 	// loyalty-marketplace module
 	r.Group(func(r chi.Router) {

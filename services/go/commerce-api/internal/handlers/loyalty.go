@@ -83,11 +83,12 @@ func (h *Handler) accrueLoyaltyPoints(ctx context.Context, paymentID, riderSub s
 }
 
 // clawbackLoyaltyPoints reverses the fare-accrual award for a refunded
-// payment: a negative ledger entry idempotent on "refund:<payment_id>", and
-// a balance decrement floored at 0 (points may already have been spent —
-// the ledger keeps the exact audit trail either way).
-func (h *Handler) clawbackLoyaltyPoints(ctx context.Context, paymentID, riderSub string, chargedMinor int64) error {
-	points := chargedMinor / 100
+// (or partially refunded) amount: a negative ledger entry idempotent on the
+// caller-supplied refID (per refund ordinal for partial refunds), and a
+// balance decrement floored at 0 (points may already have been spent — the
+// ledger keeps the exact audit trail either way).
+func (h *Handler) clawbackLoyaltyPoints(ctx context.Context, refID, riderSub string, refundedMinor int64) error {
+	points := refundedMinor / 100
 	if points <= 0 || riderSub == "" {
 		return nil
 	}
@@ -101,7 +102,7 @@ func (h *Handler) clawbackLoyaltyPoints(ctx context.Context, paymentID, riderSub
 		INSERT INTO commerce.loyalty_ledger (id, rider_sub, delta, reason, ref_id)
 		VALUES ($1, $2, $3, 'refund_clawback', $4)
 		ON CONFLICT (ref_id) DO NOTHING`,
-		uuid.NewString(), riderSub, -points, "refund:"+paymentID)
+		uuid.NewString(), riderSub, -points, refID)
 	if err != nil {
 		return err
 	}
