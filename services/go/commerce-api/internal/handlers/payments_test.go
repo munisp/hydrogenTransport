@@ -83,12 +83,14 @@ func withClaims(r *http.Request, sub string, roles ...string) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), auth.ClaimsKey, claims))
 }
 
+var paymentRowTime = time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+
 func paymentRow(id, rider, key, status string) *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
 		"id", "rider_sub", "amount_minor", "charged_minor", "currency", "mojaloop_transfer_id",
-		"tb_transfer_id", "idempotency_key", "status", "created_at",
-	}).AddRow(id, rider, int64(500), nil, "EUR", nil, nil, &key, status,
-		time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC))
+		"tb_transfer_id", "idempotency_key", "status", "refunded_minor", "created_at",
+	}).AddRow(id, rider, int64(500), nil, "EUR", nil, nil, &key, status, int64(0),
+		paymentRowTime)
 }
 
 func createRequest(t *testing.T, body, idemKey, sub string) *http.Request {
@@ -162,9 +164,7 @@ func TestCreatePayment_RiderSubMatchingSubjectAccepted(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
-	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
+	expectPaymentTxOpen(pool, "rider-a", 0)
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-match").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -179,6 +179,7 @@ func TestCreatePayment_RiderSubMatchingSubjectAccepted(t *testing.T) {
 	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "settled", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(paymentRow("pay-new", "rider-a", "idem-match", "settled"))
+	pool.ExpectCommit()
 	// Loyalty accrual on the settled payment (500 cents → 5 points).
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO commerce\.loyalty_ledger`).
@@ -223,9 +224,7 @@ func TestCreatePayment_InsufficientFunds(t *testing.T) {
 	led := &fakeLedger{err: fmt.Errorf("debit account 1001: %w", ledger.ErrInsufficientFunds)}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
-	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
+	expectPaymentTxOpen(pool, "rider-a", 0)
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-broke").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -240,6 +239,7 @@ func TestCreatePayment_InsufficientFunds(t *testing.T) {
 	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "failed", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(paymentRow("pay-broke", "rider-a", "idem-broke", "failed"))
+	pool.ExpectCommit()
 
 	rec := httptest.NewRecorder()
 	h.CreatePayment("")(rec, createRequest(t, `{"amount_minor":500,"currency":"EUR"}`, "idem-broke", "rider-a"))
@@ -273,15 +273,14 @@ func TestCreatePayment_IdempotentReplay(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
-	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
+	expectPaymentTxOpen(pool, "rider-a", 0)
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-123").
 		WillReturnError(&pgconn.PgError{Code: "23505"}) // unique violation on idempotency_key
 	pool.ExpectQuery(`WHERE idempotency_key = \$1`).
 		WithArgs("idem-123").
 		WillReturnRows(paymentRow("pay-existing", "rider-a", "idem-123", "settled"))
+	pool.ExpectRollback()
 
 	rec := httptest.NewRecorder()
 	h.CreatePayment("")(rec, createRequest(t, `{"amount_minor":500,"currency":"EUR"}`, "idem-123", "rider-a"))
@@ -317,15 +316,14 @@ func TestCreatePayment_ReplayScopedToOwner(t *testing.T) {
 	defer pool.Close()
 	h := &Handler{db: pool, ledger: &fakeLedger{}, pub: &fakePublisher{}, log: zap.NewExample()}
 
-	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("mallory").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
+	expectPaymentTxOpen(pool, "mallory", 0)
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "mallory", int64(500), int64(500), "EUR", "idem-123").
 		WillReturnError(&pgconn.PgError{Code: "23505"})
 	pool.ExpectQuery(`WHERE idempotency_key = \$1`).
 		WithArgs("idem-123").
 		WillReturnRows(paymentRow("pay-existing", "rider-a", "idem-123", "settled"))
+	pool.ExpectRollback()
 
 	rec := httptest.NewRecorder()
 	h.CreatePayment("")(rec, createRequest(t, `{"amount_minor":500,"currency":"EUR"}`, "idem-123", "mallory"))
@@ -414,9 +412,7 @@ func TestCreatePayment_Settled(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
-	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
+	expectPaymentTxOpen(pool, "rider-a", 0)
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(500), "EUR", "idem-happy").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -431,6 +427,7 @@ func TestCreatePayment_Settled(t *testing.T) {
 	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "settled", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(paymentRow("pay-new", "rider-a", "idem-happy", "settled"))
+	pool.ExpectCommit()
 	// Loyalty accrual on settle: 500 cents → 5 points, idempotent via
 	// loyalty_ledger.ref_id = payment id.
 	pool.ExpectBegin()
@@ -469,4 +466,18 @@ func TestCreatePayment_Settled(t *testing.T) {
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet db expectations: %v", err)
 	}
+}
+
+// expectPaymentTxOpen registers the Wave-6 payment-transaction preamble:
+// begin → per-rider advisory lock → entitlement resolution (no active
+// entitlements) → capped-spend sum (FARE_CAP_TIMEZONE default UTC).
+func expectPaymentTxOpen(pool pgxmock.PgxPoolIface, rider string, spentToday int64) {
+	pool.ExpectBegin()
+	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs(rider).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs(rider).
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}))
+	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
+		WithArgs(rider, "UTC").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(spentToday))
 }

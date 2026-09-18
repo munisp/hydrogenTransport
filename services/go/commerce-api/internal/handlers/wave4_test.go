@@ -28,8 +28,15 @@ func TestCreatePayment_FareCapClampsCharge(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
+	// Wave-6 flow: one payment transaction (advisory lock → entitlement →
+	// capped spend → insert) stays open through the finalize UPDATE.
+	pool.ExpectBegin()
+	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs("rider-a").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}))
 	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("rider-a").
+		WithArgs("rider-a", "UTC").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(700)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(100), "EUR", "idem-cap").
@@ -43,6 +50,7 @@ func TestCreatePayment_FareCapClampsCharge(t *testing.T) {
 	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "settled", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(paymentRow("pay-cap", "rider-a", "idem-cap", "settled"))
+	pool.ExpectCommit()
 	// Loyalty accrues on the CHARGED amount: 100 cents → 1 point.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO commerce\.loyalty_ledger`).
@@ -78,8 +86,13 @@ func TestCreatePayment_FullyCappedRideIsFree(t *testing.T) {
 	led, pub := &fakeLedger{}, &fakePublisher{}
 	h := &Handler{db: pool, ledger: led, pub: pub, log: zap.NewExample()}
 
+	pool.ExpectBegin()
+	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs("rider-a").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs("rider-a").
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}))
 	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
-		WithArgs("rider-a").
+		WithArgs("rider-a", "UTC").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(800)))
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(0), "EUR", "idem-free").
@@ -88,6 +101,7 @@ func TestCreatePayment_FullyCappedRideIsFree(t *testing.T) {
 	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "settled", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(paymentRow("pay-free", "rider-a", "idem-free", "settled"))
+	pool.ExpectCommit()
 
 	rec := httptest.NewRecorder()
 	h.CreatePayment("")(rec, createRequest(t, `{"amount_minor":500,"currency":"EUR"}`, "idem-free", "rider-a"))
@@ -126,13 +140,16 @@ func TestRefundPayment_Settled(t *testing.T) {
 	pool.ExpectQuery(`SELECT account_id FROM commerce\.rider_accounts`).WithArgs("rider-a").
 		WillReturnRows(pgxmock.NewRows([]string{"account_id"}).AddRow(uint64(1001)))
 	pool.ExpectCommit()
-	pool.ExpectQuery(`UPDATE commerce\.fare_payments SET status = 'refunded'`).
-		WithArgs("pay-1").
+	// Wave-6 partial-refund flow: refunded_minor accumulates; the UPDATE is
+	// guarded on the pre-refund total (concurrency) and the loyalty clawback
+	// is idempotent on the per-step ref refund:pay-1:500.
+	pool.ExpectQuery(`UPDATE commerce\.fare_payments`).
+		WithArgs("pay-1", int64(500), "refunded", int64(0)).
 		WillReturnRows(paymentRow("pay-1", "rider-a", "k-1", "refunded"))
-	// Loyalty clawback: −5 points, idempotent on refund:pay-1.
+	// Loyalty clawback: −5 points, idempotent on refund:pay-1:500.
 	pool.ExpectBegin()
 	pool.ExpectExec(`INSERT INTO commerce\.loyalty_ledger`).
-		WithArgs(pgxmock.AnyArg(), "rider-a", int64(-5), "refund:pay-1").
+		WithArgs(pgxmock.AnyArg(), "rider-a", int64(-5), "refund:pay-1:500").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectExec(`UPDATE commerce\.loyalty_accounts`).
 		WithArgs("rider-a", int64(5)).
