@@ -88,7 +88,24 @@ pub enum ValidationError {
     EnergyLevel(f64),
     #[error("powertrain_kw negative: {0}")]
     Powertrain(f64),
+    #[error("ts too far in the future: {0}")]
+    FutureTs(DateTime<Utc>),
+    #[error("ts older than the retention window: {0}")]
+    StaleTs(DateTime<Utc>),
 }
+
+/// Wave-6 A1-03: a record timestamped more than this far ahead of the
+/// ingest clock is rejected. A broken-RTC or malicious edge device
+/// publishing a far-future ts would otherwise poison every "latest state"
+/// read (`ORDER BY ts DESC` in fuel levels, the live map and the digital
+/// twin) until that date arrives.
+pub const MAX_FUTURE_SKEW: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Wave-6 A1-03: records older than the TimescaleDB retention window
+/// (migration 0004: 90 days) are dead on arrival — the retention policy
+/// would drop them within the next interval anyway, and a replayed ancient
+/// batch must not masquerade as history that was already aggregated away.
+pub const MAX_RECORD_AGE: chrono::Duration = chrono::Duration::days(90);
 
 impl TelemetryRaw {
     /// Plausibility validation. Invalid records are dropped (never written,
@@ -124,6 +141,15 @@ impl TelemetryRaw {
             if p < 0.0 {
                 return Err(ValidationError::Powertrain(p));
             }
+        }
+        // Wave-6 A1-03: timestamp sanity. Checked against the ingest clock —
+        // a wrong-clock producer is exactly what this is meant to catch.
+        let now = Utc::now();
+        if self.ts > now + MAX_FUTURE_SKEW {
+            return Err(ValidationError::FutureTs(self.ts));
+        }
+        if self.ts < now - MAX_RECORD_AGE {
+            return Err(ValidationError::StaleTs(self.ts));
         }
         Ok(())
     }
@@ -201,6 +227,11 @@ mod tests {
             ("speed negative", Box::new(|t| t.speed_kph = -5.0), Some("Speed")),
             ("odometer negative", Box::new(|t| t.odometer_km = -0.1), Some("Odometer")),
             ("fuel cell negative", Box::new(|t| t.fuel_cell_kw = -0.5), Some("FuelCell")),
+            // Wave-6 A1-03: timestamp sanity boundaries.
+            ("ts just within future skew", Box::new(|t| t.ts = Utc::now() + chrono::Duration::minutes(4)), None),
+            ("ts at retention edge", Box::new(|t| t.ts = Utc::now() - chrono::Duration::days(89)), None),
+            ("ts too far in future", Box::new(|t| t.ts = Utc::now() + chrono::Duration::minutes(10)), Some("FutureTs")),
+            ("ts stale beyond retention", Box::new(|t| t.ts = Utc::now() - chrono::Duration::days(91)), Some("StaleTs")),
         ];
         for (name, mutate, want_err) in cases {
             let mut t = valid_raw();

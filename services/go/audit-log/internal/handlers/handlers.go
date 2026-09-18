@@ -1,8 +1,8 @@
 // Package handlers serves the audit-log HTTP API (see openapi.yaml):
 //
 //	POST /v1/audit         service-to-service ingest (X-Audit-Token or JWT)
-//	GET  /v1/audit         platform-admin search (?actor=&entity=&from=&limit=)
-//	GET  /v1/audit/verify  platform-admin hash-chain integrity check
+//	GET  /v1/audit         platform-admin/auditor search (?actor=&entity=&from=&limit=)
+//	GET  /v1/audit/verify  platform-admin/auditor hash-chain integrity check
 //	GET  /healthz          liveness/readiness (pings Postgres)
 package handlers
 
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -164,18 +165,39 @@ func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RequireIngestAuth allows a request carrying either the shared
+// RequireIngestAuth allows a request carrying either a shared
 // service-to-service token (X-Audit-Token, LEAK-ingest-style) or — when that
 // does not match — falls through to the JWT middleware. When ingestToken is
 // empty only JWT is accepted.
+//
+// Wave-6 A3-08 (zero-downtime credential rollover): ingestToken may be a
+// comma-separated list, e.g. AUDIT_INGEST_TOKEN="new-token,old-token".
+// Rollover procedure:
+//  1. add the new token in front (both accepted),
+//  2. cut every producer over to the new token,
+//  3. remove the old token.
+//
+// At no point is ingest rejected, and no producer/consumer restart ordering
+// is required.
 func RequireIngestAuth(ingestToken string, jwtMW func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	var accepted [][]byte
+	for _, tok := range strings.Split(ingestToken, ",") {
+		if tok = strings.TrimSpace(tok); tok != "" {
+			accepted = append(accepted, []byte(tok))
+		}
+	}
 	return func(next http.Handler) http.Handler {
 		tokenOK := func(r *http.Request) bool {
-			if ingestToken == "" {
+			if len(accepted) == 0 {
 				return false
 			}
 			got := r.Header.Get("X-Audit-Token")
-			return subtle.ConstantTimeCompare([]byte(got), []byte(ingestToken)) == 1
+			for _, tok := range accepted {
+				if subtle.ConstantTimeCompare([]byte(got), tok) == 1 {
+					return true
+				}
+			}
+			return false
 		}
 		jwtWrapped := jwtMW(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

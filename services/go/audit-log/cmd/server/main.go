@@ -66,9 +66,11 @@ func main() {
 	r.With(handlers.RequireIngestAuth(cfg.IngestToken, jwtmw.RequireAuth)).
 		Post("/v1/audit", h.Ingest)
 
-	// Reads + integrity verification: platform-admin only.
+	// Reads + integrity verification: platform-admin, plus the read-only
+	// auditor role (Wave-6 A4-03 — regulators/insurers must be able to pull
+	// the trail and verify chain integrity without holding admin keys).
 	r.Group(func(r chi.Router) {
-		r.Use(jwtmw.RequireRole("platform-admin"))
+		r.Use(jwtmw.RequireAnyRole("platform-admin", "auditor"))
 		r.Get("/v1/audit", h.List)
 		r.Get("/v1/audit/verify", h.Verify)
 	})

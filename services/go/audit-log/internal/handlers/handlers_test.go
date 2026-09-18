@@ -243,6 +243,39 @@ func TestRequireIngestAuthTokenPath(t *testing.T) {
 	}
 }
 
+// Wave-6 A3-08: during credential rollover both the new and the old token
+// must be accepted (comma-separated AUDIT_INGEST_TOKEN), a retired token
+// must not.
+func TestRequireIngestAuthDualTokenRollover(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	jwtFallback := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		})
+	}
+	mw := RequireIngestAuth("new-token, old-token", jwtFallback) // spaces tolerated
+
+	for _, tok := range []string{"new-token", "old-token"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(`{}`))
+		req.Header.Set("X-Audit-Token", tok)
+		rec := httptest.NewRecorder()
+		mw(next).ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("rollover token %q: status = %d, want 201", tok, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(`{}`))
+	req.Header.Set("X-Audit-Token", "retired-token")
+	rec := httptest.NewRecorder()
+	mw(next).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("retired token: status = %d, want 401", rec.Code)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	h := newTestHandler(&fakeStore{})
 	rec := doRequest(h.Healthz, http.MethodGet, "/healthz", "", nil)
