@@ -47,8 +47,13 @@ type CreateUserSpec struct {
 
 // AdminClient is the subset of the Keycloak Admin REST API admin-api needs.
 type AdminClient interface {
-	// CreateUser provisions a user and returns the Keycloak user id.
-	CreateUser(ctx context.Context, spec CreateUserSpec) (string, error)
+	// CreateUser provisions a user and returns the Keycloak user id. The
+	// second return value reports whether the user was newly created
+	// (false = the email already belonged to an existing account, whose id
+	// is returned). Callers MUST NOT reset credentials when existed=true:
+	// doing so would let an unauthenticated party force a password reset on
+	// any registered account (Wave-9 W9-1).
+	CreateUser(ctx context.Context, spec CreateUserSpec) (id string, existed bool, err error)
 	SetTemporaryPassword(ctx context.Context, userID, password string) error
 	AssignRealmRole(ctx context.Context, userID, role string) error
 	// EnsureRealmRole assigns the role only when the user does not already
@@ -196,7 +201,7 @@ type kcRoleRep struct {
 	Name string `json:"name"`
 }
 
-func (c *httpClient) CreateUser(ctx context.Context, spec CreateUserSpec) (string, error) {
+func (c *httpClient) CreateUser(ctx context.Context, spec CreateUserSpec) (string, bool, error) {
 	first, last := splitDisplayName(spec.DisplayName)
 	rep := map[string]any{
 		"username":  spec.Username,
@@ -207,7 +212,7 @@ func (c *httpClient) CreateUser(ctx context.Context, spec CreateUserSpec) (strin
 	}
 	resp, err := c.do(ctx, http.MethodPost, "/users", rep)
 	if err != nil {
-		return "", fmt.Errorf("create user: %w", err)
+		return "", false, fmt.Errorf("create user: %w", err)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -215,18 +220,19 @@ func (c *httpClient) CreateUser(ctx context.Context, spec CreateUserSpec) (strin
 		loc := resp.Header.Get("Location")
 		id := loc[strings.LastIndex(loc, "/")+1:]
 		if id == "" {
-			return "", fmt.Errorf("create user: 201 without Location header")
+			return "", false, fmt.Errorf("create user: 201 without Location header")
 		}
-		return id, nil
+		return id, false, nil
 	case http.StatusConflict:
-		// User already exists (e.g. retried onboarding): adopt the existing id.
+		// The email already belongs to an account: return its id with
+		// existed=true so the caller never resets its credentials (W9-1).
 		id, lookupErr := c.findUserIDByEmail(ctx, spec.Email)
 		if lookupErr != nil {
-			return "", fmt.Errorf("create user: conflict and lookup failed: %w", lookupErr)
+			return "", false, fmt.Errorf("create user: conflict and lookup failed: %w", lookupErr)
 		}
-		return id, nil
+		return id, true, nil
 	default:
-		return "", fmt.Errorf("create user: status %d", resp.StatusCode)
+		return "", false, fmt.Errorf("create user: status %d", resp.StatusCode)
 	}
 }
 

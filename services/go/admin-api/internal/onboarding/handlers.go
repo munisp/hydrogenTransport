@@ -40,7 +40,10 @@ const defaultPendingTTL = 30 * 24 * time.Hour
 // KeycloakClient is the subset of keycloak.AdminClient the onboarding
 // handlers use (kept as a separate interface for easy mocking in tests).
 type KeycloakClient interface {
-	CreateUser(ctx context.Context, spec keycloak.CreateUserSpec) (string, error)
+	// CreateUser returns the user id and whether the email already belonged
+	// to an existing account (Wave-9 W9-1: callers must never reset the
+	// credentials of a pre-existing account).
+	CreateUser(ctx context.Context, spec keycloak.CreateUserSpec) (id string, existed bool, err error)
 	SetTemporaryPassword(ctx context.Context, userID, password string) error
 	// EnsureRealmRole assigns the role only when missing (Wave-8 W8-4):
 	// idempotent repair for users stranded by a mid-sequence failure.
@@ -90,10 +93,10 @@ type intakeBody struct {
 }
 
 func (b *intakeBody) validate() string {
-	b.Email = strings.TrimSpace(b.Email)
+	b.Email = strings.ToLower(strings.TrimSpace(b.Email)) // W9-2: case-insensitive identity
 	b.DisplayName = strings.TrimSpace(b.DisplayName)
 	b.Org = strings.TrimSpace(b.Org)
-	if !emailRe.MatchString(b.Email) {
+	if !emailRe.MatchString(b.Email) || len(b.Email) > 254 {
 		return "email is missing or malformed"
 	}
 	if b.DisplayName == "" || len(b.DisplayName) > 120 {
@@ -101,6 +104,9 @@ func (b *intakeBody) validate() string {
 	}
 	if len(b.Org) > 200 {
 		return "org too long (max 200 chars)"
+	}
+	if len(b.Meta) > 8192 {
+		return "meta too large (max 8 KiB)"
 	}
 	if len(b.Meta) > 0 && !json.Valid(b.Meta) {
 		return "meta must be valid JSON"
@@ -263,7 +269,7 @@ func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 // provisionCitizen runs the provisioning half of citizen self-serve against
 // a stored (fresh or adopted) request row.
 func (h *Handler) provisionCitizen(w http.ResponseWriter, r *http.Request, req *Request, retried bool) {
-	kcID, err := h.provision(r.Context(), PersonaCitizen, req.Email, req.DisplayName)
+	kcID, _, err := h.provision(r.Context(), PersonaCitizen, req.Email, req.DisplayName)
 	if err != nil {
 		// Never echo the Keycloak error to the client (SECURITY_AUDIT F4):
 		// it would disclose whether the address is already registered and
@@ -374,7 +380,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	reqs, err := h.store.List(r.Context(), status, persona, 100)
+	reqs, err := h.store.List(r.Context(), status, persona, 100, 0)
 	if err != nil {
 		h.log.Error("list onboarding requests", zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "failed to list onboarding requests")
@@ -481,6 +487,10 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 				return
 			}
 		}
+		if len(body.Reason) > 500 {
+			httpx.Error(w, http.StatusBadRequest, "reason too long (max 500 chars)")
+			return
+		}
 		final, err := h.store.Decide(r.Context(), id, StatusRejected, "", decidedBy, strings.TrimSpace(body.Reason))
 		if err != nil {
 			h.log.Error("reject onboarding request", zap.String("id", id), zap.Error(err))
@@ -491,7 +501,7 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 		return
 	}
 
-	kcID, err := h.provision(r.Context(), req.Persona, req.Email, req.DisplayName)
+	kcID, existed, err := h.provision(r.Context(), req.Persona, req.Email, req.DisplayName)
 	if err != nil {
 		h.log.Error("approval provisioning failed",
 			zap.String("id", id), zap.String("persona", req.Persona), zap.Error(err))
@@ -506,10 +516,20 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to finalize onboarding request")
 		return
 	}
-	h.log.Info("onboarding request approved",
-		zap.String("id", id), zap.String("persona", req.Persona),
-		zap.String("realm_role", RealmRole(req.Persona)), zap.String("decided_by", decidedBy))
-	httpx.JSON(w, http.StatusOK, map[string]any{"request": final})
+	// W9-1: when the email already belonged to a Keycloak account, the role
+	// was added to that account (its credentials were NOT touched). Flag it:
+	// a pre-existing account on an intake can be legitimate (same person,
+	// new persona) or an impersonation attempt the admin should eyeball.
+	if existed {
+		h.log.Warn("approval attached role to a pre-existing Keycloak account",
+			zap.String("id", id), zap.String("persona", req.Persona),
+			zap.String("realm_role", RealmRole(req.Persona)), zap.String("decided_by", decidedBy))
+	} else {
+		h.log.Info("onboarding request approved",
+			zap.String("id", id), zap.String("persona", req.Persona),
+			zap.String("realm_role", RealmRole(req.Persona)), zap.String("decided_by", decidedBy))
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"request": final, "existing_account": existed})
 }
 
 // Reconcile handles POST /v1/onboarding/reconcile (platform-admin, audited;
@@ -518,71 +538,89 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 // is missing its realm role. Reconcile re-asserts the persona role on every
 // completed request's Keycloak user (EnsureRealmRole is idempotent — already
 // correct users are untouched). Always 200 with a summary; failures are
-// reported per id and logged, never silently swallowed.
+// reported per id and logged, never silently swallowed. Pages through ALL
+// completed rows (Wave-9 W9-4 — the Wave-8 version silently stopped at 500).
 func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	if !auth.HasRole(r.Context(), "platform-admin") {
 		httpx.Error(w, http.StatusForbidden, "onboarding reconcile requires the platform-admin role")
 		return
 	}
-	reqs, err := h.store.List(r.Context(), StatusCompleted, "", 500)
-	if err != nil {
-		h.log.Error("reconcile list", zap.Error(err))
-		httpx.Error(w, http.StatusInternalServerError, "failed to list completed requests")
-		return
-	}
+	checked := 0
 	ensured := 0
 	failedIDs := []string{}
-	for _, req := range reqs {
-		if req.KeycloakSub == "" {
-			continue
+	const page = 500
+	for offset := 0; ; offset += page {
+		reqs, err := h.store.List(r.Context(), StatusCompleted, "", page, offset)
+		if err != nil {
+			h.log.Error("reconcile list", zap.Error(err))
+			httpx.Error(w, http.StatusInternalServerError, "failed to list completed requests")
+			return
 		}
-		if err := h.kc.EnsureRealmRole(r.Context(), req.KeycloakSub, RealmRole(req.Persona)); err != nil {
-			h.log.Error("reconcile ensure role failed",
-				zap.String("id", req.ID), zap.String("kc_sub", req.KeycloakSub), zap.Error(err))
-			failedIDs = append(failedIDs, req.ID)
-			continue
+		for _, req := range reqs {
+			checked++
+			if req.KeycloakSub == "" {
+				continue
+			}
+			if err := h.kc.EnsureRealmRole(r.Context(), req.KeycloakSub, RealmRole(req.Persona)); err != nil {
+				h.log.Error("reconcile ensure role failed",
+					zap.String("id", req.ID), zap.String("kc_sub", req.KeycloakSub), zap.Error(err))
+				failedIDs = append(failedIDs, req.ID)
+				continue
+			}
+			ensured++
 		}
-		ensured++
+		if len(reqs) < page {
+			break
+		}
 	}
 	h.log.Info("onboarding reconcile",
-		zap.Int("checked", len(reqs)), zap.Int("ensured", ensured), zap.Int("failed", len(failedIDs)),
+		zap.Int("checked", checked), zap.Int("ensured", ensured), zap.Int("failed", len(failedIDs)),
 		zap.String("run_by", auth.Subject(r.Context())))
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"checked":    len(reqs),
+		"checked":    checked,
 		"ensured":    ensured,
 		"failed":     len(failedIDs),
 		"failed_ids": failedIDs,
 	})
 }
 
-// provision creates the Keycloak user, sets a temporary password, ensures the
-// persona's realm role and sends the VERIFY_EMAIL + UPDATE_PASSWORD actions
-// email. Returns the Keycloak user id.
+// provision creates the Keycloak user, ensures the persona's realm role and
+// sends the VERIFY_EMAIL + UPDATE_PASSWORD actions email. Returns the
+// Keycloak user id and whether the email already belonged to an account.
+//
+// Wave-9 W9-1 (credential-reset protection): the temporary password is set
+// ONLY for a brand-new user. When the email is already registered the
+// account's credentials are never touched — the actions email goes to the
+// address on file (proving ownership) and is the only recovery channel.
+// Without this, the public citizen self-serve (and any approved intake)
+// would let an unauthenticated party force a password reset on ANY
+// registered account, including operators and platform-admins.
 //
 // The sequence is not transactional (Keycloak has no multi-call tx); each
-// step is idempotent — CreateUser adopts an existing user on conflict and
-// EnsureRealmRole is read-then-assign — so a retry after a mid-sequence
-// failure converges, and POST /v1/onboarding/reconcile repairs the rest
-// (W8-4).
-func (h *Handler) provision(ctx context.Context, persona, email, displayName string) (string, error) {
-	userID, err := h.kc.CreateUser(ctx, keycloak.CreateUserSpec{
+// step is idempotent — EnsureRealmRole is read-then-assign — so a retry
+// after a mid-sequence failure converges, and POST /v1/onboarding/reconcile
+// repairs the rest (W8-4).
+func (h *Handler) provision(ctx context.Context, persona, email, displayName string) (string, bool, error) {
+	userID, existed, err := h.kc.CreateUser(ctx, keycloak.CreateUserSpec{
 		Username:    email,
 		Email:       email,
 		DisplayName: displayName,
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if err := h.kc.SetTemporaryPassword(ctx, userID, h.password()); err != nil {
-		return "", err
+	if !existed {
+		if err := h.kc.SetTemporaryPassword(ctx, userID, h.password()); err != nil {
+			return "", false, err
+		}
 	}
 	if err := h.kc.EnsureRealmRole(ctx, userID, RealmRole(persona)); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := h.kc.SendActionsEmail(ctx, userID, welcomeActions); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return userID, nil
+	return userID, existed, nil
 }
 
 // isUniqueViolation reports a Postgres unique-constraint violation (23505) —

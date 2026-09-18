@@ -66,7 +66,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "display_name is required")
 		return
 	}
-	id, err := h.kc.CreateUser(r.Context(), keycloak.CreateUserSpec{
+	id, existed, err := h.kc.CreateUser(r.Context(), keycloak.CreateUserSpec{
 		Username:    body.Email,
 		Email:       body.Email,
 		DisplayName: body.DisplayName,
@@ -74,6 +74,15 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.log.Error("create user", zap.String("email", body.Email), zap.Error(err))
 		httpx.Error(w, http.StatusBadGateway, "failed to create user")
+		return
+	}
+	// Wave-9 W9-1/W9-5: the email already has an account. Silently adopting
+	// it would attach the requested roles to an account the admin may not
+	// have intended (and historically reset its credentials). Refuse
+	// explicitly instead — the admin can manage roles via PUT
+	// /v1/users/{id}/roles.
+	if existed {
+		httpx.Error(w, http.StatusConflict, "a user with this email already exists (id="+id+"); manage roles on the existing account")
 		return
 	}
 	for _, role := range body.Roles {

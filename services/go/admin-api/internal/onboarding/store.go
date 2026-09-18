@@ -93,7 +93,7 @@ type Store interface {
 	Ping(ctx context.Context) error
 	Create(ctx context.Context, req *Request) error
 	Get(ctx context.Context, id string) (*Request, error)
-	List(ctx context.Context, status, persona string, limit int) ([]Request, error)
+	List(ctx context.Context, status, persona string, limit, offset int) ([]Request, error)
 	// Decide transitions a request to its final status, stamping decided_at
 	// and decided_by. keycloakSub is recorded on completion; reason (when
 	// non-empty) is merged into meta as reject_reason.
@@ -122,9 +122,10 @@ type PGStore struct {
 func NewPGStore(pool *pgxpool.Pool) *PGStore { return &PGStore{pool: pool} }
 
 // EnsureSchema idempotently creates the platform schema and the
-// onboarding_requests table (SPEC: platform.onboarding_requests). Wave-8
-// parity with migration 0011: status CHECK incl. 'expired', pending-dedup
-// partial unique index and the velocity-count email index.
+// onboarding_requests table (SPEC: platform.onboarding_requests). Wave-8/9
+// parity with migrations 0011/0012: status CHECK incl. 'expired',
+// pending-dedup partial unique index and velocity-count email index — both
+// on lower(email) so case variants cannot bypass them (W9-2).
 func (s *PGStore) EnsureSchema(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `
 CREATE SCHEMA IF NOT EXISTS platform;
@@ -145,9 +146,9 @@ CREATE TABLE IF NOT EXISTS platform.onboarding_requests (
 CREATE INDEX IF NOT EXISTS onboarding_requests_status_idx  ON platform.onboarding_requests (status);
 CREATE INDEX IF NOT EXISTS onboarding_requests_persona_idx ON platform.onboarding_requests (persona);
 CREATE UNIQUE INDEX IF NOT EXISTS onboarding_requests_pending_uq
-    ON platform.onboarding_requests (persona, email) WHERE status = 'pending';
+    ON platform.onboarding_requests (persona, lower(email)) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS onboarding_requests_email_created_idx
-    ON platform.onboarding_requests (email, created_at DESC);`)
+    ON platform.onboarding_requests (lower(email), created_at DESC);`)
 	return err
 }
 
@@ -187,15 +188,18 @@ func (s *PGStore) Get(ctx context.Context, id string) (*Request, error) {
 		`SELECT `+selectCols+` FROM platform.onboarding_requests WHERE id = $1`, id))
 }
 
-func (s *PGStore) List(ctx context.Context, status, persona string, limit int) ([]Request, error) {
+func (s *PGStore) List(ctx context.Context, status, persona string, limit, offset int) ([]Request, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT `+selectCols+` FROM platform.onboarding_requests
 WHERE ($1 = '' OR status = $1) AND ($2 = '' OR persona = $2)
-ORDER BY created_at DESC
-LIMIT $3`, status, persona, limit)
+ORDER BY created_at DESC, id
+LIMIT $3 OFFSET $4`, status, persona, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -225,19 +229,22 @@ RETURNING `+selectCols, id, status, keycloakSub, decidedBy, reason))
 
 // FindPending implements the Wave-8 intake dedup: the caller replays the
 // existing pending request instead of inserting a duplicate. The partial
-// unique index (0011) guarantees at most one row matches.
+// unique index (0011/0012) guarantees at most one row matches. Matching is
+// case-insensitive (W9-2): the handler lowercases at validate, this query
+// defends against legacy mixed-case rows.
 func (s *PGStore) FindPending(ctx context.Context, persona, email string) (*Request, error) {
 	return scanRequest(s.pool.QueryRow(ctx, `
 SELECT `+selectCols+` FROM platform.onboarding_requests
-WHERE persona = $1 AND email = $2 AND status = 'pending'`, persona, email))
+WHERE persona = $1 AND lower(email) = lower($2) AND status = 'pending'`, persona, email))
 }
 
-// CountRecent implements the Wave-8 per-email velocity cap.
+// CountRecent implements the Wave-8 per-email velocity cap (case-insensitive
+// since Wave-9 W9-2 — case variants must not bypass the cap).
 func (s *PGStore) CountRecent(ctx context.Context, email string, since time.Time) (int, error) {
 	var n int
 	err := s.pool.QueryRow(ctx, `
 SELECT count(*) FROM platform.onboarding_requests
-WHERE email = $1 AND created_at >= $2`, email, since).Scan(&n)
+WHERE lower(email) = lower($1) AND created_at >= $2`, email, since).Scan(&n)
 	return n, err
 }
 

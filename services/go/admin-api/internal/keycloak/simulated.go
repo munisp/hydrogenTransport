@@ -33,14 +33,14 @@ func simID() string {
 	return "sim-" + hex.EncodeToString(b)
 }
 
-func (s *simulated) CreateUser(_ context.Context, spec CreateUserSpec) (string, error) {
+func (s *simulated) CreateUser(_ context.Context, spec CreateUserSpec) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, u := range s.users {
 		if strings.EqualFold(u.Email, spec.Email) {
-			s.log.Warn("SIMULATED keycloak: user already exists, adopting existing id",
+			s.log.Warn("SIMULATED keycloak: user already exists, returning existing id",
 				zap.String("email", spec.Email), zap.String("user_id", u.ID))
-			return u.ID, nil
+			return u.ID, true, nil
 		}
 	}
 	first, last := splitDisplayName(spec.DisplayName)
@@ -56,7 +56,7 @@ func (s *simulated) CreateUser(_ context.Context, spec CreateUserSpec) (string, 
 	s.users[u.ID] = u
 	s.log.Warn("SIMULATED keycloak: created user (no real Keycloak user was provisioned)",
 		zap.String("user_id", u.ID), zap.String("username", u.Username), zap.String("email", u.Email))
-	return u.ID, nil
+	return u.ID, false, nil
 }
 
 func (s *simulated) SetTemporaryPassword(_ context.Context, userID, _ string) error {

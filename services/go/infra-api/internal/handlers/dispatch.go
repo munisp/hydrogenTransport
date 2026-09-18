@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
+
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 )
 
 // Hours-of-service limits (Wave-6 A4-05): a driver behind the wheel of a
@@ -262,17 +264,27 @@ func (h *Handler) CreateDispatchJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, j)
 }
 
-// AcceptDispatchJob handles POST /v1/dispatch/jobs/{id}/accept (Keycloak JWT):
-// marks an assigned job accepted and stamps accepted_at.
+// AcceptDispatchJob handles POST /v1/dispatch/jobs/{id}/accept (Keycloak JWT,
+// role driver): marks an assigned job accepted and stamps accepted_at.
+// Wave-9 W9-7: the accepting driver must be the job's assignee — before this
+// fix ANY driver could accept ANY assigned job (the WHERE clause matched on
+// id+status only).
 func (h *Handler) AcceptDispatchJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	caller := auth.Subject(r.Context())
+	if caller == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	j, err := scanDispatchJob(h.db.QueryRow(r.Context(), `
 		UPDATE infra.dispatch_jobs
 		SET status = 'accepted', accepted_at = now()
-		WHERE id = $1 AND status = 'assigned'
-		RETURNING `+dispatchJobCols, id))
+		WHERE id = $1 AND status = 'assigned' AND driver_sub = $2
+		RETURNING `+dispatchJobCols, id, caller))
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found or not in assigned status"})
+		// 404 either way: the caller cannot distinguish "no such job" from
+		// "assigned to someone else" (no existence leak across drivers).
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found, not in assigned status, or assigned to another driver"})
 		return
 	}
 	if err != nil {
