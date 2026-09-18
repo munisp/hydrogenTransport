@@ -112,29 +112,35 @@ func (h *Handler) ListFareProducts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"fare_products": products})
 }
 
-// Entitlement mirrors commerce.rider_entitlements (0009 G1).
+// Entitlement mirrors commerce.rider_entitlements (0009 G1). PayerAccount
+// (0010, Wave-7 A2-06) links the entitlement to a corporate billing account:
+// the amount it covers is invoiced to that account instead of written off.
 type Entitlement struct {
-	ID        string    `json:"id"`
-	RiderSub  string    `json:"rider_sub"`
-	ProductID string    `json:"product_id"`
-	ValidFrom time.Time `json:"valid_from"`
-	ValidTo   time.Time `json:"valid_to"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	RiderSub     string    `json:"rider_sub"`
+	ProductID    string    `json:"product_id"`
+	ValidFrom    time.Time `json:"valid_from"`
+	ValidTo      time.Time `json:"valid_to"`
+	PayerAccount *string   `json:"payer_account,omitempty"`
+	CreatedBy    string    `json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
-const entitlementCols = `id, rider_sub, product_id, valid_from, valid_to, created_by, created_at`
+const entitlementCols = `id, rider_sub, product_id, valid_from, valid_to, payer_account, created_by, created_at`
 
 // GrantEntitlement handles POST /v1/entitlements (operator/platform-admin):
 // grants a rider a fare product for its duration (or an explicit window).
 // Selling the product (collecting price_minor) is a separate fare payment —
-// the entitlement grant itself moves no money.
+// the entitlement grant itself moves no money. An optional payer_account
+// (Wave-7 A2-06) makes a corporate billing account the payer: rides the
+// entitlement covers accrue to that account for periodic invoicing.
 func (h *Handler) GrantEntitlement(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RiderSub  string     `json:"rider_sub"`
-		ProductID string     `json:"product_id"`
-		ValidFrom *time.Time `json:"valid_from"`
-		ValidTo   *time.Time `json:"valid_to"`
+		RiderSub     string     `json:"rider_sub"`
+		ProductID    string     `json:"product_id"`
+		ValidFrom    *time.Time `json:"valid_from"`
+		ValidTo      *time.Time `json:"valid_to"`
+		PayerAccount *string    `json:"payer_account"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.RiderSub == "" || req.ProductID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"rider_sub\" and \"product_id\""})
@@ -152,6 +158,23 @@ func (h *Handler) GrantEntitlement(w http.ResponseWriter, r *http.Request) {
 		h.internal(w, "load fare product", err)
 		return
 	}
+	// A payer-backed entitlement needs an active billing account.
+	if req.PayerAccount != nil {
+		var status string
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT status FROM commerce.billing_accounts WHERE id = $1`, *req.PayerAccount).Scan(&status); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown payer_account"})
+				return
+			}
+			h.internal(w, "load billing account", err)
+			return
+		}
+		if status != "active" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "payer_account billing account is " + status})
+			return
+		}
+	}
 	from := time.Now().UTC()
 	if req.ValidFrom != nil {
 		from = *req.ValidFrom
@@ -166,11 +189,11 @@ func (h *Handler) GrantEntitlement(w http.ResponseWriter, r *http.Request) {
 	}
 	var e Entitlement
 	err := h.db.QueryRow(r.Context(), `
-		INSERT INTO commerce.rider_entitlements (rider_sub, product_id, valid_from, valid_to, created_by)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO commerce.rider_entitlements (rider_sub, product_id, valid_from, valid_to, payer_account, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING `+entitlementCols,
-		req.RiderSub, req.ProductID, from, to, auth.Subject(r.Context())).
-		Scan(&e.ID, &e.RiderSub, &e.ProductID, &e.ValidFrom, &e.ValidTo, &e.CreatedBy, &e.CreatedAt)
+		req.RiderSub, req.ProductID, from, to, req.PayerAccount, auth.Subject(r.Context())).
+		Scan(&e.ID, &e.RiderSub, &e.ProductID, &e.ValidFrom, &e.ValidTo, &e.PayerAccount, &e.CreatedBy, &e.CreatedAt)
 	if err != nil {
 		h.internal(w, "grant entitlement", err)
 		return
@@ -202,7 +225,7 @@ func (h *Handler) ListEntitlements(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var e Entitlement
 		if err := rows.Scan(&e.ID, &e.RiderSub, &e.ProductID, &e.ValidFrom,
-			&e.ValidTo, &e.CreatedBy, &e.CreatedAt); err != nil {
+			&e.ValidTo, &e.PayerAccount, &e.CreatedBy, &e.CreatedAt); err != nil {
 			h.internal(w, "scan entitlement", err)
 			return
 		}
