@@ -18,6 +18,7 @@ Canonical, versioned schema source for the platform Postgres
 | `0006_trades_idempotency.sql` | `commerce.trades.idempotency_key` + partial unique index `trades_idempotency_key_uq` — absorbs commerce-api's runtime EnsureSchema DDL for `Idempotency-Key`-protected POST /v1/energy/trades (fare_payments precedent from 0003). |
 | `0007_wave4_business_rules.sql` | Wave-4 business-rule completion: `fleet.fuel_consumption` (per-bus learned H2 consumption for range math), `commerce.ad_placements.cost_minor` (per-placement spend vs campaign budget), partial unique index enforcing at most one OPEN work order per maintenance prediction (retry-safe `maintenance.predicted` consumer). |
 | `0008_energy_vectors.sql` | Wave-5 multi-energy (plan-wave5.md schema contract): vehicles.energy_type, telemetry generic energy columns + h2 backfill, stations.station_type/available_kwh/charger_count, infra.charge_points + infra.charging_sessions (OCPP). Idempotent; CHECK constraints via pg_constraint-guarded DO blocks. |
+| `0009_wave6_gaps.sql` | Wave-6 gap-audit fixes (docs/GAP_AUDIT.md): `commerce.fare_products` + `commerce.rider_entitlements` (passes/discounts), `fare_payments.refunded_minor` (partial refunds, NOT VALID CHECK), `fleet.vehicles.wheelchair_accessible` + `citizen.drt_requests.requires_wheelchair` (DRT accessibility), `infra.webhook_subscriptions` + `infra.webhook_deliveries` (HMAC-signed event webhooks), `infra.incidents.acknowledged_at`. |
 
 Every file has a `-- +goose Down` section for rollback.
 
