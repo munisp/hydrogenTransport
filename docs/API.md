@@ -137,3 +137,28 @@ codes: `unauthorized` (401), `forbidden` (403, role/Permify deny),
 `module disabled` (404), `validation` (400), `not_found` (404),
 `internal` (500), `bad_gateway` (502 — ledger/Mojaloop/OpenSearch downstream
 failure).
+
+## Versioning & deprecation policy
+
+- **Path version is the contract.** Every route carries an explicit major
+  version (`/v1/...`). Breaking changes (removed/renamed fields, changed
+  semantics, new required parameters, stricter validation such as the
+  Wave-6 incident-type enum) ship as `/v2/...` — never silently into `/v1`.
+- **Additive is not breaking.** New optional request fields and new response
+  fields may land in an existing version at any time; consumers MUST ignore
+  unknown fields (all platform clients decode with `DisallowUnknownFields`
+  off for this reason).
+- **Deprecation lifecycle.** When a `/v(N)` route or field is superseded:
+  1. responses gain `Deprecation: true` and `Sunset: <HTTP-date>` headers
+     (RFC 8594/9745) for at least **90 days**;
+  2. the change is announced on the `platform.api.changelog` Kafka topic
+     and in this file;
+  3. after the sunset date the route returns `410 Gone` with
+     `{"error":"gone","message":"use /v2/..."}` for a further 90 days,
+     then is removed.
+- **Webhooks carry their own version.** The `X-H2Fleet-Event` header names
+  the event type; payload shape changes create a new event type
+  (`incident.opened.v2`), never an in-place change — subscribers opt in by
+  updating their subscription's event list.
+- **Error codes are stable.** The codes in §Error format are part of the
+  contract; new codes may be added, existing ones are never repurposed.

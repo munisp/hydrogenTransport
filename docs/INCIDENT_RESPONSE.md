@@ -76,3 +76,72 @@ Quarterly: replay a synthetic `safety.leak.detected` (fixture in
 `packages/events/fixtures/`) through the simulator path, verify
 incident row + ack/resolve round-trip + Temporal signal log line, and time
 detection→ack. Record results in the ops log.
+
+## 6. Credential compromise — revocation & rotation runbook
+
+Symptoms: unexpected 401/403 spikes, audit anomaly alert firing on
+`actor_sub` mismatch, a secret appearing anywhere it shouldn't (logs, ticket,
+chat), or a departed employee/contractor who held credentials.
+
+Order matters: **revoke first, rotate second, verify third.**
+
+### 6.1 Audit ingest token (`AUDIT_INGEST_TOKEN`) — zero-downtime rollover
+
+The audit-log service accepts a **comma-separated token list** (Wave-6
+A3-08), so rotation needs no producer/consumer restart coordination:
+
+1. Set `AUDIT_INGEST_TOKEN="new-token,old-token"` on audit-log and reload —
+   both tokens are now accepted.
+2. Cut every producer (leak-ingest, services using `pkg/auditclient`) to
+   `new-token`.
+3. Remove the old token: `AUDIT_INGEST_TOKEN="new-token"`, reload.
+4. **Compromise case**: skip step 1's grace — set the new token alone
+   immediately, accept the ingest gap, and pull the missed window from the
+   producers' retry queues (auditclient buffers and retries on 401).
+
+### 6.2 Keycloak (JWT signing, client secrets, user credentials)
+
+1. **User/operator account**: disable in the realm admin console → active
+   tokens remain valid until expiry (max 15 min access-token lifespan) —
+   force it now: *Sessions → Sign out all sessions* for the user, and for a
+   service account revoke its client session too.
+2. **Realm signing key compromise** (worst case — every JWT forgeable):
+   *Clients → realm keys → rotate RS256 keypair*, which invalidates all
+   outstanding tokens platform-wide; every service re-fetches JWKS
+   automatically (JWKS cache TTL). Expect a brief 401 wave; do this in a
+   maintenance window if possible.
+3. **Client secrets** (service-to-service): regenerate in the client tab,
+   update the service's secret mount, restart that service only.
+
+### 6.3 Webhook signing secrets (`infra.webhook_subscriptions.secret`)
+
+1. Platform-admin: `POST /api/infra/v1/webhooks/{id}/rotate-secret` issues a
+   new secret (returned once, in the response only).
+2. Deliver the new secret to the subscriber out-of-band; they verify
+   `X-H2Fleet-Signature` with it from the next delivery.
+3. **Compromise case**: disable the subscription (`PATCH ... {"enabled":false}`)
+   first — an attacker holding the secret can forge event payloads at the
+   subscriber.
+
+### 6.4 Database / TigerBeetle / Mojaloop credentials
+
+1. Postgres role password: `ALTER ROLE ... PASSWORD`, update the secret
+   mount, rolling-restart the services (pool drains pick up the new
+   password; old connections die on their own).
+2. Mojaloop JWS keys: rotate per the switch's key ceremony
+   (docs/MOJALOOP.md); the platform side fails closed — a wrong key rejects
+   transfers, it never silently accepts.
+3. TigerBeetle has no per-client auth (network-segmented); compromise
+   response is network isolation — see docs/INSIDER_THREAT.md.
+
+### 6.5 Verification (always)
+
+- `GET /api/audit/v1/audit/verify` → `ok: true` (chain intact through the
+  incident window).
+- Query the trail for everything the compromised credential did:
+  `GET /api/audit/v1/audit?actor_sub=<sub>&from=<compromise-start>` —
+  that slice, plus the evidence-pack endpoint if an incident was opened,
+  is the forensics package.
+- Record: what was revoked, when, what it could reach, what it did reach,
+  and the residual-risk sign-off in the ops log (feeds DPIA review,
+  docs/DPIA.md §6).

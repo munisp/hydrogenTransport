@@ -65,11 +65,19 @@ docker compose -f infra/docker-compose.yml start tigerbeetle
 make migrate
 docker compose -f infra/docker-compose.yml --profile apps up -d
 
-# 6. Verify
+# 6. Verify — scripted, non-negotiable (Wave-6: a drill you don't verify is
+#    a backup you don't have). Exits non-zero on any failed check:
+sh infra/backup/verify_restore.sh "$TS"
 make gateway-check
-# spot checks: vehicles count = 50, latest telemetry ts <= backup ts,
-# ledger balances match commerce.fare_payments sums, one login via Keycloak.
+# then the manual remainder printed by the script: TigerBeetle balance
+# reconciliation via the TB REPL, GET /api/audit/v1/audit/verify,
+# one login via Keycloak.
 ```
+
+**Step 0b (before restoring):** sanity-check the artifacts themselves —
+`pg_restore --list /tmp/h2fleet_${TS}.dump | head` must list schemas, and
+the TigerBeetle file must be non-empty. A corrupt artifact discovered at
+step 2 costs the whole RTO window.
 
 ## Success criteria for the drill
 
