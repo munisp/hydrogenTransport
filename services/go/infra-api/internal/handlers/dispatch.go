@@ -3,6 +3,8 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -10,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 )
+
+// Hours-of-service limits (Wave-6 A4-05): a driver behind the wheel of a
+// 350-bar H2 bus must not be schedulable for unsafe/illegal shift lengths.
+// Both limits default to 10 h (aligned with common EU-style daily driving
+// regimes) and are operator-configurable; a breach is a hard 422 — an
+// override, if ever needed, is a platform-admin action outside this API.
+func dispatchMaxShiftHours() float64 {
+	if v, err := strconv.ParseFloat(os.Getenv("DISPATCH_MAX_SHIFT_HOURS"), 64); err == nil && v > 0 {
+		return v
+	}
+	return 10
+}
+func dispatchMaxDailyHours() float64 {
+	if v, err := strconv.ParseFloat(os.Getenv("DISPATCH_MAX_DAILY_HOURS"), 64); err == nil && v > 0 {
+		return v
+	}
+	return 10
+}
+
+// dispatchTimezone is the civic timezone the daily-hours total is drawn in
+// (DISPATCH_TIMEZONE, default UTC) — same principle as FARE_CAP_TIMEZONE.
+func dispatchTimezone() string {
+	if tz := os.Getenv("DISPATCH_TIMEZONE"); tz != "" {
+		return tz
+	}
+	return "UTC"
+}
 
 // DispatchJob mirrors infra.dispatch_jobs (dispatch-workforce module).
 type DispatchJob struct {
@@ -115,6 +144,45 @@ func (h *Handler) CreateDispatchJob(w http.ResponseWriter, r *http.Request) {
 	if req.StartsAt != nil && req.EndsAt != nil && !req.EndsAt.After(*req.StartsAt) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ends_at must be after starts_at"})
 		return
+	}
+
+	// Wave-6 A4-05 (hours of service): (1) one job must not exceed
+	// DISPATCH_MAX_SHIFT_HOURS; (2) the driver's total active hours on the
+	// civic day must not exceed DISPATCH_MAX_DAILY_HOURS.
+	maxShift := dispatchMaxShiftHours()
+	plannedHours := maxShift // open-ended job: assume the maximum
+	if req.StartsAt != nil && req.EndsAt != nil {
+		plannedHours = req.EndsAt.Sub(*req.StartsAt).Hours()
+		if plannedHours > maxShift {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "shift exceeds the hours-of-service limit (" +
+					strconv.FormatFloat(plannedHours, 'f', 1, 64) + "h > " +
+					strconv.FormatFloat(maxShift, 'f', 0, 64) + "h max)"})
+			return
+		}
+	}
+	if req.StartsAt != nil {
+		var dayTotal float64
+		if err := h.db.QueryRow(r.Context(), `
+			SELECT COALESCE(sum(EXTRACT(EPOCH FROM
+				(COALESCE(ends_at, starts_at + make_interval(hours => $3)) - starts_at)))/3600.0, 0)
+			FROM infra.dispatch_jobs
+			WHERE driver_sub = $1 AND status IN ('assigned','accepted','in_progress')
+			  AND starts_at IS NOT NULL
+			  AND starts_at >= ((date_trunc('day', $2::timestamptz AT TIME ZONE $4)) AT TIME ZONE $4)
+			  AND starts_at <  ((date_trunc('day', $2::timestamptz AT TIME ZONE $4) + interval '1 day') AT TIME ZONE $4)`,
+			req.DriverSub, *req.StartsAt, int(maxShift), dispatchTimezone()).Scan(&dayTotal); err != nil {
+			h.internal(w, "compute driver daily hours", err)
+			return
+		}
+		if maxDaily := dispatchMaxDailyHours(); dayTotal+plannedHours > maxDaily {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "driver daily hours-of-service exceeded (" +
+					strconv.FormatFloat(dayTotal, 'f', 1, 64) + "h scheduled + " +
+					strconv.FormatFloat(plannedHours, 'f', 1, 64) + "h new > " +
+					strconv.FormatFloat(maxDaily, 'f', 0, 64) + "h max)"})
+			return
+		}
 	}
 
 	tx, err := h.db.Begin(r.Context())
@@ -243,4 +311,92 @@ func (h *Handler) CancelDispatchJob(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("failed to signal dispatch cancel", zap.String("job", j.ID), zap.Error(err))
 	}
 	writeJSON(w, http.StatusOK, j)
+}
+
+// SwapDispatchVehicle handles POST /v1/dispatch/jobs/{id}/swap-vehicle
+// (Keycloak JWT, operator) — Wave-6 A1-05: mid-shift vehicle breakdown.
+// Instead of cancel + recreate (which loses the operational thread), the
+// active job's vehicle is replaced after the new vehicle passes the same
+// time-window conflict check as job creation. A dispatch.vehicle_swapped
+// event links old → new vehicle for the audit trail; the route-level audit
+// middleware records who performed the swap and why (reason is required).
+func (h *Handler) SwapDispatchVehicle(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		VehicleID string `json:"vehicle_id"`
+		Reason    string `json:"reason"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil || req.VehicleID == "" || req.Reason == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"vehicle_id\" and \"reason\""})
+		return
+	}
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		h.internal(w, "begin vehicle swap", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	job, err := scanDispatchJob(tx.QueryRow(r.Context(), `
+		SELECT `+dispatchJobCols+` FROM infra.dispatch_jobs
+		WHERE id = $1 AND status IN ('assigned','accepted','in_progress')
+		FOR UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job not found or not in an active status"})
+		return
+	}
+	if err != nil {
+		h.internal(w, "load job for vehicle swap", err)
+		return
+	}
+
+	// The new vehicle must be free for the job's remaining window — the
+	// same overlap semantics as CreateDispatchJob, excluding this job.
+	var conflict bool
+	err = tx.QueryRow(r.Context(), `
+		SELECT EXISTS (
+			SELECT 1 FROM infra.dispatch_jobs
+			WHERE id != $1 AND vehicle_id = $2
+			  AND status IN ('assigned','accepted','in_progress')
+			  AND ($3::timestamptz IS NULL OR starts_at IS NULL OR starts_at < $4::timestamptz)
+			  AND ($4::timestamptz IS NULL OR ends_at IS NULL OR ends_at > $3::timestamptz)
+		)`, job.ID, req.VehicleID, job.StartsAt, job.EndsAt).Scan(&conflict)
+	if err != nil {
+		h.internal(w, "swap conflict check", err)
+		return
+	}
+	if conflict {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "vehicle already assigned to an overlapping active dispatch job"})
+		return
+	}
+
+	updated, err := scanDispatchJob(tx.QueryRow(r.Context(), `
+		UPDATE infra.dispatch_jobs SET vehicle_id = $2
+		WHERE id = $1 RETURNING `+dispatchJobCols, job.ID, req.VehicleID))
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "vehicle_id does not reference a known vehicle"})
+			return
+		}
+		h.internal(w, "swap vehicle", err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		h.internal(w, "commit vehicle swap", err)
+		return
+	}
+
+	if err := h.pub.Publish(r.Context(), "dispatch.vehicle_swapped", map[string]any{
+		"job_id":         job.ID,
+		"driver_sub":     job.DriverSub,
+		"old_vehicle_id": job.VehicleID,
+		"new_vehicle_id": req.VehicleID,
+		"reason":         req.Reason,
+		"swapped_at":     time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		h.log.Error("failed to publish dispatch.vehicle_swapped", zap.Error(err))
+	}
+	writeJSON(w, http.StatusOK, updated)
 }

@@ -122,6 +122,11 @@ func TestCreateDispatchJob_NoConflict(t *testing.T) {
 	created := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
 	starts := time.Date(2026, 7, 26, 8, 0, 0, 0, time.UTC)
 	ends := time.Date(2026, 7, 26, 16, 0, 0, 0, time.UTC)
+	// Wave-6 A4-05: the hours-of-service daily-total check runs before the
+	// insert transaction (8h shift + 0h scheduled ≤ 10h → allowed).
+	pool.ExpectQuery(`sum\(EXTRACT\(EPOCH`).
+		WithArgs("driver-3", starts, 10, "UTC").
+		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(0.0))
 	pool.ExpectBegin()
 	pool.ExpectQuery(conflictQuery).
 		WithArgs("driver-3", &vehicle, &starts, &ends).

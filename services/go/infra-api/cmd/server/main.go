@@ -153,12 +153,22 @@ func main() {
 		// all incidents (SECURITY_AUDIT F12 / task: incident list gating).
 		// station-staff is accepted as a role name even though today it maps
 		// to the operator realm role at provisioning time.
-		r.With(jwtmw.RequireAnyRole("operator", "platform-admin", "station-staff")).
+		r.With(jwtmw.RequireAnyRole("operator", "platform-admin", "station-staff", "auditor")).
 			Get("/v1/incidents", h.ListIncidents)
 		r.With(jwtmw.RequireAuth).Post("/v1/incidents", h.OpenIncident)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/incidents/{id}/ack", h.AckIncident)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/incidents/{id}/resolve", h.ResolveIncident)
 		r.With(leakAuth).Post("/v1/safety/leak", h.IngestLeak)
+		// Wave-6 A4-01: driver panic channel.
+		r.With(jwtmw.RequireRole("driver")).Post("/v1/safety/sos", h.TriggerSOS)
+		// Wave-6 A4-04: chain-of-custody evidence export (regulator/insurer).
+		r.With(jwtmw.RequireAnyRole("platform-admin", "auditor")).
+			Get("/v1/incidents/{id}/evidence-pack", h.GetEvidencePack)
+		// Wave-6 A3-03: outbound partner webhooks.
+		r.With(jwtmw.RequireRole("platform-admin")).Post("/v1/webhooks/subscriptions", h.CreateWebhookSubscription)
+		r.With(jwtmw.RequireRole("platform-admin")).Get("/v1/webhooks/subscriptions", h.ListWebhookSubscriptions)
+		r.With(jwtmw.RequireRole("platform-admin")).Delete("/v1/webhooks/subscriptions/{id}", h.DeactivateWebhookSubscription)
+		r.With(jwtmw.RequireAnyRole("operator", "platform-admin")).Post("/v1/webhooks/deliveries/{id}/retry", h.RetryWebhookDelivery)
 	})
 	// dispatch-workforce module
 	r.Group(func(r chi.Router) {
@@ -167,6 +177,8 @@ func main() {
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs", h.CreateDispatchJob)
 		r.With(jwtmw.RequireRole("driver")).Post("/v1/dispatch/jobs/{id}/accept", h.AcceptDispatchJob)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs/{id}/cancel", h.CancelDispatchJob)
+		// Wave-6 A1-05: mid-shift vehicle breakdown swap.
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs/{id}/swap-vehicle", h.SwapDispatchVehicle)
 	})
 	// compliance-reporting module
 	r.Group(func(r chi.Router) {

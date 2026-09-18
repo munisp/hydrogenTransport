@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
+
+	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 )
 
 // Incident mirrors infra.incidents.
@@ -81,6 +84,34 @@ type createIncidentRequest struct {
 	Meta        map[string]any `json:"meta"`
 }
 
+// incidentTypeFloor is the incident type enum with its minimum severity
+// (Wave-6 A4-02): a collision cannot be filed as "low", an SOS is always
+// critical. Unknown types are rejected so a typo can never silently bypass
+// every escalation rule that matches on type.
+var incidentTypeFloor = map[string]string{
+	"h2_leak":    "low",
+	"collision":  "high",
+	"fire":       "critical",
+	"prd_vent":   "high",
+	"evacuation": "high",
+	"sos":        "critical",
+	"security":   "high",
+	"breakdown":  "low",
+	"other":      "low",
+}
+
+// applySeverityFloor raises sev to the type's minimum (never lowers a
+// caller's escalation) and normalizes unknown severities to medium.
+func applySeverityFloor(incidentType, sev string) string {
+	if _, ok := severityRank[sev]; !ok {
+		sev = "medium"
+	}
+	if floor, ok := incidentTypeFloor[incidentType]; ok && severityRank[floor] > severityRank[sev] {
+		return floor
+	}
+	return sev
+}
+
 // OpenIncident handles POST /v1/incidents (Keycloak JWT).
 func (h *Handler) OpenIncident(w http.ResponseWriter, r *http.Request) {
 	var req createIncidentRequest
@@ -88,9 +119,16 @@ func (h *Handler) OpenIncident(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body must include \"type\""})
 		return
 	}
+	if _, ok := incidentTypeFloor[req.Type]; !ok {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "unknown incident type " + strconv.Quote(req.Type) +
+				" (allowed: collision, evacuation, fire, h2_leak, breakdown, other, prd_vent, security, sos)"})
+		return
+	}
 	if req.Severity == "" {
 		req.Severity = "medium"
 	}
+	req.Severity = applySeverityFloor(req.Type, req.Severity)
 	if req.Description != "" {
 		if req.Meta == nil {
 			req.Meta = map[string]any{}
@@ -102,7 +140,74 @@ func (h *Handler) OpenIncident(w http.ResponseWriter, r *http.Request) {
 		h.internal(w, "open incident", err)
 		return
 	}
+	h.afterIncidentOpened(r, i)
 	writeJSON(w, http.StatusCreated, i)
+}
+
+// afterIncidentOpened runs the Wave-6 post-creation effects shared by every
+// incident ingress path (manual open, leak ingest, driver SOS):
+// station emergency on critical station incidents (A4-06) and outbound
+// partner webhooks (A3-03).
+func (h *Handler) afterIncidentOpened(r *http.Request, i Incident) {
+	h.setStationEmergency(r, i)
+	h.dispatchIncidentWebhooks(r.Context(), i, "incident.opened")
+}
+
+// setStationEmergency flips a station to 'emergency' when a critical
+// incident opens against it (Wave-6 A4-06). The station queue already
+// rejects joins for any non-online station, so this one transition also
+// stops further buses from queueing into a venting station.
+func (h *Handler) setStationEmergency(r *http.Request, i Incident) {
+	if i.Severity != "critical" || i.StationID == nil {
+		return
+	}
+	var flipped string
+	err := h.db.QueryRow(r.Context(), `
+		UPDATE infra.stations SET status = 'emergency'
+		WHERE id = $1 AND status != 'emergency'
+		RETURNING id`, *i.StationID).Scan(&flipped)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return // already emergency (or unknown station)
+	}
+	if err != nil {
+		h.log.Error("failed to set station emergency", zap.String("station", *i.StationID), zap.Error(err))
+		return
+	}
+	if err := h.pub.Publish(r.Context(), "station.status.changed", map[string]any{
+		"station_id": *i.StationID,
+		"status":     "emergency",
+		"reason":     "critical incident " + i.ID,
+	}); err != nil {
+		h.log.Error("failed to publish station.status.changed", zap.Error(err))
+	}
+}
+
+// maybeRestoreStation flips a station back to 'online' when its last open
+// critical incident resolves (Wave-6 A4-06).
+func (h *Handler) maybeRestoreStation(r *http.Request, stationID string) {
+	var flipped string
+	err := h.db.QueryRow(r.Context(), `
+		UPDATE infra.stations SET status = 'online'
+		WHERE id = $1 AND status = 'emergency'
+		  AND NOT EXISTS (
+			SELECT 1 FROM infra.incidents
+			WHERE station_id = $1 AND severity = 'critical'
+			  AND status IN ('open','in_progress','acknowledged'))
+		RETURNING id`, stationID).Scan(&flipped)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		h.log.Error("failed to restore station", zap.String("station", stationID), zap.Error(err))
+		return
+	}
+	if err := h.pub.Publish(r.Context(), "station.status.changed", map[string]any{
+		"station_id": stationID,
+		"status":     "online",
+		"reason":     "all critical incidents resolved",
+	}); err != nil {
+		h.log.Error("failed to publish station.status.changed", zap.Error(err))
+	}
 }
 
 func (h *Handler) insertIncident(r *http.Request, req createIncidentRequest) (Incident, error) {
@@ -162,6 +267,12 @@ func (h *Handler) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"incident_id": id}); err != nil {
 		h.log.Error("failed to signal incident resolution", zap.String("incident", id), zap.Error(err))
 	}
+	// Wave-6: restore the station when its last critical incident resolves
+	// (A4-06) and notify partner webhooks (A3-03).
+	if i.StationID != nil {
+		h.maybeRestoreStation(r, *i.StationID)
+	}
+	h.dispatchIncidentWebhooks(r.Context(), i, "incident.resolved")
 	writeJSON(w, http.StatusOK, i)
 }
 
@@ -301,6 +412,96 @@ func (h *Handler) IngestLeak(w http.ResponseWriter, r *http.Request) {
 	if err := h.wf.Signal(r.Context(), "incident-"+incident.ID, "leak-detected", event); err != nil {
 		h.log.Error("failed to signal incident workflow", zap.String("incident", incident.ID), zap.Error(err))
 	}
+	h.afterIncidentOpened(r, incident)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"incident": incident})
+}
+
+// TriggerSOS handles POST /v1/safety/sos (Keycloak JWT, driver role) —
+// Wave-6 A4-01: the driver's panic channel. Opens a CRITICAL incident of
+// type 'sos' enriched with the driver's active dispatch job (vehicle,
+// route) and the vehicle's latest telemetry position, publishes safety.sos,
+// starts the standard incident-response workflow (shared ingress signal:
+// in_progress → escalation timer → ack/resolve), and fires partner webhooks
+// via afterIncidentOpened.
+func (h *Handler) TriggerSOS(w http.ResponseWriter, r *http.Request) {
+	subject := auth.Subject(r.Context())
+	if subject == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated subject required"})
+		return
+	}
+	var req struct {
+		Description string `json:"description"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+	}
+
+	meta := map[string]any{"driver_sub": subject, "source": "driver_sos"}
+	if req.Description != "" {
+		meta["description"] = req.Description
+	}
+	// Attach the driver's active dispatch job (best-effort context).
+	var vehicleID, route *string
+	if err := h.db.QueryRow(r.Context(), `
+		SELECT vehicle_id, NULLIF(route,'') FROM infra.dispatch_jobs
+		WHERE driver_sub = $1 AND status IN ('accepted','in_progress')
+		ORDER BY COALESCE(starts_at, created_at) DESC LIMIT 1`, subject).
+		Scan(&vehicleID, &route); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		h.internal(w, "load driver dispatch context", err)
+		return
+	}
+	if vehicleID != nil {
+		meta["vehicle_id"] = *vehicleID
+	}
+	if route != nil {
+		meta["route"] = *route
+	}
+	// Attach the vehicle's last known position (best-effort).
+	if vehicleID != nil {
+		var lat, lon float64
+		if err := h.db.QueryRow(r.Context(), `
+			SELECT ST_Y(geom)::float8, ST_X(geom)::float8 FROM fleet.telemetry
+			WHERE bus_id = $1 ORDER BY ts DESC LIMIT 1`, *vehicleID).Scan(&lat, &lon); err == nil {
+			meta["lat"] = lat
+			meta["lon"] = lon
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			h.internal(w, "load vehicle position", err)
+			return
+		}
+	}
+
+	incident, err := h.insertIncident(r, createIncidentRequest{
+		Type:      "sos",
+		Severity:  "critical",
+		BusID:     vehicleID,
+		StationID: nil,
+		Meta:      meta,
+	})
+	if err != nil {
+		h.internal(w, "open sos incident", err)
+		return
+	}
+
+	event := map[string]any{
+		"incident_id": incident.ID,
+		"driver_sub":  subject,
+		"severity":    incident.Severity,
+		"vehicle_id":  vehicleID,
+		"route":       route,
+	}
+	if err := h.pub.Publish(r.Context(), "safety.sos", event); err != nil {
+		h.log.Error("failed to publish safety.sos", zap.Error(err))
+	}
+	// The incident-response workflow's ingress signal is shared by every
+	// critical incident (SignalWithStart starts the instance when absent).
+	if err := h.wf.Signal(r.Context(), "incident-"+incident.ID, "leak-detected", event); err != nil {
+		h.log.Error("failed to signal incident workflow", zap.String("incident", incident.ID), zap.Error(err))
+	}
+	h.afterIncidentOpened(r, incident)
+
+	writeJSON(w, http.StatusCreated, map[string]any{"incident": incident})
 }
