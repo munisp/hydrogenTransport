@@ -67,9 +67,11 @@ func cancelledRow(id, userSub string) pgx.Row {
 		*(dest[0].(*string)) = id
 		*(dest[1].(*string)) = userSub
 		// pickup/dropoff stay nil
-		// drtCols: 0=id, 1=user_sub, …, 12=status, 13=requested_at
-		*(dest[12].(*string)) = "cancelled"
-		*(dest[13].(*time.Time)) = time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+		// drtCols (0009): 0=id, 1=user_sub, …, 9=requires_wheelchair, …,
+		// 13=status, 14=requested_at
+		*(dest[9].(*bool)) = false
+		*(dest[13].(*string)) = "cancelled"
+		*(dest[14].(*time.Time)) = time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
 		return nil
 	}}
 }

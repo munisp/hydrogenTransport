@@ -44,13 +44,24 @@ func (f *flexDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	return noRows()
 }
 
-// drtRow returns a fake Row filling the 14-column drtCols scan.
+// drtRow returns a fake Row filling the 15-column drtCols scan (0009 adds
+// requires_wheelchair at index 9).
 func drtRow(id, userSub, status string) pgx.Row {
 	return fakeRow{scan: func(dest ...any) error {
 		*(dest[0].(*string)) = id
 		*(dest[1].(*string)) = userSub
-		*(dest[12].(*string)) = status
-		*(dest[13].(*time.Time)) = time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+		*(dest[9].(*bool)) = false
+		*(dest[13].(*string)) = status
+		*(dest[14].(*time.Time)) = time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+		return nil
+	}}
+}
+
+// validationRow fakes the single-column reason result of
+// validateAssignVehicle ("" = vehicle eligible).
+func validationRow(reason string) pgx.Row {
+	return fakeRow{scan: func(dest ...any) error {
+		*(dest[0].(*string)) = reason
 		return nil
 	}}
 }
@@ -76,12 +87,13 @@ func TestCreateDRTRequest_LabelsAndPassengers(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("got %d, want 201 (body: %s)", rec.Code, rec.Body)
 	}
-	// args: sub, pickup lon/lat, dropoff lon/lat, labels, passengers
-	if len(gotArgs) != 8 {
-		t.Fatalf("insert args = %v, want 8 (labels + passengers persisted)", gotArgs)
+	// args: sub, pickup lon/lat, dropoff lon/lat, labels, passengers,
+	// requires_wheelchair (0009)
+	if len(gotArgs) != 9 {
+		t.Fatalf("insert args = %v, want 9 (labels + passengers + wheelchair persisted)", gotArgs)
 	}
-	if gotArgs[5] != "Central Station" || gotArgs[6] != "City Hall" || gotArgs[7] != 3 {
-		t.Fatalf("labels/passengers not persisted: %v", gotArgs)
+	if gotArgs[5] != "Central Station" || gotArgs[6] != "City Hall" || gotArgs[7] != 3 || gotArgs[8] != false {
+		t.Fatalf("labels/passengers/wheelchair not persisted: %v", gotArgs)
 	}
 }
 
@@ -99,6 +111,9 @@ func TestAssignDRTRequest(t *testing.T) {
 			return pgconn.NewCommandTag("UPDATE 1"), nil
 		},
 		rowFn: func(sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "WITH req AS") {
+				return validationRow("")
+			}
 			return drtRow("drt-1", "user-a", "assigned")
 		},
 	}
@@ -127,9 +142,17 @@ func TestAssignDRTRequest(t *testing.T) {
 
 // Assigning a non-requested ride conflicts.
 func TestAssignDRTRequest_NotRequested(t *testing.T) {
-	db := &flexDB{execFn: func(sql string, args ...any) (pgconn.CommandTag, error) {
-		return pgconn.NewCommandTag("UPDATE 0"), nil // no row in 'requested'
-	}}
+	db := &flexDB{
+		execFn: func(sql string, args ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("UPDATE 0"), nil // no row in 'requested'
+		},
+		rowFn: func(sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "WITH req AS") {
+				return validationRow("no_request")
+			}
+			return noRows()
+		},
+	}
 	h := &Handler{db: db, pub: fakePub{}, log: zap.NewNop()}
 
 	r := chi.NewRouter()

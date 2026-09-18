@@ -93,6 +93,10 @@ func main() {
 		r.With(jwtmw.RequireAnyRole("driver", "operator")).Post("/v1/drt/requests/{id}/start", h.ProgressDRTRequest)
 		r.With(jwtmw.RequireAnyRole("driver", "operator")).Post("/v1/drt/requests/{id}/complete", h.ProgressDRTRequest)
 	})
+	// GDPR data-subject endpoints (Wave-6 A3-01/A3-02, docs/GDPR.md):
+	// self-service access export and erasure (tombstone pseudonymization).
+	r.With(jwtmw.RequireAuth).Get("/v1/me/data-export", h.ExportMyData)
+	r.With(jwtmw.RequireAuth).Post("/v1/me/erasure", h.EraseMyData)
 	// carbon-credits module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "carbon-credits"))

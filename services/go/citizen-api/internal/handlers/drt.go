@@ -30,34 +30,39 @@ type DRTRequest struct {
 	PickupLabel  *string    `json:"pickup_label,omitempty"`
 	DropoffLabel *string    `json:"dropoff_label,omitempty"`
 	Passengers   *int       `json:"passengers,omitempty"`
-	VehicleID    *string    `json:"vehicle_id,omitempty"`
-	DriverSub    *string    `json:"driver_sub,omitempty"`
-	AssignedAt   *time.Time `json:"assigned_at,omitempty"`
-	Status       string     `json:"status"`
-	RequestedAt  time.Time  `json:"requested_at"`
+	// RequiresWheelchair (0009 G3, Wave-6 A2-04): the rider needs a
+	// wheelchair-accessible vehicle; auto- and manual assignment enforce it.
+	RequiresWheelchair bool       `json:"requires_wheelchair"`
+	VehicleID          *string    `json:"vehicle_id,omitempty"`
+	DriverSub          *string    `json:"driver_sub,omitempty"`
+	AssignedAt         *time.Time `json:"assigned_at,omitempty"`
+	Status             string     `json:"status"`
+	RequestedAt        time.Time  `json:"requested_at"`
 }
 
 const drtCols = `id, user_sub,
 	ST_Y(pickup)::float8, ST_X(pickup)::float8,
 	ST_Y(dropoff)::float8, ST_X(dropoff)::float8,
 	NULLIF(pickup_label,''), NULLIF(dropoff_label,''), passengers,
+	COALESCE(requires_wheelchair,false),
 	vehicle_id, driver_sub, assigned_at,
 	status, requested_at`
 
 func scanDRT(row pgx.Row) (DRTRequest, error) {
 	var d DRTRequest
 	err := row.Scan(&d.ID, &d.UserSub, &d.PickupLat, &d.PickupLon, &d.DropoffLat, &d.DropoffLon,
-		&d.PickupLabel, &d.DropoffLabel, &d.Passengers, &d.VehicleID, &d.DriverSub, &d.AssignedAt,
+		&d.PickupLabel, &d.DropoffLabel, &d.Passengers, &d.RequiresWheelchair, &d.VehicleID, &d.DriverSub, &d.AssignedAt,
 		&d.Status, &d.RequestedAt)
 	return d, err
 }
 
 type createDRTRequest struct {
-	Pickup       latLon `json:"pickup"`
-	Dropoff      latLon `json:"dropoff"`
-	PickupLabel  string `json:"pickup_label"`
-	DropoffLabel string `json:"dropoff_label"`
-	Passengers   int    `json:"passengers"`
+	Pickup             latLon `json:"pickup"`
+	Dropoff            latLon `json:"dropoff"`
+	PickupLabel        string `json:"pickup_label"`
+	DropoffLabel       string `json:"dropoff_label"`
+	Passengers         int    `json:"passengers"`
+	RequiresWheelchair bool   `json:"requires_wheelchair"`
 }
 
 type latLon struct {
@@ -103,11 +108,11 @@ func (h *Handler) CreateDRTRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d, err := scanDRT(h.db.QueryRow(r.Context(), `
-		INSERT INTO citizen.drt_requests (user_sub, pickup, dropoff, status, pickup_label, dropoff_label, passengers)
-		VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326), ST_SetSRID(ST_MakePoint($4, $5), 4326), 'requested', $6, $7, $8)
+		INSERT INTO citizen.drt_requests (user_sub, pickup, dropoff, status, pickup_label, dropoff_label, passengers, requires_wheelchair)
+		VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326), ST_SetSRID(ST_MakePoint($4, $5), 4326), 'requested', $6, $7, $8, $9)
 		RETURNING `+drtCols,
 		sub, req.Pickup.Lon, req.Pickup.Lat, req.Dropoff.Lon, req.Dropoff.Lat,
-		req.PickupLabel, req.DropoffLabel, req.Passengers))
+		req.PickupLabel, req.DropoffLabel, req.Passengers, req.RequiresWheelchair))
 	if err != nil {
 		h.internal(w, "create drt request", err)
 		return
@@ -253,7 +258,59 @@ var ErrDRTNotAssignable = errors.New("drt request not assignable")
 // AssignDRT performs the requested→assigned transition, shared by the
 // operator endpoint and the drt.requested auto-assignment consumer
 // (BUSINESS_LOGIC_AUDIT §13: the assigned status was unreachable).
+// Vehicle-conflict sentinels (Wave-6 A1-04/A2-04): manual and automatic
+// assignment must never book a vehicle that is on (or about to start) an
+// active dispatch job, nor a non-accessible vehicle for a wheelchair ride.
+var (
+	ErrDRTVehicleBusy        = errors.New("vehicle has an overlapping active dispatch job")
+	ErrDRTWheelchairMismatch = errors.New("request requires a wheelchair-accessible vehicle")
+	ErrDRTUnknownVehicle     = errors.New("vehicle_id does not reference a known vehicle")
+	dispatchBusyWindowMinutes = 30
+)
+
+// validateAssignVehicle returns a conflict sentinel when the vehicle cannot
+// serve the request right now, nil when it can.
+func validateAssignVehicle(ctx context.Context, db DB, requestID, vehicleID string) error {
+	var reason string
+	err := db.QueryRow(ctx, `
+		WITH req AS (
+			SELECT requires_wheelchair FROM citizen.drt_requests WHERE id = $1
+		), veh AS (
+			SELECT wheelchair_accessible FROM fleet.vehicles WHERE id = $2
+		)
+		SELECT CASE
+			WHEN NOT EXISTS (SELECT 1 FROM req) THEN 'no_request'
+			WHEN NOT EXISTS (SELECT 1 FROM veh) THEN 'no_vehicle'
+			WHEN (SELECT requires_wheelchair FROM req)
+				 AND NOT COALESCE((SELECT wheelchair_accessible FROM veh),false) THEN 'wheelchair'
+			WHEN EXISTS (
+				SELECT 1 FROM infra.dispatch_jobs j
+				WHERE j.vehicle_id = $2
+				  AND j.status IN ('assigned','accepted','in_progress')
+				  AND (j.starts_at IS NULL OR j.starts_at < now() + make_interval(mins => $3))
+				  AND (j.ends_at IS NULL OR j.ends_at > now())
+			) THEN 'dispatch'
+			ELSE '' END`, requestID, vehicleID, dispatchBusyWindowMinutes).Scan(&reason)
+	if err != nil {
+		return err
+	}
+	switch reason {
+	case "no_request":
+		return ErrDRTNotAssignable
+	case "no_vehicle":
+		return ErrDRTUnknownVehicle
+	case "wheelchair":
+		return ErrDRTWheelchairMismatch
+	case "dispatch":
+		return ErrDRTVehicleBusy
+	}
+	return nil
+}
+
 func AssignDRT(ctx context.Context, db DB, requestID, vehicleID, driverSub string) error {
+	if err := validateAssignVehicle(ctx, db, requestID, vehicleID); err != nil {
+		return err
+	}
 	var driver any
 	if driverSub != "" {
 		driver = driverSub
@@ -291,6 +348,18 @@ func (h *Handler) AssignDRTRequest(w http.ResponseWriter, r *http.Request) {
 	err := AssignDRT(r.Context(), h.db, id, req.VehicleID, req.DriverSub)
 	if errors.Is(err, ErrDRTNotAssignable) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "request not found or not in requested status"})
+		return
+	}
+	if errors.Is(err, ErrDRTWheelchairMismatch) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "request requires a wheelchair-accessible vehicle"})
+		return
+	}
+	if errors.Is(err, ErrDRTVehicleBusy) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "vehicle has an overlapping active dispatch job"})
+		return
+	}
+	if errors.Is(err, ErrDRTUnknownVehicle) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "vehicle_id does not reference a known vehicle"})
 		return
 	}
 	var pgErr *pgconn.PgError

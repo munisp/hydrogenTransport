@@ -40,10 +40,12 @@ type Publisher interface {
 }
 
 // PickVehicle selects the vehicle for a ride: the nearest active vehicle
-// (by latest telemetry position) that is not already assigned to an active
-// DRT request. Vehicles with no telemetry yet rank last. pgx.ErrNoRows =
-// nobody available right now.
-func PickVehicle(ctx context.Context, db handlers.DB, lat, lon float64) (string, error) {
+// (by latest telemetry position) that is (a) not already assigned to an
+// active DRT request, (b) not on — or within 30 min of starting — an
+// active dispatch job (Wave-6 A1-04), and (c) wheelchair-accessible when
+// the ride requires it (Wave-6 A2-04). Vehicles with no telemetry yet rank
+// last. pgx.ErrNoRows = nobody available right now.
+func PickVehicle(ctx context.Context, db handlers.DB, lat, lon float64, requiresWheelchair bool) (string, error) {
 	var vehicleID string
 	err := db.QueryRow(ctx, `
 		WITH latest AS (
@@ -53,13 +55,21 @@ func PickVehicle(ctx context.Context, db handlers.DB, lat, lon float64) (string,
 		SELECT v.id FROM fleet.vehicles v
 		LEFT JOIN latest t ON t.bus_id = v.id
 		WHERE v.status = 'active'
+		  AND ($3::bool = false OR COALESCE(v.wheelchair_accessible,false))
 		  AND NOT EXISTS (
 			SELECT 1 FROM citizen.drt_requests r
 			WHERE r.vehicle_id = v.id AND r.status IN ('assigned','enroute')
 		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM infra.dispatch_jobs j
+			WHERE j.vehicle_id = v.id
+			  AND j.status IN ('assigned','accepted','in_progress')
+			  AND (j.starts_at IS NULL OR j.starts_at < now() + interval '30 minutes')
+			  AND (j.ends_at IS NULL OR j.ends_at > now())
+		  )
 		ORDER BY ST_Distance(t.geom::geography,
 			ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography) NULLS LAST
-		LIMIT 1`, lat, lon).Scan(&vehicleID)
+		LIMIT 1`, lat, lon, requiresWheelchair).Scan(&vehicleID)
 	return vehicleID, err
 }
 
@@ -72,10 +82,23 @@ func AutoAssign(ctx context.Context, db handlers.DB, pub Publisher, e DRTRequest
 	if e.RequestID == "" {
 		return errors.New("drt.requested payload missing request_id")
 	}
-	vehicleID, err := PickVehicle(ctx, db, e.Pickup.Lat, e.Pickup.Lon)
+	// The event does not carry the accessibility flag; read it from the
+	// request row (source of truth) so wheelchair rides only match
+	// accessible vehicles (Wave-6 A2-04).
+	var requiresWheelchair bool
+	if err := db.QueryRow(ctx,
+		`SELECT COALESCE(requires_wheelchair,false) FROM citizen.drt_requests WHERE id = $1`,
+		e.RequestID).Scan(&requiresWheelchair); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // request vanished (cancelled) — nothing to do
+		}
+		return err
+	}
+	vehicleID, err := PickVehicle(ctx, db, e.Pickup.Lat, e.Pickup.Lon, requiresWheelchair)
 	if errors.Is(err, pgx.ErrNoRows) {
 		log.Info("no vehicle available for DRT request; leaving requested",
-			zap.String("request", e.RequestID))
+			zap.String("request", e.RequestID),
+			zap.Bool("requires_wheelchair", requiresWheelchair))
 		return nil
 	}
 	if err != nil {
@@ -84,6 +107,13 @@ func AutoAssign(ctx context.Context, db handlers.DB, pub Publisher, e DRTRequest
 	if err := handlers.AssignDRT(ctx, db, e.RequestID, vehicleID, ""); err != nil {
 		if errors.Is(err, handlers.ErrDRTNotAssignable) {
 			return nil // raced with another assignment/cancel — done
+		}
+		if errors.Is(err, handlers.ErrDRTVehicleBusy) || errors.Is(err, handlers.ErrDRTWheelchairMismatch) {
+			// The picked vehicle became ineligible between pick and assign —
+			// leave the request 'requested' for the next event/operator.
+			log.Info("picked vehicle no longer eligible; leaving requested",
+				zap.String("request", e.RequestID), zap.Error(err))
+			return nil
 		}
 		return err
 	}
