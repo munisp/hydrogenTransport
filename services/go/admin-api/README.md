@@ -74,8 +74,8 @@ The `h2fleet` realm defines `platform-admin`, `operator`, `driver`,
 |--------|---------------------------------|-------------|
 | GET    | `/v1/users?role=&q=`            | List Keycloak users with realm roles → `{"users": [{id, username, email, first_name, last_name, enabled, roles}]}`. `role=` filters via `/roles/{role}/users`, `q=` free-text search |
 | POST   | `/v1/users`                     | Body `{email, display_name, roles?}` → `201 {"id": "..."}` + actions email; `409` when the email already has an account (Wave-9 W9-5 — no silent adoption; manage roles on the existing account instead) |
-| PUT    | `/v1/users/{id}/roles`          | Body `{add: [...], remove: [...]}` — assign/revoke realm roles |
-| POST   | `/v1/users/{id}/disable`        | `enabled=false` |
+| PUT    | `/v1/users/{id}/roles`          | Body `{add: [...], remove: [...]}` — assign/revoke realm roles; `409` when removing `platform-admin` from the LAST enabled platform-admin (Wave-10 W10-1) |
+| POST   | `/v1/users/{id}/disable`        | `enabled=false`; `409` on self-disable and on disabling the last enabled platform-admin (Wave-10 W10-1) |
 | POST   | `/v1/users/{id}/enable`         | `enabled=true` |
 | POST   | `/v1/users/{id}/reset-password` | Sends UPDATE_PASSWORD actions email |
 

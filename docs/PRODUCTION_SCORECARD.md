@@ -1,4 +1,4 @@
-# H2Fleet — Production Scorecard (Wave 9)
+# H2Fleet — Production Scorecard (Wave 10)
 
 Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: all gates run in-sandbox; live-stack items marked honestly.
 
@@ -9,7 +9,7 @@ Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: a
 | Code completeness (20 features, 4 domains) | 10/10 | All 20 modules implemented, routed, onboarded, toggle-gated |
 | Business rules / logic | **10/10** | Wave-4 line-by-line re-verification: all 20 features 10/10 (was ~5.4 avg) — see below |
 | Production realness (no mocks) | **9.4/10** | 905-hit scan → every path classified REAL / env-gated dev fallback / external boundary; 6 fixes — docs/NO_MOCK_AUDIT.md |
-| Security posture | **9.8/10** | Wave-9: closed a critical unauthenticated credential-reset path on ANY registered account (W9-1), case-bypass of all email-scoped controls (W9-2), cross-driver job acceptance (W9-7), silent admin user adoption (W9-5). Wave-8: intake dedup + per-email velocity cap + optional captcha, zero-PII status endpoint, station-staff least-privilege role. Wave-6: dual-token audit rollover, auditor role separation, HMAC webhooks, evidence packs, GDPR erasure fail-closed salt |
+| Security posture | **9.8/10** | Wave-10: admin-plane lockout guards (self-disable / last platform-admin), driver suspension enforced at job acceptance, self-register can no longer overwrite verified identities. Wave-9: closed a critical unauthenticated credential-reset path on ANY registered account (W9-1), case-bypass of all email-scoped controls (W9-2), cross-driver job acceptance (W9-7), silent admin user adoption (W9-5). Wave-8: intake dedup + per-email velocity cap + optional captcha, zero-PII status endpoint, station-staff least-privilege role. Wave-6: dual-token audit rollover, auditor role separation, HMAC webhooks, evidence packs, GDPR erasure fail-closed salt |
 | Data integrity & schemas | 10/10 | 12 goose migrations (up/re-up/down verified), idempotency keys everywhere money moves, transactional fare-cap (advisory lock → settle in one tx), invoice settlement on deterministic transfer ids, partial UNIQUE backstop on pending onboarding intakes (case-insensitive since 0012) |
 | Edge-case / gap coverage | **10/10** | Wave-6 4-pass audit: 34 evidence-backed findings, 23 FIX-NOW implemented + tested; Wave-7 built the 2 most operator-valuable DECISION items (A2-06, A2-09); Wave-8 closed all 7 onboarding-workflow gaps; Wave-9 audited merchant+individual onboarding beyond that scope → 4 more findings fixed + 3 adjacent authz/robustness gaps (plan-wave9.md); 4 DECISION / 5 CONTRACT documented — docs/GAP_AUDIT.md |
 | Middleware robustness | 9/10 | HA overlays for all 11 components; real Mojaloop + Fluvio rails |
@@ -20,6 +20,33 @@ Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: a
 Everything verifiable without a running cluster is verified. The residual is
 honestly unclaimable from a build sandbox: live e2e scenarios, Docker image
 builds, HA failover drills, and a load test at target TPS.
+
+## Wave-10 additions (2026-09-19)
+
+**Onboarding-lifecycle audit (round 3 — offboarding & the admin plane)**
+(plan-wave10.md): three gaps confirmed and fixed, no schema change; all 8 Go
+modules build/vet/test green; 8 new/updated regression tests.
+
+- **W10-1 — admin-plane lockout guards**: self-disable and disable/demote of
+  the LAST enabled platform-admin now return `409` (previously either action
+  could brick the entire admin plane — recovery would have meant direct
+  Keycloak console access). Fail-closed when the admin count is unavailable.
+- **W10-2 — driver offboarding enforcement**: new
+  `POST /v1/drivers/{sub}/status` (operator; active/off-duty/suspended) and
+  job acceptance now requires an `active` drivers row — a suspended or
+  unregistered driver gets `403` even with a valid JWT and `driver` role.
+- **W10-3 — self-register can no longer overwrite the verified identity**:
+  `POST /v1/drivers/register` is INSERT-ONLY (`200 already_registered` on
+  conflict); licence/name corrections go through the operator channel.
+- Verified non-gaps this round: concurrent approvals (idempotent since W9),
+  operator driver-creation privilege (no gain beyond job assignment), users
+  audit-middleware coverage (all five mutations), re-application after
+  rejection (intended). Accepted residual: live JWTs of disabled users
+  remain valid until expiry (stateless-JWT trade-off).
+
+**GitHub state**: single `main` branch, zero PRs; Wave-8 `bc179bc`+`3801d43`,
+Wave-9 `70d84f8`+`f7ad83f`, Wave-10 pushed in sequential ≤10-file commits —
+all byte-for-byte verified.
 
 ## Wave-9 additions (2026-09-19)
 

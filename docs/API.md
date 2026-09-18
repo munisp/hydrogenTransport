@@ -63,9 +63,10 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 | POST | `/v1/safety/leak` | sensor token / JWT | Leak sensor webhook |
 | GET | `/v1/dispatch/jobs` | public | List dispatch jobs |
 | POST | `/v1/dispatch/jobs` | JWT (`operator`) | Assign job → `dispatch.job.assigned` + Temporal signal |
-| POST | `/v1/drivers/register` | JWT (`driver`) | Wave-9 W9-3: driver self-registration — upserts `infra.drivers` keyed by the JWT `sub` (never the body), `{"name","license_no"}` → 201 created / 200 updated. Required before any job can be assigned to the driver |
-| POST | `/v1/drivers` | JWT (`operator`) | Wave-9 W9-3: operator-managed driver registration, `{"sub","name","license_no"}` → 201/200 |
-| POST | `/v1/dispatch/jobs/{id}/accept` | JWT (`driver`) | Driver accepts OWN assigned job (Wave-9 W9-7: scoped by JWT `sub` — another driver's job is 404, indistinguishable from unknown) |
+| POST | `/v1/drivers/register` | JWT (`driver`) | Wave-9 W9-3: driver self-registration keyed by the JWT `sub` (never the body), `{"name","license_no"}` → 201 created. INSERT-ONLY (Wave-10 W10-3): re-registering → 200 `already_registered` without touching the verified record; corrections go through an operator. Required before any job can be assigned to the driver |
+| POST | `/v1/drivers` | JWT (`operator`) | Wave-9 W9-3: operator-managed driver registration/correction, `{"sub","name","license_no"}` → 201/200 |
+| POST | `/v1/drivers/{sub}/status` | JWT (`operator`) | Wave-10 W10-2: driver lifecycle — `{"status":"active\|off-duty\|suspended"}`; `suspended` immediately blocks job acceptance; 404 unknown driver |
+| POST | `/v1/dispatch/jobs/{id}/accept` | JWT (`driver`) | Driver accepts OWN assigned job (Wave-9 W9-7: scoped by JWT `sub` — another driver's job is 404, indistinguishable from unknown; Wave-10 W10-2: only `active` drivers — suspended/unregistered → 403) |
 | POST | `/v1/charters` | JWT (`operator`) | Wave-7 A2-09 charter/school block booking, body `{"reference","customer_name","starts_at","ends_at","vehicle_ids":[...]}`: one tx per vehicle — overlap check → placeholder driver → dispatch job `route='charter:<reference>'`; 409 on overlap, 422 unknown vehicle; same reference replays the booking (200) → `charter.booking.confirmed` |
 | GET | `/v1/charters` | JWT (`operator`) | List charter bookings (`?status=`) with vehicle counts |
 | GET | `/v1/charters/{id}` | JWT (`operator`) | Booking detail + each reserved vehicle and its backing dispatch job |
@@ -158,7 +159,13 @@ feed in `services/go/admin-api/README.md`):
 | GET | `/v1/onboarding/{id}` | JWT (`platform-admin`, `operator`) | Single request |
 | POST | `/v1/onboarding/{id}/approve` | JWT (`platform-admin`) | Provisions the Keycloak user (idempotent `EnsureRealmRole`, actions email) → `completed`; temp password ONLY for brand-new users — a pre-existing account's credentials are never reset and the response flags `existing_account: true` (Wave-9 W9-1); `409` non-pending or TTL-expired; `502` Keycloak failure (stays pending, safe to retry) |
 | POST | `/v1/onboarding/{id}/reject` | JWT (`platform-admin`) | `{"reason"}` → `rejected`; `409` non-pending or TTL-expired |
-| POST | `/v1/onboarding/reconcile` | JWT (`platform-admin`) | Self-heal: re-asserts the persona realm role on every completed request → `{"checked","ensured","failed","failed_ids"}` |
+| POST | `/v1/onboarding/reconcile` | JWT (`platform-admin`) | Self-heal: re-asserts the persona realm role on every completed request (paginates ALL rows) → `{"checked","ensured","failed","failed_ids"}` |
+
+User management (all `platform-admin`, all audited): `GET /v1/users`,
+`POST /v1/users` (409 when the email exists), `PUT /v1/users/{id}/roles`,
+`POST /v1/users/{id}/disable|enable|reset-password`. Wave-10 W10-1 lockout
+guards: self-disable → `409`; disabling or demoting the LAST enabled
+platform-admin → `409` (the admin plane can never brick itself).
 
 Pending requests expire after `ONBOARDING_PENDING_TTL_DAYS` (default 30):
 the decide path refuses with `409` and a boot + daily sweep flips stragglers

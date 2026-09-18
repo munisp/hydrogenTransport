@@ -26,9 +26,10 @@ a disabled module returns **404** (fail-closed).
 | POST  | `/v1/safety/leak` — sensor webhook: opens incident, publishes `safety.leak.detected`, signals Temporal workflow `incident-{id}` | `leak-detection` | `X-Sensor-Token` (when `LEAK_INGEST_TOKEN` set) or JWT |
 | GET   | `/v1/dispatch/jobs?status=&driver_sub=` | `dispatch-workforce` | — |
 | POST  | `/v1/dispatch/jobs` (`starts_at`/`ends_at` window, overlap → 409) → publishes `dispatch.job.assigned`, signals workflow `dispatch-{id}` | `dispatch-workforce` | JWT (operator) |
-| POST  | `/v1/dispatch/jobs/{id}/accept` — assignee-only (Wave-9 W9-7: scoped by JWT `sub`; another driver's job is 404) | `dispatch-workforce` | JWT (driver) |
-| POST  | `/v1/drivers/register` — Wave-9 W9-3 driver self-registration (upsert keyed by JWT `sub`): `{"name","license_no"}` → 201/200 | `dispatch-workforce` | JWT (driver) |
-| POST  | `/v1/drivers` — Wave-9 W9-3 operator-managed registration: `{"sub","name","license_no"}` → 201/200 | `dispatch-workforce` | JWT (operator) |
+| POST  | `/v1/dispatch/jobs/{id}/accept` — assignee-only (Wave-9 W9-7: scoped by JWT `sub`; another driver's job is 404) and active-drivers-only (Wave-10 W10-2: suspended/unregistered → 403) | `dispatch-workforce` | JWT (driver) |
+| POST  | `/v1/drivers/register` — Wave-9 W9-3 driver self-registration (keyed by JWT `sub`): `{"name","license_no"}` → 201; INSERT-ONLY (Wave-10 W10-3) — re-register → 200 `already_registered`, verified record untouched | `dispatch-workforce` | JWT (driver) |
+| POST  | `/v1/drivers` — Wave-9 W9-3 operator-managed registration/correction: `{"sub","name","license_no"}` → 201/200 | `dispatch-workforce` | JWT (operator) |
+| POST  | `/v1/drivers/{sub}/status` — Wave-10 W10-2 lifecycle: `{"status":"active\|off-duty\|suspended"}`; suspended blocks job acceptance | `dispatch-workforce` | JWT (operator) |
 | POST  | `/v1/dispatch/jobs/{id}/cancel` → signals `job-cancelled` to the workflow | `dispatch-workforce` | JWT (operator) |
 | GET   | `/v1/compliance/reports`, `/v1/compliance/reports/{id}` | `compliance-reporting` | — |
 | POST  | `/v1/compliance/reports/generate?days=&domain=` (days default 30, 1..365; sections: incidents by status/severity, MTTR, maintenance predictions, open work orders, fleet availability, station inventory + domain-pack sections; scheduled via `COMPLIANCE_REPORT_INTERVAL`) | `compliance-reporting` | JWT |
