@@ -105,6 +105,21 @@ func main() {
 		r.With(jwtmw.RequireRole("operator"),
 			audit.Middleware("entitlement.grant", "rider_entitlement", "", true)).
 			Post("/v1/entitlements", h.GrantEntitlement)
+		// Corporate group settlement (Wave-7 A2-06): billing accounts,
+		// periodic invoice generation and invoice settlement.
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("billing_account.create", "billing_account", "", true)).
+			Post("/v1/billing/accounts", h.CreateBillingAccount)
+		r.With(jwtmw.RequireRole("operator")).Get("/v1/billing/accounts", h.ListBillingAccounts)
+		r.With(jwtmw.RequireRole("operator")).Get("/v1/billing/accounts/{id}", h.GetBillingAccount)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("billing_invoice.generate", "invoice", "", true)).
+			Post("/v1/billing/accounts/{id}/invoices", h.GenerateInvoice)
+		r.With(jwtmw.RequireRole("operator")).Get("/v1/billing/invoices", h.ListInvoices)
+		r.With(jwtmw.RequireRole("operator")).Get("/v1/billing/invoices/{id}", h.GetInvoice)
+		r.With(jwtmw.RequireRole("operator"),
+			audit.Middleware("billing_invoice.pay", "invoice", "", true)).
+			Post("/v1/billing/invoices/{id}/pay", h.PayInvoice)
 	})
 	// loyalty-marketplace module
 	r.Group(func(r chi.Router) {

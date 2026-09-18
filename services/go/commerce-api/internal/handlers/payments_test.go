@@ -476,7 +476,7 @@ func expectPaymentTxOpen(pool pgxmock.PgxPoolIface, rider string, spentToday int
 	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs(rider).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs(rider).
-		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}))
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code", "id", "payer_account"}))
 	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
 		WithArgs(rider, "UTC").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(spentToday))

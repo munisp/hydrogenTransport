@@ -34,7 +34,7 @@ func TestCreatePayment_FareCapClampsCharge(t *testing.T) {
 	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs("rider-a").
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}))
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code", "id", "payer_account"}))
 	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
 		WithArgs("rider-a", "UTC").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(700)))
@@ -90,7 +90,7 @@ func TestCreatePayment_FullyCappedRideIsFree(t *testing.T) {
 	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs("rider-a").
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}))
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code", "id", "payer_account"}))
 	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
 		WithArgs("rider-a", "UTC").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(800)))

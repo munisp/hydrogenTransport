@@ -48,8 +48,8 @@ func TestCreatePayment_PassCoversRide(t *testing.T) {
 	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs("rider-a").
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}).
-			AddRow("pass", 0, "monthly-pass"))
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code", "id", "payer_account"}).
+			AddRow("pass", 0, "monthly-pass", "ent-1", nil))
 	// charge == 0 after the pass → no cap query, no ledger, no account.
 	pool.ExpectExec(`INSERT INTO commerce\.fare_payments`).
 		WithArgs(pgxmock.AnyArg(), "rider-a", int64(500), int64(0), "EUR", "idem-pass").
@@ -87,8 +87,8 @@ func TestCreatePayment_DiscountEntitlementHalvesFare(t *testing.T) {
 	pool.ExpectExec(`pg_advisory_xact_lock`).WithArgs("rider-a").
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	pool.ExpectQuery(`FROM commerce\.rider_entitlements`).WithArgs("rider-a").
-		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code"}).
-			AddRow("discount", 50, "student-50"))
+		WillReturnRows(pgxmock.NewRows([]string{"kind", "discount_pct", "code", "id", "payer_account"}).
+			AddRow("discount", 50, "student-50", "ent-2", nil))
 	pool.ExpectQuery(`sum\(COALESCE\(charged_minor`).
 		WithArgs("rider-a", "UTC").
 		WillReturnRows(pgxmock.NewRows([]string{"sum"}).AddRow(int64(0)))
