@@ -7,11 +7,13 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
@@ -24,13 +26,36 @@ var welcomeActions = []string{"VERIFY_EMAIL", "UPDATE_PASSWORD"}
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
+// maxRequestsPerEmailPerDay is the Wave-8 per-email velocity cap (W8-2). It
+// complements the per-IP APISIX limit: one botnet node rotation cannot file
+// unlimited requests against the same victim address (email-bombing the
+// actions email / queue spam).
+const maxRequestsPerEmailPerDay = 5
+
+// defaultPendingTTL is how long a pending request remains decidable before
+// the TTL guard/sweep expires it (W8-7). Overridable via Handler.PendingTTL
+// (ONBOARDING_PENDING_TTL_DAYS in main).
+const defaultPendingTTL = 30 * 24 * time.Hour
+
 // KeycloakClient is the subset of keycloak.AdminClient the onboarding
 // handlers use (kept as a separate interface for easy mocking in tests).
 type KeycloakClient interface {
 	CreateUser(ctx context.Context, spec keycloak.CreateUserSpec) (string, error)
 	SetTemporaryPassword(ctx context.Context, userID, password string) error
-	AssignRealmRole(ctx context.Context, userID, role string) error
+	// EnsureRealmRole assigns the role only when missing (Wave-8 W8-4):
+	// idempotent repair for users stranded by a mid-sequence failure.
+	EnsureRealmRole(ctx context.Context, userID, role string) error
 	SendActionsEmail(ctx context.Context, userID string, actions []string) error
+}
+
+// CaptchaConfig enables captcha verification on the public intake endpoints
+// (Wave-8 W8-8). VerifyURL must implement the siteverify convention (form
+// POST of secret+response → {"success": bool}); hCaptcha and Cloudflare
+// Turnstile both do. Nil on the Handler = disabled (dev default).
+type CaptchaConfig struct {
+	VerifyURL string
+	Secret    string
+	HTTP      *http.Client // nil → default 5 s timeout client
 }
 
 // Handler serves the /v1/onboarding routes.
@@ -39,6 +64,12 @@ type Handler struct {
 	kc       KeycloakClient
 	log      *zap.Logger
 	password func() string // temp-password generator (injectable for tests)
+
+	// PendingTTL expires undecided requests (W8-7); default 30 days.
+	PendingTTL time.Duration
+	// Captcha, when non-nil, requires a valid captcha_token on the public
+	// intake endpoints (W8-8); fail-closed when configured.
+	Captcha *CaptchaConfig
 }
 
 // NewHandler wires the onboarding handlers. passwordGen may be nil (a
@@ -47,14 +78,15 @@ func NewHandler(store Store, kc KeycloakClient, log *zap.Logger, passwordGen fun
 	if passwordGen == nil {
 		passwordGen = generateTempPassword
 	}
-	return &Handler{store: store, kc: kc, log: log, password: passwordGen}
+	return &Handler{store: store, kc: kc, log: log, password: passwordGen, PendingTTL: defaultPendingTTL}
 }
 
 type intakeBody struct {
-	Email       string          `json:"email"`
-	DisplayName string          `json:"display_name"`
-	Org         string          `json:"org"`
-	Meta        json.RawMessage `json:"meta"`
+	Email        string          `json:"email"`
+	DisplayName  string          `json:"display_name"`
+	Org          string          `json:"org"`
+	Meta         json.RawMessage `json:"meta"`
+	CaptchaToken string          `json:"captcha_token"`
 }
 
 func (b *intakeBody) validate() string {
@@ -76,6 +108,34 @@ func (b *intakeBody) validate() string {
 	return ""
 }
 
+// validateForPersona applies the Wave-8 structured intake requirements
+// (W8-3): every approval-gated persona names its organisation, and drivers
+// must supply a licence number the approver can verify. Citizens stay
+// org-optional (self-serve, no approval).
+func (b *intakeBody) validateForPersona(persona string) string {
+	if msg := b.validate(); msg != "" {
+		return msg
+	}
+	if persona == PersonaCitizen {
+		return ""
+	}
+	if b.Org == "" {
+		return "org is required for " + persona + " onboarding"
+	}
+	if persona == PersonaDriver {
+		var meta struct {
+			LicenseNo string `json:"license_no"`
+		}
+		if len(b.Meta) == 0 || json.Unmarshal(b.Meta, &meta) != nil {
+			return "driver onboarding requires meta.license_no"
+		}
+		if n := len(strings.TrimSpace(meta.LicenseNo)); n < 4 || n > 64 {
+			return "meta.license_no is required (4–64 chars)"
+		}
+	}
+	return ""
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err := dec.Decode(v); err != nil {
@@ -85,10 +145,70 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// verifyCaptcha checks the intake captcha token when a CaptchaConfig is set
+// (W8-8). Verification is fail-closed: an unreachable verifier is a 502, a
+// rejected token a 400. When no captcha is configured this is a no-op.
+func (h *Handler) verifyCaptcha(w http.ResponseWriter, r *http.Request, token string) bool {
+	if h.Captcha == nil {
+		return true
+	}
+	if token == "" {
+		httpx.Error(w, http.StatusBadRequest, "captcha_token is required")
+		return false
+	}
+	client := h.Captcha.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	resp, err := client.PostForm(h.Captcha.VerifyURL, url.Values{
+		"secret":   {h.Captcha.Secret},
+		"response": {token},
+	})
+	if err != nil {
+		h.log.Error("captcha verify unreachable", zap.Error(err))
+		httpx.Error(w, http.StatusBadGateway, "captcha verification unavailable")
+		return false
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Success bool `json:"success"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		h.log.Error("captcha verify undecodable", zap.Error(err))
+		httpx.Error(w, http.StatusBadGateway, "captcha verification unavailable")
+		return false
+	}
+	if !out.Success {
+		httpx.Error(w, http.StatusBadRequest, "captcha verification failed")
+		return false
+	}
+	return true
+}
+
+// overVelocity reports whether the email address filed too many requests in
+// the last 24 h (W8-2).
+func (h *Handler) overVelocity(w http.ResponseWriter, r *http.Request, email string) bool {
+	n, err := h.store.CountRecent(r.Context(), email, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		h.log.Error("onboarding velocity count", zap.Error(err))
+		httpx.Error(w, http.StatusInternalServerError, "failed to create onboarding request")
+		return true
+	}
+	if n >= maxRequestsPerEmailPerDay {
+		httpx.Error(w, http.StatusTooManyRequests, "too many onboarding requests for this email address; try again later")
+		return true
+	}
+	return false
+}
+
 // CitizenSelfServe handles POST /v1/onboarding/citizen (public): validates the
 // intake, provisions the Keycloak user immediately with the citizen role,
 // sends the verify-email/update-password actions email and records the
 // request as completed.
+//
+// Wave-8 hardening: a retry after a failed provisioning adopts the orphaned
+// pending row (W8-5) instead of stacking duplicates (W8-1), and the per-email
+// velocity cap applies (W8-2).
 func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 	var body intakeBody
 	if !decodeJSON(w, r, &body) {
@@ -96,6 +216,24 @@ func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg := body.validate(); msg != "" {
 		httpx.Error(w, http.StatusBadRequest, msg)
+		return
+	}
+	if !h.verifyCaptcha(w, r, strings.TrimSpace(body.CaptchaToken)) {
+		return
+	}
+
+	// W8-5: an earlier attempt that failed at the identity provider left a
+	// pending row; adopt it and retry provisioning rather than duplicating.
+	if existing, err := h.store.FindPending(r.Context(), PersonaCitizen, body.Email); err == nil {
+		h.provisionCitizen(w, r, existing, true)
+		return
+	} else if !errors.Is(err, ErrNotFound) {
+		h.log.Error("citizen dedup lookup", zap.Error(err))
+		httpx.Error(w, http.StatusInternalServerError, "failed to create onboarding request")
+		return
+	}
+
+	if h.overVelocity(w, r, body.Email) {
 		return
 	}
 
@@ -108,17 +246,35 @@ func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 		Meta:        body.Meta,
 	}
 	if err := h.store.Create(r.Context(), req); err != nil {
+		// Raced duplicate (0011 partial unique index): replay the winner.
+		if isUniqueViolation(err) {
+			if existing, qerr := h.store.FindPending(r.Context(), PersonaCitizen, body.Email); qerr == nil {
+				h.provisionCitizen(w, r, existing, true)
+				return
+			}
+		}
 		h.log.Error("create citizen onboarding request", zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "failed to create onboarding request")
 		return
 	}
+	h.provisionCitizen(w, r, req, false)
+}
 
-	kcID, err := h.provision(r.Context(), PersonaCitizen, body.Email, body.DisplayName)
+// provisionCitizen runs the provisioning half of citizen self-serve against
+// a stored (fresh or adopted) request row.
+func (h *Handler) provisionCitizen(w http.ResponseWriter, r *http.Request, req *Request, retried bool) {
+	kcID, err := h.provision(r.Context(), PersonaCitizen, req.Email, req.DisplayName)
 	if err != nil {
 		// Never echo the Keycloak error to the client (SECURITY_AUDIT F4):
 		// it would disclose whether the address is already registered and
-		// leak internal details. The detail is logged instead.
-		h.log.Error("citizen self-serve provisioning failed", zap.String("email", body.Email), zap.Error(err))
+		// leak internal details. The detail is logged; the row is marked so
+		// a later retry (or an admin) can see what happened (W8-5).
+		h.log.Error("citizen self-serve provisioning failed", zap.String("email", req.Email), zap.Error(err))
+		if _, merr := h.store.MergeMeta(r.Context(), req.ID, map[string]any{
+			"provision_error": "identity provisioning failed; safe to retry",
+		}); merr != nil {
+			h.log.Error("mark provision_error", zap.String("id", req.ID), zap.Error(merr))
+		}
 		httpx.Error(w, http.StatusBadGateway, "identity provisioning failed")
 		return
 	}
@@ -128,7 +284,11 @@ func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to finalize onboarding request")
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, map[string]any{
+	status := http.StatusCreated
+	if retried {
+		status = http.StatusOK
+	}
+	httpx.JSON(w, status, map[string]any{
 		"request": final,
 		"message": "account created; check your email to verify the address and set a password",
 	})
@@ -137,6 +297,11 @@ func (h *Handler) CitizenSelfServe(w http.ResponseWriter, r *http.Request) {
 // Intake handles POST /v1/onboarding/{key} (public) for the approval-gated
 // personas (driver, operator, station-staff, advertiser, data-partner,
 // gov-viewer). The request is stored with status=pending.
+//
+// Wave-8: re-filing the same (persona, email) while pending replays the
+// existing request with 200 (deduplicated:true) — the queue can never stack
+// duplicates of one applicant (W8-1) — and the per-email velocity cap
+// applies across personas (W8-2).
 func (h *Handler) Intake(w http.ResponseWriter, r *http.Request) {
 	persona := chi.URLParam(r, "key")
 	if !IsIntakePersona(persona) {
@@ -151,10 +316,27 @@ func (h *Handler) Intake(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if msg := body.validate(); msg != "" {
+	if msg := body.validateForPersona(persona); msg != "" {
 		httpx.Error(w, http.StatusBadRequest, msg)
 		return
 	}
+	if !h.verifyCaptcha(w, r, strings.TrimSpace(body.CaptchaToken)) {
+		return
+	}
+
+	if existing, err := h.store.FindPending(r.Context(), persona, body.Email); err == nil {
+		httpx.JSON(w, http.StatusOK, map[string]any{"request": existing, "deduplicated": true})
+		return
+	} else if !errors.Is(err, ErrNotFound) {
+		h.log.Error("intake dedup lookup", zap.String("persona", persona), zap.Error(err))
+		httpx.Error(w, http.StatusInternalServerError, "failed to create onboarding request")
+		return
+	}
+
+	if h.overVelocity(w, r, body.Email) {
+		return
+	}
+
 	req := &Request{
 		Persona:     persona,
 		Email:       body.Email,
@@ -164,6 +346,12 @@ func (h *Handler) Intake(w http.ResponseWriter, r *http.Request) {
 		Meta:        body.Meta,
 	}
 	if err := h.store.Create(r.Context(), req); err != nil {
+		if isUniqueViolation(err) { // raced duplicate: replay the winner (W8-1)
+			if existing, qerr := h.store.FindPending(r.Context(), persona, body.Email); qerr == nil {
+				httpx.JSON(w, http.StatusOK, map[string]any{"request": existing, "deduplicated": true})
+				return
+			}
+		}
 		h.log.Error("create onboarding request", zap.String("persona", persona), zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "failed to create onboarding request")
 		return
@@ -175,8 +363,8 @@ func (h *Handler) Intake(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	if status != "" && status != StatusPending && status != StatusApproved &&
-		status != StatusRejected && status != StatusCompleted {
-		httpx.Error(w, http.StatusBadRequest, "invalid status filter (pending|approved|rejected|completed)")
+		status != StatusRejected && status != StatusCompleted && status != StatusExpired {
+		httpx.Error(w, http.StatusBadRequest, "invalid status filter (pending|approved|rejected|completed|expired)")
 		return
 	}
 	persona := r.URL.Query().Get("persona")
@@ -210,6 +398,32 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"request": req})
 }
 
+// StatusPublic handles GET /v1/onboarding/status/{id} (public, Wave-8 W8-6).
+// The applicant received the request id at intake; this endpoint lets them
+// follow the decision (including a rejection) without an account. The uuid
+// is the capability: the response carries status and timestamps only —
+// never the email, name, org or meta, so it cannot be used to enumerate or
+// confirm registrations.
+func (h *Handler) StatusPublic(w http.ResponseWriter, r *http.Request) {
+	req, err := h.store.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.Error(w, http.StatusNotFound, "onboarding request not found")
+			return
+		}
+		h.log.Error("public status lookup", zap.Error(err))
+		httpx.Error(w, http.StatusInternalServerError, "failed to load onboarding request")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"id":         req.ID,
+		"persona":    req.Persona,
+		"status":     req.Status,
+		"created_at": req.CreatedAt,
+		"decided_at": req.DecidedAt,
+	})
+}
+
 // Approve handles POST /v1/onboarding/{key}/approve (role: platform-admin
 // ONLY). It provisions the Keycloak user with the persona's mapped realm
 // role and marks the request completed.
@@ -241,6 +455,15 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 		}
 		h.log.Error("load onboarding request", zap.String("id", id), zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "failed to load onboarding request")
+		return
+	}
+	// W8-7: a request that sat pending beyond the TTL is expired on the spot
+	// (the sweep does this in bulk; this guard closes the decide path).
+	if req.Status == StatusPending && h.PendingTTL > 0 && time.Since(req.CreatedAt) > h.PendingTTL {
+		if _, err := h.store.Decide(r.Context(), id, StatusExpired, "", "system:ttl-expiry", ""); err != nil {
+			h.log.Error("expire stale request", zap.String("id", id), zap.Error(err))
+		}
+		httpx.Error(w, http.StatusConflict, "request expired (pending longer than the onboarding TTL)")
 		return
 	}
 	if req.Status != StatusPending {
@@ -289,9 +512,58 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"request": final})
 }
 
-// provision creates the Keycloak user, sets a temporary password, assigns the
+// Reconcile handles POST /v1/onboarding/reconcile (platform-admin, audited;
+// Wave-8 W8-4). Provisioning is a non-transactional sequence of Keycloak
+// calls, so a mid-sequence failure can strand a completed request whose user
+// is missing its realm role. Reconcile re-asserts the persona role on every
+// completed request's Keycloak user (EnsureRealmRole is idempotent — already
+// correct users are untouched). Always 200 with a summary; failures are
+// reported per id and logged, never silently swallowed.
+func (h *Handler) Reconcile(w http.ResponseWriter, r *http.Request) {
+	if !auth.HasRole(r.Context(), "platform-admin") {
+		httpx.Error(w, http.StatusForbidden, "onboarding reconcile requires the platform-admin role")
+		return
+	}
+	reqs, err := h.store.List(r.Context(), StatusCompleted, "", 500)
+	if err != nil {
+		h.log.Error("reconcile list", zap.Error(err))
+		httpx.Error(w, http.StatusInternalServerError, "failed to list completed requests")
+		return
+	}
+	ensured := 0
+	failedIDs := []string{}
+	for _, req := range reqs {
+		if req.KeycloakSub == "" {
+			continue
+		}
+		if err := h.kc.EnsureRealmRole(r.Context(), req.KeycloakSub, RealmRole(req.Persona)); err != nil {
+			h.log.Error("reconcile ensure role failed",
+				zap.String("id", req.ID), zap.String("kc_sub", req.KeycloakSub), zap.Error(err))
+			failedIDs = append(failedIDs, req.ID)
+			continue
+		}
+		ensured++
+	}
+	h.log.Info("onboarding reconcile",
+		zap.Int("checked", len(reqs)), zap.Int("ensured", ensured), zap.Int("failed", len(failedIDs)),
+		zap.String("run_by", auth.Subject(r.Context())))
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"checked":    len(reqs),
+		"ensured":    ensured,
+		"failed":     len(failedIDs),
+		"failed_ids": failedIDs,
+	})
+}
+
+// provision creates the Keycloak user, sets a temporary password, ensures the
 // persona's realm role and sends the VERIFY_EMAIL + UPDATE_PASSWORD actions
 // email. Returns the Keycloak user id.
+//
+// The sequence is not transactional (Keycloak has no multi-call tx); each
+// step is idempotent — CreateUser adopts an existing user on conflict and
+// EnsureRealmRole is read-then-assign — so a retry after a mid-sequence
+// failure converges, and POST /v1/onboarding/reconcile repairs the rest
+// (W8-4).
 func (h *Handler) provision(ctx context.Context, persona, email, displayName string) (string, error) {
 	userID, err := h.kc.CreateUser(ctx, keycloak.CreateUserSpec{
 		Username:    email,
@@ -304,13 +576,20 @@ func (h *Handler) provision(ctx context.Context, persona, email, displayName str
 	if err := h.kc.SetTemporaryPassword(ctx, userID, h.password()); err != nil {
 		return "", err
 	}
-	if err := h.kc.AssignRealmRole(ctx, userID, RealmRole(persona)); err != nil {
+	if err := h.kc.EnsureRealmRole(ctx, userID, RealmRole(persona)); err != nil {
 		return "", err
 	}
 	if err := h.kc.SendActionsEmail(ctx, userID, welcomeActions); err != nil {
 		return "", err
 	}
 	return userID, nil
+}
+
+// isUniqueViolation reports a Postgres unique-constraint violation (23505) —
+// for onboarding, the raced-duplicate signal from the 0011 pending index.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // generateTempPassword returns a random temporary password (letters+digits,

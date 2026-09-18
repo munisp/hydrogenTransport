@@ -92,13 +92,81 @@ func (s *fakeStore) Decide(_ context.Context, id, status, kcSub, decidedBy, reas
 	r.DecidedAt = &now
 	r.DecidedBy = decidedBy
 	if reason != "" {
-		r.Meta = json.RawMessage(`{"reject_reason":` + strconv(reason) + `}`)
+		r.Meta = json.RawMessage(`{"reject_reason":` + quote(reason) + `}`)
 	}
 	cp := *r
 	return &cp, nil
 }
 
-func strconv(s string) string {
+func (s *fakeStore) FindPending(_ context.Context, persona, email string) (*Request, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.byID {
+		if r.Persona == persona && r.Email == email && r.Status == StatusPending {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *fakeStore) CountRecent(_ context.Context, email string, since time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, r := range s.byID {
+		if r.Email == email && !r.CreatedAt.Before(since) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *fakeStore) ExpirePending(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, r := range s.byID {
+		if r.Status == StatusPending && r.CreatedAt.Before(before) {
+			r.Status = StatusExpired
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *fakeStore) MergeMeta(_ context.Context, id string, patch map[string]any) (*Request, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.byID[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	meta := map[string]any{}
+	if len(r.Meta) > 0 {
+		_ = json.Unmarshal(r.Meta, &meta)
+	}
+	for k, v := range patch {
+		meta[k] = v
+	}
+	r.Meta, _ = json.Marshal(meta)
+	cp := *r
+	return &cp, nil
+}
+
+// seed inserts a request row directly (tests that need a controlled
+// created_at, e.g. the pending-TTL expiry guard).
+func (s *fakeStore) seed(req *Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *req
+	if len(cp.Meta) == 0 {
+		cp.Meta = json.RawMessage(`{}`)
+	}
+	s.byID[cp.ID] = &cp
+}
+
+func quote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
@@ -107,9 +175,11 @@ type fakeKC struct {
 	mu            sync.Mutex
 	created       []keycloak.CreateUserSpec
 	assignedRoles map[string][]string
+	ensureCalls   int
 	actionsSent   map[string][]string
 	passwords     map[string]string
 	failCreate    bool
+	failEnsure    bool
 }
 
 func newFakeKC() *fakeKC {
@@ -137,9 +207,18 @@ func (f *fakeKC) SetTemporaryPassword(_ context.Context, userID, password string
 	return nil
 }
 
-func (f *fakeKC) AssignRealmRole(_ context.Context, userID, role string) error {
+func (f *fakeKC) EnsureRealmRole(_ context.Context, userID, role string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ensureCalls++
+	if f.failEnsure {
+		return errors.New("role-mappings read failed")
+	}
+	for _, r := range f.assignedRoles[userID] {
+		if r == role {
+			return nil // already correct: idempotent no-op
+		}
+	}
 	f.assignedRoles[userID] = append(f.assignedRoles[userID], role)
 	return nil
 }
@@ -176,10 +255,12 @@ func newTestRouter(h *Handler, sub string, roles ...string) *chi.Mux {
 	r.Use(injectClaims(sub, roles...))
 	r.Post("/v1/onboarding/citizen", h.CitizenSelfServe)
 	r.Post("/v1/onboarding/{key}", h.Intake)
+	r.Get("/v1/onboarding/status/{id}", h.StatusPublic)
 	r.Get("/v1/onboarding", h.List)
 	r.Get("/v1/onboarding/{key}", h.Get)
 	r.Post("/v1/onboarding/{key}/approve", h.Approve)
 	r.Post("/v1/onboarding/{key}/reject", h.Reject)
+	r.Post("/v1/onboarding/reconcile", h.Reconcile)
 	return r
 }
 
@@ -216,6 +297,8 @@ func decodeBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	return m
 }
 
+const driverBody = `{"email":"d@example.com","display_name":"Dan Driver","org":"Depot","meta":{"license_no":"DL-482910"}}`
+
 // --------------------------------------------------------------------------
 // tests
 // --------------------------------------------------------------------------
@@ -234,9 +317,14 @@ func TestIntakeValidation(t *testing.T) {
 		{"unknown persona", "astronaut", `{"email":"j@example.com","display_name":"Jane"}`, http.StatusNotFound},
 		// NB: "citizen" resolves to the static self-serve route (chi prefers
 		// static segments over wildcards), so it yields 201, not 400.
-		{"invalid meta", "operator", `{"email":"j@example.com","display_name":"Jane","meta":notjson}`, http.StatusBadRequest},
-		{"valid driver", "driver", `{"email":"j@example.com","display_name":"Jane","org":"City Transit"}`, http.StatusCreated},
-		{"valid gov-viewer", "gov-viewer", `{"email":"g@example.com","display_name":"Gov"}`, http.StatusCreated},
+		{"invalid meta", "operator", `{"email":"j@example.com","display_name":"Jane","org":"X","meta":notjson}`, http.StatusBadRequest},
+		// Wave-8 W8-3: org is mandatory for every gated persona; drivers must
+		// also supply meta.license_no.
+		{"operator without org", "operator", `{"email":"j@example.com","display_name":"Jane"}`, http.StatusBadRequest},
+		{"driver without license", "driver", `{"email":"j@example.com","display_name":"Jane","org":"Depot"}`, http.StatusBadRequest},
+		{"driver short license", "driver", `{"email":"j@example.com","display_name":"Jane","org":"Depot","meta":{"license_no":"AB"}}`, http.StatusBadRequest},
+		{"valid driver", "driver", driverBody, http.StatusCreated},
+		{"valid gov-viewer", "gov-viewer", `{"email":"g@example.com","display_name":"Gov","org":"City Hall"}`, http.StatusCreated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -274,6 +362,69 @@ func TestIntakeCreatesPendingRequest(t *testing.T) {
 	}
 }
 
+// Wave-8 W8-1: re-filing the same (persona, email) while pending replays the
+// existing request (200, deduplicated:true) instead of stacking a duplicate.
+func TestIntakeDeduplicatesPending(t *testing.T) {
+	_, store, _, router := newTestHandler()
+	body := `{"email":"op@example.com","display_name":"Olivia Operator","org":"H2 Ops"}`
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/operator", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first intake got %d: %s", rec.Code, rec.Body.String())
+	}
+	firstID := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
+
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/operator", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dedup replay got %d want 200: %s", rec.Code, rec.Body.String())
+	}
+	m := decodeBody(t, rec)
+	if m["deduplicated"] != true {
+		t.Fatalf("replay must be flagged deduplicated: %v", m)
+	}
+	if got := m["request"].(map[string]any)["id"]; got != firstID {
+		t.Fatalf("replay must return the ORIGINAL request %s, got %v", firstID, got)
+	}
+	if n := len(store.byID); n != 1 {
+		t.Fatalf("dedup must not stack rows, store has %d", n)
+	}
+
+	// The same email under a DIFFERENT persona is a distinct request (a
+	// person may legitimately apply as driver and advertiser).
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/advertiser",
+		`{"email":"op@example.com","display_name":"Olivia Operator","org":"H2 Ops"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("different-persona intake got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Wave-8 W8-2: more than 5 requests per email per 24 h (across personas) is
+// rejected 429 — the gateway's per-IP limit cannot stop address-targeted
+// spam on its own.
+func TestIntakeVelocityCap(t *testing.T) {
+	_, _, _, router := newTestHandler()
+	email := "victim@example.com"
+	personas := []string{"operator", "advertiser", "data-partner", "gov-viewer", "station-staff"}
+	for i, persona := range personas {
+		body := fmt.Sprintf(`{"email":%q,"display_name":"Vic Tim","org":"Org %d"}`, email, i)
+		rec := do(t, router, http.MethodPost, "/v1/onboarding/"+persona, body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("request %d got %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	// The 6th request for the same address — any persona — is capped.
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/driver",
+		`{"email":"victim@example.com","display_name":"Vic Tim","org":"Depot","meta":{"license_no":"DL-1-2-3"}}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("velocity cap got %d want 429: %s", rec.Code, rec.Body.String())
+	}
+	// A different address is unaffected.
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"other@example.com","display_name":"Oth Er","org":"Org"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("other email got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCitizenSelfServeProvisionsImmediately(t *testing.T) {
 	_, _, kc, router := newTestHandler()
 	rec := do(t, router, http.MethodPost, "/v1/onboarding/citizen",
@@ -302,20 +453,56 @@ func TestCitizenSelfServeProvisionsImmediately(t *testing.T) {
 }
 
 func TestCitizenSelfServeKeycloakFailure(t *testing.T) {
-	_, _, kc, router := newTestHandler()
+	_, store, kc, router := newTestHandler()
 	kc.failCreate = true
 	rec := do(t, router, http.MethodPost, "/v1/onboarding/citizen",
 		`{"email":"c@example.com","display_name":"Cora Citizen"}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("got %d want 502: %s", rec.Code, rec.Body.String())
 	}
+	// W8-5: the orphaned pending row is marked with provision_error so the
+	// retry path (and operators) can see what happened.
+	var stored *Request
+	for _, r := range store.byID {
+		stored = r
+	}
+	if stored == nil || stored.Status != StatusPending {
+		t.Fatalf("failed self-serve must leave a pending row for retry, got %+v", stored)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(stored.Meta, &meta); err != nil || meta["provision_error"] == nil {
+		t.Fatalf("orphan row must carry meta.provision_error: %s", stored.Meta)
+	}
+}
+
+// Wave-8 W8-5: retrying a failed citizen self-serve adopts the orphaned
+// pending row (no duplicate) and completes it (200).
+func TestCitizenSelfServeRetryAdoptsOrphan(t *testing.T) {
+	_, store, kc, router := newTestHandler()
+	kc.failCreate = true
+	body := `{"email":"c@example.com","display_name":"Cora Citizen"}`
+	if rec := do(t, router, http.MethodPost, "/v1/onboarding/citizen", body); rec.Code != http.StatusBadGateway {
+		t.Fatalf("first attempt got %d want 502", rec.Code)
+	}
+	kc.failCreate = false
+
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/citizen", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry got %d want 200: %s", rec.Code, rec.Body.String())
+	}
+	reqObj := decodeBody(t, rec)["request"].(map[string]any)
+	if reqObj["status"] != StatusCompleted || reqObj["keycloak_sub"] != "kc-1" {
+		t.Fatalf("retry must complete the adopted row: %v", reqObj)
+	}
+	if n := len(store.byID); n != 1 {
+		t.Fatalf("retry must adopt the orphan, not insert a new row (store has %d)", n)
+	}
 }
 
 func TestApproveFlow(t *testing.T) {
 	_, store, kc, router := newTestHandler()
 	// Seed a pending driver request via intake.
-	rec := do(t, router, http.MethodPost, "/v1/onboarding/driver",
-		`{"email":"d@example.com","display_name":"Dan Driver","org":"Depot"}`)
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/driver", driverBody)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("intake failed: %d %s", rec.Code, rec.Body.String())
 	}
@@ -355,7 +542,7 @@ func TestApproveFlow(t *testing.T) {
 
 func TestApprovePersonaRoleMapping(t *testing.T) {
 	want := map[string]string{
-		"driver": "driver", "operator": "operator", "station-staff": "operator",
+		"driver": "driver", "operator": "operator", "station-staff": "station-staff",
 		"advertiser": "citizen", "data-partner": "citizen", "gov-viewer": "citizen",
 	}
 	for persona, role := range want {
@@ -367,23 +554,25 @@ func TestApprovePersonaRoleMapping(t *testing.T) {
 	}
 }
 
+// Wave-8 W8-9: station-staff provisions its own realm role, no longer the
+// full operator role.
 func TestApproveProvisionsMappedRole(t *testing.T) {
 	_, _, kc, router := newTestHandler()
 	rec := do(t, router, http.MethodPost, "/v1/onboarding/station-staff",
-		`{"email":"s@example.com","display_name":"Sue Staff"}`)
+		`{"email":"s@example.com","display_name":"Sue Staff","org":"Riverside Station"}`)
 	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
 	if rec = do(t, router, http.MethodPost, "/v1/onboarding/"+id+"/approve", ""); rec.Code != http.StatusOK {
 		t.Fatalf("approve got %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := kc.assignedRoles["kc-1"]; len(got) != 1 || got[0] != "operator" {
-		t.Fatalf("station-staff must map to operator realm role, got %v", got)
+	if got := kc.assignedRoles["kc-1"]; len(got) != 1 || got[0] != "station-staff" {
+		t.Fatalf("station-staff must map to the station-staff realm role, got %v", got)
 	}
 }
 
 // Operators (and any non-platform-admin) may list/view onboarding requests
 // but must NOT be able to approve or reject them — approving an operator or
-// station-staff intake would let one operator mint further operator accounts
-// (SECURITY_AUDIT F3, privilege self-replication).
+// station-staff intake would let one operator mint further privileged
+// accounts (SECURITY_AUDIT F3, privilege self-replication).
 func TestOperatorCannotDecide(t *testing.T) {
 	store := newFakeStore()
 	kc := newFakeKC()
@@ -393,7 +582,7 @@ func TestOperatorCannotDecide(t *testing.T) {
 
 	// Seed a pending operator intake (the most dangerous persona).
 	rec := do(t, adminRouter, http.MethodPost, "/v1/onboarding/operator",
-		`{"email":"o@example.com","display_name":"Otto Operator"}`)
+		`{"email":"o@example.com","display_name":"Otto Operator","org":"H2 Ops"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("intake failed: %d %s", rec.Code, rec.Body.String())
 	}
@@ -438,7 +627,7 @@ func TestOperatorCannotDecide(t *testing.T) {
 func TestRejectFlow(t *testing.T) {
 	_, _, kc, router := newTestHandler()
 	rec := do(t, router, http.MethodPost, "/v1/onboarding/advertiser",
-		`{"email":"a@example.com","display_name":"Ad Annie"}`)
+		`{"email":"a@example.com","display_name":"Ad Annie","org":"Ads R Us"}`)
 	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
 
 	rec = do(t, router, http.MethodPost, "/v1/onboarding/"+id+"/reject", `{"reason":"duplicate account"}`)
@@ -466,10 +655,177 @@ func TestRejectFlow(t *testing.T) {
 	}
 }
 
+// Wave-8 W8-6: the applicant follows their request via the public
+// capability URL. The response carries status and timestamps only — never
+// email, name, org or meta.
+func TestStatusPublic(t *testing.T) {
+	_, _, _, router := newTestHandler()
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"secret-applicant@example.com","display_name":"Private Person","org":"H2 Ops"}`)
+	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
+
+	rec = do(t, router, http.MethodGet, "/v1/onboarding/status/"+id, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status check got %d: %s", rec.Code, rec.Body.String())
+	}
+	m := decodeBody(t, rec)
+	if m["status"] != StatusPending || m["persona"] != "operator" || m["id"] != id {
+		t.Fatalf("unexpected status payload: %v", m)
+	}
+	body := rec.Body.String()
+	for _, pii := range []string{"secret-applicant@example.com", "Private Person", "H2 Ops", "meta", "email", "display_name"} {
+		if strings.Contains(body, pii) {
+			t.Fatalf("public status must not leak %q (body: %s)", pii, body)
+		}
+	}
+
+	// Unknown ids 404 (existence not confirmed either way).
+	if rec = do(t, router, http.MethodGet, "/v1/onboarding/status/nope", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown status id got %d want 404", rec.Code)
+	}
+}
+
+// Wave-8 W8-4: reconcile re-asserts persona roles on completed requests,
+// repairing users stranded by a mid-sequence provisioning failure.
+func TestReconcile(t *testing.T) {
+	store := newFakeStore()
+	kc := newFakeKC()
+	h := NewHandler(store, kc, zap.NewNop(), func() string { return "TmpPassw0rd!" })
+	adminRouter := newTestRouter(h, "admin-1", "platform-admin")
+	operatorRouter := newTestRouter(h, "op-1", "operator")
+
+	// Complete one driver request via the normal approve flow.
+	rec := do(t, adminRouter, http.MethodPost, "/v1/onboarding/driver", driverBody)
+	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
+	if rec = do(t, adminRouter, http.MethodPost, "/v1/onboarding/"+id+"/approve", ""); rec.Code != http.StatusOK {
+		t.Fatalf("approve got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Simulate the stranded user: drop the role behind the store's back.
+	kc.assignedRoles["kc-1"] = nil
+
+	// Operators must not reconcile (it touches identity state).
+	if rec = do(t, operatorRouter, http.MethodPost, "/v1/onboarding/reconcile", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("operator reconcile got %d want 403", rec.Code)
+	}
+
+	rec = do(t, adminRouter, http.MethodPost, "/v1/onboarding/reconcile", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconcile got %d: %s", rec.Code, rec.Body.String())
+	}
+	m := decodeBody(t, rec)
+	if m["checked"].(float64) != 1 || m["ensured"].(float64) != 1 || m["failed"].(float64) != 0 {
+		t.Fatalf("unexpected reconcile summary: %v", m)
+	}
+	if got := kc.assignedRoles["kc-1"]; len(got) != 1 || got[0] != "driver" {
+		t.Fatalf("reconcile must restore the driver role, got %v", got)
+	}
+
+	// Keycloak failures are reported, not hidden.
+	kc.failEnsure = true
+	rec = do(t, adminRouter, http.MethodPost, "/v1/onboarding/reconcile", "")
+	m = decodeBody(t, rec)
+	if rec.Code != http.StatusOK || m["failed"].(float64) != 1 {
+		t.Fatalf("reconcile failures must surface in the summary: %d %v", rec.Code, m)
+	}
+}
+
+// Wave-8 W8-7: a request pending longer than the TTL can no longer be
+// decided — it is expired on the spot (409), and the sweep flips stragglers.
+func TestPendingTTLExpiry(t *testing.T) {
+	store := newFakeStore()
+	kc := newFakeKC()
+	h := NewHandler(store, kc, zap.NewNop(), func() string { return "TmpPassw0rd!" })
+	h.PendingTTL = time.Hour
+	router := newTestRouter(h, "admin-1", "platform-admin")
+
+	store.seed(&Request{
+		ID: "req-old", Persona: "operator", Email: "old@example.com",
+		DisplayName: "Ol D", Org: "H2 Ops", Status: StatusPending,
+		CreatedAt: time.Now().Add(-2 * time.Hour).UTC(),
+	})
+
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/req-old/approve", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("approve of stale request got %d want 409: %s", rec.Code, rec.Body.String())
+	}
+	stored, _ := store.Get(context.Background(), "req-old")
+	if stored.Status != StatusExpired {
+		t.Fatalf("stale request must be expired by the decide guard, got %s", stored.Status)
+	}
+	if len(kc.created) != 0 {
+		t.Fatalf("expired request must not be provisioned")
+	}
+
+	// The sweep expires older pendings in bulk; fresh ones survive.
+	store.seed(&Request{
+		ID: "req-old2", Persona: "driver", Email: "old2@example.com",
+		DisplayName: "Ol Der", Org: "Depot", Status: StatusPending,
+		CreatedAt: time.Now().Add(-48 * time.Hour).UTC(),
+	})
+	store.seed(&Request{
+		ID: "req-fresh", Persona: "driver", Email: "fresh@example.com",
+		DisplayName: "Fre Sh", Org: "Depot", Status: StatusPending,
+		CreatedAt: time.Now().UTC(),
+	})
+	n, err := store.ExpirePending(context.Background(), time.Now().Add(-24*time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("sweep expired %d (err %v), want 1", n, err)
+	}
+	if r, _ := store.Get(context.Background(), "req-fresh"); r.Status != StatusPending {
+		t.Fatalf("fresh request must survive the sweep, got %s", r.Status)
+	}
+}
+
+// Wave-8 W8-8: with a captcha configured the public intake requires a valid
+// token (fail-closed on verifier errors).
+func TestCaptchaGate(t *testing.T) {
+	var gotSecret string
+	verify := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotSecret = r.Form.Get("secret")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Form.Get("response") == "good-token" {
+			_, _ = w.Write([]byte(`{"success":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":false}`))
+	}))
+	defer verify.Close()
+
+	store := newFakeStore()
+	h := NewHandler(store, newFakeKC(), zap.NewNop(), func() string { return "TmpPassw0rd!" })
+	h.Captcha = &CaptchaConfig{VerifyURL: verify.URL, Secret: "test-secret"}
+	router := newTestRouter(h, "admin-1", "platform-admin")
+	body := `{"email":"cap@example.com","display_name":"Cap Tcha","org":"H2 Ops"}`
+
+	if rec := do(t, router, http.MethodPost, "/v1/onboarding/operator", body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing captcha token got %d want 400", rec.Code)
+	}
+	if rec := do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		strings.Replace(body, `}`, `,"captcha_token":"bad-token"}`, -1)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad captcha token got %d want 400", rec.Code)
+	}
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		strings.Replace(body, `}`, `,"captcha_token":"good-token"}`, -1))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("good captcha token got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotSecret != "test-secret" {
+		t.Fatalf("verifier must receive the configured secret, got %q", gotSecret)
+	}
+
+	// Verifier unreachable → fail closed (502), nothing stored.
+	h.Captcha.VerifyURL = "http://127.0.0.1:1/unreachable"
+	if rec = do(t, router, http.MethodPost, "/v1/onboarding/advertiser",
+		`{"email":"cap2@example.com","display_name":"Cap Two","org":"Org","captcha_token":"x"}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable verifier got %d want 502", rec.Code)
+	}
+}
+
 func TestListFilters(t *testing.T) {
 	_, _, _, router := newTestHandler()
-	do(t, router, http.MethodPost, "/v1/onboarding/driver", `{"email":"d@example.com","display_name":"D"}`)
-	do(t, router, http.MethodPost, "/v1/onboarding/operator", `{"email":"o@example.com","display_name":"O"}`)
+	do(t, router, http.MethodPost, "/v1/onboarding/driver", driverBody)
+	do(t, router, http.MethodPost, "/v1/onboarding/operator", `{"email":"o@example.com","display_name":"O","org":"H2 Ops"}`)
 	do(t, router, http.MethodPost, "/v1/onboarding/citizen", `{"email":"c@example.com","display_name":"C"}`)
 
 	rec := do(t, router, http.MethodGet, "/v1/onboarding?status=pending", "")
@@ -487,6 +843,10 @@ func TestListFilters(t *testing.T) {
 		t.Fatalf("persona filter broken: %v", reqs)
 	}
 
+	// Wave-8: 'expired' is a valid filter value.
+	if rec = do(t, router, http.MethodGet, "/v1/onboarding?status=expired", ""); rec.Code != http.StatusOK {
+		t.Fatalf("expired status filter got %d want 200", rec.Code)
+	}
 	if rec = do(t, router, http.MethodGet, "/v1/onboarding?status=bogus", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status filter got %d want 400", rec.Code)
 	}

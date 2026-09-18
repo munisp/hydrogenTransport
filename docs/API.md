@@ -53,8 +53,9 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 |---|---|---|---|
 | GET | `/v1/stations` | public | Stations + `available_kg` inventory + status |
 | GET | `/v1/stations/{id}` | public | Station detail |
-| POST | `/v1/stations` | JWT | Create station |
-| PATCH | `/v1/stations/{id}/status` | JWT (`operator`) | Set online/offline/maintenance |
+| POST | `/v1/stations` | JWT (`operator`, `station-staff`) | Create station |
+| PATCH | `/v1/stations/{id}/status` | JWT (`operator`, `station-staff`) | Set online/offline/maintenance |
+| POST | `/v1/stations/{id}/queue/{entry}/complete` | JWT (`operator`, `station-staff`) | Complete a station queue entry (Wave-8: `station-staff` realm role accepted) |
 | GET | `/v1/incidents` | public | List incidents |
 | POST | `/v1/incidents` | JWT | Open incident (leak workflow starts in Temporal) |
 | POST | `/v1/incidents/{id}/ack` | JWT (`operator`) | Acknowledge incident |
@@ -140,6 +141,26 @@ on :8094. `POST /v1/carbon/compute` requires a service JWT.
 |---|---|---|---|
 | GET | `/v1/twin` | public | All twins (Redis hot state), `{"twins": [...], "count": n}` |
 | GET | `/v1/twin/{bus_id}` | public | One twin: latest state + `updated_at` |
+
+## admin-api — `/api/admin` → :8085
+
+Stakeholder onboarding (full contract incl. user management, KPIs and ops
+feed in `services/go/admin-api/README.md`):
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/onboarding/citizen` | public | Citizen self-serve → immediate Keycloak provisioning, `201`; a retry after a provisioning outage adopts the orphaned pending row → `200` |
+| POST | `/v1/onboarding/{persona}` | public | Intake for `driver`/`operator`/`station-staff`/`advertiser`/`data-partner`/`gov-viewer` → `201 pending`; body requires `email`, `display_name`, `org` (all gated personas) + `meta.license_no` (driver); re-filing the same `(persona, email)` while pending replays the original → `200 {"deduplicated": true}`; >5 requests/email/24 h → `429`; optional `captcha_token` enforced when captcha env is set |
+| GET | `/v1/onboarding/status/{id}` | public | Applicant status check (capability URL): `{id, persona, status, created_at, decided_at}` only — zero PII; unknown ids 404 |
+| GET | `/v1/onboarding?status=&persona=` | JWT (`platform-admin`, `operator`) | List the queue (`status=` accepts `pending\|approved\|rejected\|completed\|expired`) |
+| GET | `/v1/onboarding/{id}` | JWT (`platform-admin`, `operator`) | Single request |
+| POST | `/v1/onboarding/{id}/approve` | JWT (`platform-admin`) | Provisions the Keycloak user (idempotent `EnsureRealmRole`, temp password, actions email) → `completed`; `409` non-pending or TTL-expired; `502` Keycloak failure (stays pending, safe to retry) |
+| POST | `/v1/onboarding/{id}/reject` | JWT (`platform-admin`) | `{"reason"}` → `rejected`; `409` non-pending or TTL-expired |
+| POST | `/v1/onboarding/reconcile` | JWT (`platform-admin`) | Self-heal: re-asserts the persona realm role on every completed request → `{"checked","ensured","failed","failed_ids"}` |
+
+Pending requests expire after `ONBOARDING_PENDING_TTL_DAYS` (default 30):
+the decide path refuses with `409` and a boot + daily sweep flips stragglers
+to `expired` (`decided_by='system:ttl-expiry'`).
 
 ## Error format
 

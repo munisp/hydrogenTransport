@@ -12,40 +12,59 @@ Error envelope everywhere: `{"error": "<message>"}` (same shape as
 
 ### Stakeholder onboarding
 
-Storage: Postgres `platform.onboarding_requests` (idempotent `EnsureSchema`
-at boot: `id uuid pk, persona, email, display_name, org,
-status[pending|approved|rejected|completed], keycloak_sub, meta jsonb,
-created_at, decided_at, decided_by`).
+Storage: Postgres `platform.onboarding_requests` (migration
+`infra/sql/migrations/0011_wave8_onboarding.sql`; an idempotent
+`EnsureSchema` backstop remains at boot): `id uuid pk, persona, email,
+display_name, org, status[pending|approved|rejected|completed|expired],
+keycloak_sub, meta jsonb, created_at, decided_at, decided_by`. A partial
+unique index on `(persona, email) WHERE status='pending'` backstops
+application-level dedup.
 
 | Method | Path                              | Auth                                | Description |
 |--------|-----------------------------------|-------------------------------------|-------------|
-| POST   | `/v1/onboarding/citizen`          | public                              | Citizen self-serve: validates intake, provisions the Keycloak user with realm role `citizen`, sends the VERIFY_EMAIL+UPDATE_PASSWORD actions email, records `status=completed` immediately → `201 {"request": {...}, "message": "..."}` |
-| POST   | `/v1/onboarding/{persona}`        | public                              | Intake for `driver`, `operator`, `station-staff`, `advertiser`, `data-partner`, `gov-viewer` → `201 {"request": {...}}` with `status=pending` |
-| GET    | `/v1/onboarding?status=&persona=` | role `platform-admin` or `operator` | List → `{"requests": [...]}` |
+| POST   | `/v1/onboarding/citizen`          | public                              | Citizen self-serve: validates intake, provisions the Keycloak user with realm role `citizen`, sends the VERIFY_EMAIL+UPDATE_PASSWORD actions email, records `status=completed` immediately → `201 {"request": {...}, "message": "..."}`. If a previous attempt left an orphaned `pending` row (Keycloak outage), the retry adopts and completes it → `200` |
+| POST   | `/v1/onboarding/{persona}`        | public                              | Intake for `driver`, `operator`, `station-staff`, `advertiser`, `data-partner`, `gov-viewer` → `201 {"request": {...}}` with `status=pending`. Re-filing the same `(persona, email)` while pending replays the original → `200 {"request": {...}, "deduplicated": true}` |
+| GET    | `/v1/onboarding/status/{id}`      | public                              | Applicant status check (capability URL): `{id, persona, status, created_at, decided_at}` only — never email/name/org/meta; unknown ids 404 |
+| GET    | `/v1/onboarding?status=&persona=` | role `platform-admin` or `operator` | List → `{"requests": [...]}` (`status=` accepts `expired` too) |
 | GET    | `/v1/onboarding/{id}`             | role `platform-admin` or `operator` | Single request → `{"request": {...}}` |
-| POST   | `/v1/onboarding/{id}/approve`     | role `platform-admin` or `operator` | Provisions the Keycloak user (mapped realm role, temp password, actions email) → `status=completed` |
-| POST   | `/v1/onboarding/{id}/reject`      | role `platform-admin` or `operator` | Optional body `{"reason": "..."}` (merged into `meta.reject_reason`) → `status=rejected` |
+| POST   | `/v1/onboarding/{id}/approve`     | role `platform-admin`               | Provisions the Keycloak user (mapped realm role via idempotent `EnsureRealmRole`, temp password, actions email) → `status=completed` |
+| POST   | `/v1/onboarding/{id}/reject`      | role `platform-admin`               | Optional body `{"reason": "..."}` (merged into `meta.reject_reason`) → `status=rejected` |
+| POST   | `/v1/onboarding/reconcile`        | role `platform-admin`               | Self-heal sweep: re-asserts the persona realm role on every `completed` request with a `keycloak_sub` → `200 {"checked","ensured","failed","failed_ids"}` (failures reported, never hidden) |
 
 Intake body: `{"email": "...", "display_name": "...", "org": "...", "meta": {...}}`
-(`email` + `display_name` required; `org`, `meta` optional).
+— `email` + `display_name` required for all personas; **`org` required for
+every approval-gated persona** (Wave-8); **`driver` additionally requires
+`meta.license_no`** (4–64 chars).
 
 Approving/rejecting a non-`pending` request → `409`. Keycloak failure on
-approve → `502` and the request stays `pending` (safe to retry).
+approve → `502` and the request stays `pending` (safe to retry). A request
+still `pending` after `ONBOARDING_PENDING_TTL_DAYS` (default 30) is expired:
+the decide path refuses with `409` and a boot + daily sweep flips stragglers
+to `status=expired` (`decided_by='system:ttl-expiry'`).
+
+Abuse controls on the public intake (all fail closed, Wave-8):
+per-IP `limit-req` at the APISIX route **plus** an application-level cap of
+**5 requests per email per 24 h** (`429`, thwarts address-targeted spam from
+rotating IPs), and an optional captcha — set `ONBOARDING_CAPTCHA_VERIFY_URL`
++ `ONBOARDING_CAPTCHA_SECRET` (siteverify-compatible: hCaptcha / Cloudflare
+Turnstile) and every intake must carry a valid `captcha_token` (`400` bad/
+missing token, `502` verifier unreachable).
 
 #### Persona → Keycloak realm-role mapping
 
-The `h2fleet` realm defines only `platform-admin`, `operator`, `driver` and
-`citizen`, so read-only portal personas map onto `citizen`:
+The `h2fleet` realm defines `platform-admin`, `operator`, `driver`,
+`station-staff` (Wave-8) and `citizen`; read-only portal personas map onto
+`citizen`:
 
-| Persona        | Realm role | Notes |
-|----------------|-----------|-------|
-| `citizen`      | `citizen` | self-serve, provisioned immediately |
-| `driver`       | `driver`  | dispatch job acceptance |
-| `operator`     | `operator`| back-office operations |
-| `station-staff`| `operator`| station staff operate stations |
-| `advertiser`   | `citizen` | read-only portal access |
-| `data-partner` | `citizen` | read-only; open-data API keys are APISIX consumers, not roles |
-| `gov-viewer`   | `citizen` | read-only dashboard access |
+| Persona        | Realm role     | Notes |
+|----------------|----------------|-------|
+| `citizen`      | `citizen`      | self-serve, provisioned immediately |
+| `driver`       | `driver`       | dispatch job acceptance |
+| `operator`     | `operator`     | back-office operations |
+| `station-staff`| `station-staff`| Wave-8: own role (was `operator`); station create/status/queue routes accept `operator` **or** `station-staff` |
+| `advertiser`   | `citizen`      | read-only portal access |
+| `data-partner` | `citizen`      | read-only; open-data API keys are APISIX consumers, not roles |
+| `gov-viewer`   | `citizen`      | read-only dashboard access |
 
 ### User management (all require role `platform-admin`)
 
@@ -121,6 +140,8 @@ A failed/timed-out source yields `null` for its section and is named in
 | `KEYCLOAK_ADMIN_CLIENT_ID`   | yes      | —                           | service-account client (realm-management roles); **unset ⇒ fail-closed startup** unless `H2_SIMULATED_KEYCLOAK=true` |
 | `KEYCLOAK_ADMIN_CLIENT_SECRET` | yes    | —                           | as above |
 | `H2_SIMULATED_KEYCLOAK`      | no       | —                           | `true` opts into the simulated in-memory Keycloak admin client (DEV ONLY; no real users are created) |
+| `ONBOARDING_PENDING_TTL_DAYS` | no      | `30`                        | pending requests older than this are expired (decide guard + boot/daily sweep) |
+| `ONBOARDING_CAPTCHA_VERIFY_URL` + `ONBOARDING_CAPTCHA_SECRET` | no | — | both set ⇒ public intake requires a valid `captcha_token` (siteverify-compatible: hCaptcha / Turnstile); unset ⇒ captcha disabled |
 | `TOGGLE_URL`                 | no       | `http://toggle-service:8080`| toggle-service base URL |
 | `ALERTMANAGER_URL`           | no       | `http://alertmanager:9093`  | Alertmanager base URL |
 | `TOGGLE_SERVICE_URL` … `CARBON_ANALYTICS_URL` | no | `http://<service>:<port>` | health-sweep service base URLs (see `internal/config`) |

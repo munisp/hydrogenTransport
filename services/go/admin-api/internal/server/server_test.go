@@ -114,6 +114,18 @@ func (s *fakeStore) Decide(_ context.Context, id, status, kcSub, by, reason stri
 	r.DecidedBy = by
 	return r, nil
 }
+func (s *fakeStore) FindPending(context.Context, string, string) (*onboarding.Request, error) {
+	return nil, onboarding.ErrNotFound
+}
+func (s *fakeStore) CountRecent(context.Context, string, time.Time) (int, error) { return 0, nil }
+func (s *fakeStore) ExpirePending(context.Context, time.Time) (int64, error)     { return 0, nil }
+func (s *fakeStore) MergeMeta(_ context.Context, id string, patch map[string]any) (*onboarding.Request, error) {
+	r, ok := s.req[id]
+	if !ok {
+		return nil, onboarding.ErrNotFound
+	}
+	return r, nil
+}
 
 type fakeSource struct{ name string }
 
@@ -210,7 +222,7 @@ func TestRoleGates(t *testing.T) {
 		{"citizen self-serve public", "POST", "/v1/onboarding/citizen",
 			`{"email":"c@example.com","display_name":"Cora"}`, "", http.StatusCreated},
 		{"intake public", "POST", "/v1/onboarding/driver",
-			`{"email":"d@example.com","display_name":"Dan"}`, "", http.StatusCreated},
+			`{"email":"d@example.com","display_name":"Dan","org":"Depot","meta":{"license_no":"DL-123456"}}`, "", http.StatusCreated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,7 +240,7 @@ func TestApproveGateAndFlow(t *testing.T) {
 
 	// Create a pending request via public intake.
 	rec := call(t, router, "POST", "/v1/onboarding/driver",
-		`{"email":"d@example.com","display_name":"Dan"}`, "")
+		`{"email":"d@example.com","display_name":"Dan","org":"Depot","meta":{"license_no":"DL-123456"}}`, "")
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("intake: %d %s", rec.Code, rec.Body.String())
 	}
