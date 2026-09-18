@@ -4,15 +4,23 @@ A deep, evidence-based audit of scenarios the platform does **not** handle,
 produced by reading the actual code (never the docs — every gap cites
 file:line). Auditor raw reports: `.wave6/a1.md` … `.wave6/a4.md`.
 
-**27 findings:** 16 fixed in code this wave (FIX-NOW), 5 documented as
-product/platform decisions (DECISION), 6 closed as honest external-boundary
-contracts (CONTRACT). Classification of every item below.
+**34 findings:** 23 fixed in code this wave (FIX-NOW), 6 documented as
+product/platform decisions (DECISION), 5 closed as honest external-boundary
+contracts (CONTRACT). Classification of every item below. (The header of
+this document originally said 27/16/5/6; the tables always listed 34 rows —
+counts corrected in Wave 7.)
+
+**Wave 7** built the two most operator-valuable DECISION items:
+**A2-06** (corporate/employer group settlement) and **A2-09** (charter/school
+block bookings). Four DECISION items remain open by choice: A1-06, A2-08,
+A3-04, A3-09.
 
 Legend — **FIX-NOW**: real gap, fixed in code this wave. **DECISION**:
 genuine product/platform fork; documented with the extension path, not
-half-built. **CONTRACT**: the boundary belongs outside the software
-(hardware, acquirer, ceremony); the contract is stated explicitly so nobody
-mistakes it for a platform feature.
+half-built. **BUILT (Wave 7)**: a DECISION item the product call has since
+been made on — shipped in Wave 7. **CONTRACT**: the boundary belongs
+outside the software (hardware, acquirer, ceremony); the contract is stated
+explicitly so nobody mistakes it for a platform feature.
 
 ## A. Operational edge cases (auditor A1)
 
@@ -35,10 +43,10 @@ mistakes it for a platform feature.
 | A2-03 | Free-text currency silently mis-posts to the single-currency ledger | FIX-NOW | 422 unless `currency == PLATFORM_CURRENCY` (default EUR) |
 | A2-04 | Wheelchair users cannot book DRT | FIX-NOW | `vehicles.wheelchair_accessible` + `drt_requests.requires_wheelchair` (0009); matching in pick + assign |
 | A2-05 | Chargebacks/disputes have no representation | CONTRACT | Mojaloop has no chargeback primitive; acquirer chargebacks are processed as operator refunds + reconciliation (A2-02 mechanics) |
-| A2-06 | Corporate/employer group settlement | DECISION | Extension path: `payer_account` on entitlements; documented, not built |
+| A2-06 | Corporate/employer group settlement | BUILT (Wave 7) | `payer_account` on entitlements + `commerce.billing_accounts/billing_charges/invoices` (0010); covered fare accrues inside the payment tx; period invoices settle via deterministic TigerBeetle transfer (5xxx clearing → 2001 revenue, code 500) |
 | A2-07 | Driver payroll/attendance | CONTRACT | Payroll integrates via dispatch jobs + audit exports; fatigue half fixed in A4-05 |
 | A2-08 | Advertiser self-service + invoicing | DECISION | Extension path documented (advertiser role, approval states, invoice export) |
-| A2-09 | Charter/school block bookings | DECISION | Convention: charter = dispatch job `route='charter:<ref>'` (overlap engine enforced); full product later |
+| A2-09 | Charter/school block bookings | BUILT (Wave 7) | `infra.charter_bookings/charter_vehicles` (0010) + `/v1/charters` endpoints; per-vehicle placeholder driver + dispatch job `route='charter:<ref>'` so the overlap engine, DRT busy-guard and unique indexes enforce exclusivity with zero special-casing |
 
 ## C. Platform / technical (auditor A3)
 
@@ -73,6 +81,13 @@ mistakes it for a platform feature.
 `infra/sql/migrations/0009_wave6_gaps.sql`: fare products & rider
 entitlements; vehicle/DRT accessibility attributes; partial-refund amount
 tracking; webhook subscriptions & delivery log.
+
+## Migration 0010 (Wave 7)
+
+`infra/sql/migrations/0010_wave7.sql`: corporate billing accounts, the
+`payer_account` link on rider entitlements, per-ride billing charges and
+period invoices (A2-06); charter booking headers and per-vehicle links
+backing one dispatch job each (A2-09).
 
 ## What was verified NOT to be a gap
 

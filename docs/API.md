@@ -63,6 +63,10 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 | GET | `/v1/dispatch/jobs` | public | List dispatch jobs |
 | POST | `/v1/dispatch/jobs` | JWT (`operator`) | Assign job → `dispatch.job.assigned` + Temporal signal |
 | POST | `/v1/dispatch/jobs/{id}/accept` | JWT | Driver accepts job (status `assigned` → `accepted`, stamps `accepted_at`) |
+| POST | `/v1/charters` | JWT (`operator`) | Wave-7 A2-09 charter/school block booking, body `{"reference","customer_name","starts_at","ends_at","vehicle_ids":[...]}`: one tx per vehicle — overlap check → placeholder driver → dispatch job `route='charter:<reference>'`; 409 on overlap, 422 unknown vehicle; same reference replays the booking (200) → `charter.booking.confirmed` |
+| GET | `/v1/charters` | JWT (`operator`) | List charter bookings (`?status=`) with vehicle counts |
+| GET | `/v1/charters/{id}` | JWT (`operator`) | Booking detail + each reserved vehicle and its backing dispatch job |
+| POST | `/v1/charters/{id}/cancel` | JWT (`operator`) | Cancels the booking AND all active backing dispatch jobs in one tx → `charter.booking.cancelled`; 409 unless `confirmed` |
 | GET | `/v1/compliance/reports` | public | Generated compliance reports |
 | GET | `/v1/compliance/reports/{id}` | public | One report |
 | POST | `/v1/compliance/reports/generate` | JWT (`platform-admin`) | Trigger report generation |
@@ -104,6 +108,13 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 | GET | `/v1/gov/kpis` | public | Gov dashboard KPIs (each rollup independently nullable; failed sources are named in `degraded` + `partial: true`): `revenue_30d_minor`, `settled_payments_30d`, `ridership_estimate_30d`, `kg_co2_avoided_total`, `carbon_credits_total`, `vehicles_total`, `vehicles_active`, `fleet_active_ratio_pct`, `fleet_uptime_pct` (null until a time-based source exists), `stations_available_kg`, `open_incidents` |
 | GET/POST | `/v1/ads/campaigns` | public / JWT | Ad inventory & campaigns |
 | GET/PATCH | `/v1/ads/campaigns/{id}` | public / JWT | Campaign detail / update |
+| POST | `/v1/billing/accounts` | JWT (`operator`) | Wave-7 A2-06: create a corporate payer account (`{"name","kind": "corporate\|school\|agency\|municipal","contact_email"}`); allocates the next TigerBeetle clearing account (5xxx) → `billing.account.created` |
+| GET | `/v1/billing/accounts` | JWT (`operator`) | List payer accounts + uninvoiced accrual totals |
+| GET | `/v1/billing/accounts/{id}` | JWT (`operator`) | Account detail |
+| POST | `/v1/billing/accounts/{id}/invoices` | JWT (`operator`) | Sweep uninvoiced charges in `{"period_start","period_end"}` into an invoice (idempotent per account+period: replay 200); 422 no charges or account not active → `billing.invoice.issued` |
+| GET | `/v1/billing/invoices` | JWT (`operator`) | List invoices (`?billing_account_id=`) |
+| GET | `/v1/billing/invoices/{id}` | JWT (`operator`) | Invoice + its charges |
+| POST | `/v1/billing/invoices/{id}/pay` | JWT (`operator`) | Settle an issued invoice: deterministic transfer 5xxx clearing → 2001 operator revenue (code 500); 402 `insufficient_funds` when unfunded; replay 200 → `billing.invoice.paid` |
 
 ## predictive-maintenance — `/api/ml` → :8090
 

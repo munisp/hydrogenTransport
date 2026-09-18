@@ -1,6 +1,6 @@
-# H2Fleet — Production Scorecard (Wave 6 final)
+# H2Fleet — Production Scorecard (Wave 7)
 
-Date: 2026-09-18 · Repo: github.com/munisp/hydrogenTransport · Verification: all gates run in-sandbox; live-stack items marked honestly.
+Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: all gates run in-sandbox; live-stack items marked honestly.
 
 ## Headline
 
@@ -10,8 +10,8 @@ Date: 2026-09-18 · Repo: github.com/munisp/hydrogenTransport · Verification: a
 | Business rules / logic | **10/10** | Wave-4 line-by-line re-verification: all 20 features 10/10 (was ~5.4 avg) — see below |
 | Production realness (no mocks) | **9.4/10** | 905-hit scan → every path classified REAL / env-gated dev fallback / external boundary; 6 fixes — docs/NO_MOCK_AUDIT.md |
 | Security posture | 9.5/10 | Wave-6: dual-token audit rollover, auditor role separation, HMAC webhooks, evidence packs, GDPR erasure fail-closed salt |
-| Data integrity & schemas | 10/10 | 9 goose migrations (up/re-up/down verified), idempotency keys everywhere money moves, transactional fare-cap (advisory lock → settle in one tx) |
-| Edge-case / gap coverage | **10/10** | Wave-6 4-pass audit: 27 evidence-backed findings, 16 FIX-NOW all implemented + tested; 5 DECISION / 6 CONTRACT documented — docs/GAP_AUDIT.md |
+| Data integrity & schemas | 10/10 | 10 goose migrations (up/re-up/down verified), idempotency keys everywhere money moves, transactional fare-cap (advisory lock → settle in one tx), invoice settlement on deterministic transfer ids |
+| Edge-case / gap coverage | **10/10** | Wave-6 4-pass audit: 34 evidence-backed findings, 23 FIX-NOW implemented + tested; Wave-7 built the 2 most operator-valuable DECISION items (A2-06, A2-09); 4 DECISION / 5 CONTRACT documented — docs/GAP_AUDIT.md |
 | Middleware robustness | 9/10 | HA overlays for all 11 components; real Mojaloop + Fluvio rails |
 | Compile/test guarantee | 10/10 | Go/Rust/Python/TS gates all green (see below) |
 | Live-environment proof | 7/10 | Static + unit verification complete; live e2e/load runs pending (needs Docker host) |
@@ -21,14 +21,53 @@ Everything verifiable without a running cluster is verified. The residual is
 honestly unclaimable from a build sandbox: live e2e scenarios, Docker image
 builds, HA failover drills, and a load test at target TPS.
 
+## Wave-7 additions (2026-09-19)
+
+**Two DECISION items built** (docs/GAP_AUDIT.md A2-06/A2-09 reclassified
+BUILT): the product call was made on the two most operator-valuable
+Wave-6 deferrals. Migration 0010; commerce-api and infra-api build/vet/test
+green (Go 1.26.4).
+
+- **A2-06 corporate/employer group settlement** (commerce-api):
+  `commerce.billing_accounts` (kind corporate/school/agency/municipal, each
+  allocated a sequential TigerBeetle clearing account 5xxx, overdraft-proof),
+  `payer_account` on rider entitlements (grant validates the account is
+  active), per-ride accrual in `billing_charges` — the covered amount
+  (requested − charged) is inserted in the SAME transaction as the payment,
+  so a settled corporate ride can never exist without its billing charge.
+  `GenerateInvoice` sweeps uninvoiced charges per account+period under an
+  advisory lock (UNIQUE(account, period) makes retries a 200-replay);
+  `PayInvoice` posts one deterministic-id transfer 5xxx → 2001 operator
+  revenue (ledger code 500), 402 fail-closed when the clearing account is
+  unfunded, conditional UPDATE + re-read on race, replay-safe. Events:
+  `billing.account.created`, `billing.invoice.issued`, `billing.invoice.paid`;
+  audit middleware on all three mutations.
+- **A2-09 charter/school block bookings** (infra-api):
+  `infra.charter_bookings` (customer-facing `reference` UNIQUE = idempotency
+  key — same reference + same booking replays 200, different booking 409) +
+  `infra.charter_vehicles`. One transaction per booking: per vehicle the
+  dispatch overlap check (409, names the blocked vehicle), a placeholder
+  driver row `charter:<ref>:<vehicle_id>` (status off-duty; satisfies the
+  NOT VALID driver FK and the one-active-job-per-driver index), one dispatch
+  job `route='charter:<reference>'`, and the charter_vehicles link. The
+  existing overlap engine, DRT dispatch-busy guard and partial unique
+  indexes enforce exclusivity with zero special-casing; unknown vehicle →
+  422 (FK). Cancel = one tx flipping the booking + all active backing jobs
+  (+ per-job workflow cancel signal) so vehicles free immediately. Events:
+  `charter.booking.confirmed`, `charter.booking.cancelled`.
+
+**GitHub state**: single `main` branch, zero PRs; Wave-7 files pushed in
+sequential ≤10-file commits with byte-for-byte verification.
+
 ## Wave-6 additions (2026-09-18)
 
 **Deep gap audit → all FIX-NOW findings implemented** (docs/GAP_AUDIT.md; raw
 auditor reports `.wave6/a1–a4.md`). Method: 4 adversarial passes (operational
 edge cases, business domain, platform/technical, safety/security/regulatory);
 every finding cites file:line evidence read from code — never docs. Result:
-27 findings = 16 FIX-NOW (all shipped + unit-tested) + 5 DECISION + 6
-CONTRACT (documented with chosen defaults).
+34 findings = 23 FIX-NOW (all shipped + unit-tested) + 6 DECISION + 5
+CONTRACT (documented with chosen defaults). (Wave-6-era copies of this
+document said 27/16/5/6; the tables always listed 34 — corrected in Wave 7.)
 
 - **Money correctness**: fare-cap race closed — per-rider `pg_advisory_xact_lock`
   held across entitlement→cap→insert→settle in ONE tx (payments count once,
@@ -77,9 +116,9 @@ event loops closed with real consumers (maintenance.predicted→work orders, fue
 
 **GitHub state**: single `main` branch, zero PRs (nothing to merge); entire `services/` tree byte-identical local↔remote (tree-SHA verified).
 
-## Compile gate (final, all green — re-run 2026-09-18)
+## Compile gate (final, all green — Go re-run 2026-09-19)
 
-- **Go** (7 services + go-auth): `build`/`vet`/`test` exit 0 — admin-api, audit-log, citizen-api, commerce-api, fleet-api, infra-api, toggle-service. Toolchain 1.26.4.
+- **Go** (7 services + go-auth): `build`/`vet`/`test` exit 0 — admin-api, audit-log, citizen-api, commerce-api (incl. Wave-7 billing suite), fleet-api, infra-api (incl. Wave-7 charter suite), toggle-service. Toolchain 1.26.4.
 - **Rust** (3 services): `cargo test --locked` — digital-twin 25/25, telemetry-ingest 10/10 (incl. new FutureTs/StaleTs boundary cases), fluvio-edge 2/2. Toolchain 1.98.1.
 - **Python**: pytest — ml-platform 54/54 (torch 2.6), carbon-analytics 26/26, route-optimizer 26/26, predictive-maintenance 17/17 (sklearn fallback, torch-free), ocpp-gateway 37/37, telemetry-simulator 8/8, shared 10/10.
 - **TypeScript**: analytics-bff esbuild bundle green; packages/db `tsc --noEmit` + `drizzle-kit check` + vitest 7/7.
@@ -104,9 +143,9 @@ event loops closed with real consumers (maintenance.predicted→work orders, fue
 - Advertising: validation + lifecycle state machine; inventory/placements with budget enforcement and overlap 409.
 - Orphans: dead fleet-api routes removed; `min_risk` wired; route-optimizer reads DB stops with deterministic fallback + inventory write-back.
 
-## Schemas (migrations 0001–0009)
+## Schemas (migrations 0001–0010)
 
-13 missing schemas closed in 0005 (audit_log hash-chain mirror, loyalty contract with guarded `user_sub→rider_sub` rename verified on live PG, carbon UNIQUE, DRT labels/assignment, drivers ref + NOT VALID FKs, station queue, ad inventory/placements, refunds, work-order fields, fleet stops/routes/zones, incident numbering `INC-000123`), dispatch partial unique indexes, 0006 trades idempotency, 0007 wave-4 business rules (fuel_consumption, charged_minor, placement costs, queue/incident timestamps), 0008 wave-5 energy vectors (energy_type, generic telemetry columns, charge points/sessions), 0009 wave-6 gaps (fare products/entitlements, refunded_minor, wheelchair flags, webhook tables, incident ack). Verified up/re-up/down on embedded Postgres. Drizzle mirror in `packages/db`.
+13 missing schemas closed in 0005 (audit_log hash-chain mirror, loyalty contract with guarded `user_sub→rider_sub` rename verified on live PG, carbon UNIQUE, DRT labels/assignment, drivers ref + NOT VALID FKs, station queue, ad inventory/placements, refunds, work-order fields, fleet stops/routes/zones, incident numbering `INC-000123`), dispatch partial unique indexes, 0006 trades idempotency, 0007 wave-4 business rules (fuel_consumption, charged_minor, placement costs, queue/incident timestamps), 0008 wave-5 energy vectors (energy_type, generic telemetry columns, charge points/sessions), 0009 wave-6 gaps (fare products/entitlements, refunded_minor, wheelchair flags, webhook tables, incident ack), 0010 wave-7 (billing accounts/charges/invoices, entitlement payer_account, charter bookings/vehicles). Verified up/re-up/down on embedded Postgres. Drizzle mirror in `packages/db`.
 
 ## Middleware (docs/MIDDLEWARE_HARDENING.md, infra/prod/)
 
