@@ -103,40 +103,44 @@ func platformCurrency(getenv func(string) string) string {
 // active fare entitlement (0009 G1, Wave-6 A2-01). A 'free' or 'pass'
 // product covers the ride entirely (charge 0); a 'discount' product reduces
 // the fare by its percentage (best discount wins). The product code behind
-// the resolution is returned for the domain event ("" = full fare).
-func resolveEntitlement(ctx context.Context, tx pgx.Tx, riderSub string, amount int64) (int64, string, error) {
+// the resolution is returned for the domain event ("" = full fare), along
+// with the entitlement id and its corporate payer account (Wave-7 A2-06;
+// nil = the rider pays).
+func resolveEntitlement(ctx context.Context, tx pgx.Tx, riderSub string, amount int64) (charge int64, code string, entitlementID string, payerAccount *string, err error) {
 	rows, err := tx.Query(ctx, `
-		SELECT p.kind, COALESCE(p.discount_pct,0), p.code
+		SELECT p.kind, COALESCE(p.discount_pct,0), p.code, e.id, e.payer_account
 		FROM commerce.rider_entitlements e
 		JOIN commerce.fare_products p ON p.id = e.product_id
 		WHERE e.rider_sub = $1 AND e.valid_from <= now() AND e.valid_to > now() AND p.active`, riderSub)
 	if err != nil {
-		return 0, "", err
+		return 0, "", "", nil, err
 	}
 	defer rows.Close()
-	charge, code, bestDiscount := amount, "", 0
+	charge, bestDiscount := amount, 0
 	for rows.Next() {
-		var kind, productCode string
+		var kind, productCode, entID string
 		var pct int
-		if err := rows.Scan(&kind, &pct, &productCode); err != nil {
-			return 0, "", err
+		var payer *string
+		if err := rows.Scan(&kind, &pct, &productCode, &entID, &payer); err != nil {
+			return 0, "", "", nil, err
 		}
 		switch kind {
 		case "free", "pass":
-			return 0, productCode, rows.Err() // full coverage beats any discount
+			// Full coverage beats any discount.
+			return 0, productCode, entID, payer, rows.Err()
 		case "discount":
 			if pct > bestDiscount {
-				bestDiscount, code = pct, productCode
+				bestDiscount, code, entitlementID, payerAccount = pct, productCode, entID, payer
 			}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, "", err
+		return 0, "", "", nil, err
 	}
 	if bestDiscount > 0 {
 		charge = amount * int64(100-bestDiscount) / 100
 	}
-	return charge, code, nil
+	return charge, code, entitlementID, payerAccount, nil
 }
 
 type createPaymentRequest struct {
@@ -228,7 +232,7 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		// Wave-6 A2-01: passes/concessions resolve before the cap — a free
 		// or pass entitlement covers the ride (charge 0), a discount
 		// entitlement reduces the fare.
-		charge, entitlementCode, err := resolveEntitlement(r.Context(), tx, req.RiderSub, req.AmountMinor)
+		charge, entitlementCode, entitlementID, payerAccount, err := resolveEntitlement(r.Context(), tx, req.RiderSub, req.AmountMinor)
 		if err != nil {
 			h.internal(w, "resolve fare entitlement", err)
 			return
@@ -291,6 +295,26 @@ func (h *Handler) CreatePayment(mojaloopEndpoint string) http.HandlerFunc {
 		}
 		if entitlementCode != "" {
 			event["entitlement"] = map[string]any{"product_code": entitlementCode}
+		}
+
+		// Wave-7 A2-06: a payer-backed entitlement means a corporate billing
+		// account pays for the covered amount (requested − charged). The
+		// accrual is inserted in the SAME transaction as the payment, so a
+		// settled corporate ride can never exist without its billing charge.
+		if payerAccount != nil {
+			if covered := req.AmountMinor - charge; covered > 0 {
+				if _, err := tx.Exec(r.Context(), `
+					INSERT INTO commerce.billing_charges (billing_account_id, payment_id, entitlement_id, amount_minor)
+					VALUES ($1, $2, $3, $4)`,
+					*payerAccount, paymentID, entitlementID, covered); err != nil {
+					h.internal(w, "accrue corporate billing charge", err)
+					return
+				}
+				event["payer_account"] = map[string]any{
+					"billing_account_id": *payerAccount,
+					"covered_minor":      covered,
+				}
+			}
 		}
 		if charge < req.AmountMinor && entitlementCode == "" {
 			event["fare_cap"] = map[string]any{

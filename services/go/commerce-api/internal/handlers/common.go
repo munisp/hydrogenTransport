@@ -156,6 +156,42 @@ func (h *Handler) EnsureSchema(ctx context.Context) error {
 			CHECK (valid_to > valid_from)
 		)`,
 		`ALTER TABLE commerce.fare_payments ADD COLUMN IF NOT EXISTS refunded_minor bigint NOT NULL DEFAULT 0`,
+		// Wave-7 parity with migration 0010 (dev databases that never ran
+		// goose): corporate group settlement (A2-06).
+		`CREATE TABLE IF NOT EXISTS commerce.billing_accounts (
+			id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			name              text NOT NULL,
+			kind              text NOT NULL CHECK (kind IN ('corporate','school','agency','municipal')),
+			contact_email     text NOT NULL DEFAULT '',
+			ledger_account_id bigint NOT NULL UNIQUE,
+			status            text NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','closed')),
+			created_at        timestamptz NOT NULL DEFAULT now()
+		)`,
+		`ALTER TABLE commerce.rider_entitlements ADD COLUMN IF NOT EXISTS payer_account uuid`,
+		`CREATE TABLE IF NOT EXISTS commerce.billing_charges (
+			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			billing_account_id uuid NOT NULL REFERENCES commerce.billing_accounts(id),
+			payment_id         uuid NOT NULL UNIQUE,
+			entitlement_id     uuid NOT NULL REFERENCES commerce.rider_entitlements(id),
+			amount_minor       bigint NOT NULL CHECK (amount_minor > 0),
+			invoice_id         uuid,
+			created_at         timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS commerce.invoices (
+			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			billing_account_id uuid NOT NULL REFERENCES commerce.billing_accounts(id),
+			period_start       timestamptz NOT NULL,
+			period_end         timestamptz NOT NULL,
+			amount_minor       bigint NOT NULL CHECK (amount_minor > 0),
+			charge_count       integer NOT NULL CHECK (charge_count > 0),
+			status             text NOT NULL DEFAULT 'issued' CHECK (status IN ('issued','paid','void')),
+			tb_transfer_id     text,
+			issued_at          timestamptz NOT NULL DEFAULT now(),
+			paid_at            timestamptz,
+			created_at         timestamptz NOT NULL DEFAULT now(),
+			UNIQUE (billing_account_id, period_start, period_end),
+			CHECK (period_end > period_start)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := h.db.Exec(ctx, s); err != nil {
