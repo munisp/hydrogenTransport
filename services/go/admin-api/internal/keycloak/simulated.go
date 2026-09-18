@@ -87,6 +87,12 @@ func (s *simulated) AssignRealmRole(_ context.Context, userID, role string) erro
 	return nil
 }
 
+// EnsureRealmRole mirrors the real client's idempotent repair (AssignRealmRole
+// is already idempotent here; the separate method keeps the interface honest).
+func (s *simulated) EnsureRealmRole(ctx context.Context, userID, role string) error {
+	return s.AssignRealmRole(ctx, userID, role)
+}
+
 func (s *simulated) RevokeRealmRole(_ context.Context, userID, role string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

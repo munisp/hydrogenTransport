@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -69,6 +70,52 @@ func main() {
 
 	opsHandler := ops.NewHandler(healthTargets(cfg), cfg.AlertmanagerURL, cfg.ToggleURL, log)
 
+	obHandler := onboarding.NewHandler(store, kc, log, nil)
+
+	// Wave-8 W8-7: pending-request TTL (default 30 days). A TTL guard on the
+	// decide path expires stale requests on the spot; this sweep (startup +
+	// daily) expires them in bulk so they also surface as expired in lists.
+	pendingTTLDays := 30
+	if raw := os.Getenv("ONBOARDING_PENDING_TTL_DAYS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err != nil || n < 1 {
+			log.Warn("invalid ONBOARDING_PENDING_TTL_DAYS; using default 30", zap.String("value", raw))
+		} else {
+			pendingTTLDays = n
+		}
+	}
+	obHandler.PendingTTL = time.Duration(pendingTTLDays) * 24 * time.Hour
+	expireSweep := func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		n, err := store.ExpirePending(sctx, time.Now().Add(-obHandler.PendingTTL))
+		if err != nil {
+			log.Error("onboarding pending-TTL sweep failed", zap.Error(err))
+		} else if n > 0 {
+			log.Info("onboarding pending requests expired", zap.Int64("count", n))
+		}
+	}
+	expireSweep()
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				expireSweep()
+			}
+		}
+	}()
+
+	// Wave-8 W8-8: optional captcha on the public intake endpoints
+	// (siteverify-compatible provider, e.g. hCaptcha/Turnstile). Both vars
+	// must be set; unset = disabled (dev default). Fail-closed when set.
+	if verifyURL, secret := os.Getenv("ONBOARDING_CAPTCHA_VERIFY_URL"), os.Getenv("ONBOARDING_CAPTCHA_SECRET"); verifyURL != "" && secret != "" {
+		obHandler.Captcha = &onboarding.CaptchaConfig{VerifyURL: verifyURL, Secret: secret}
+		log.Info("onboarding captcha verification enabled", zap.String("verify_url", verifyURL))
+	}
+
 	router := server.NewRouter(server.Deps{
 		Log: log,
 		JWT: jwtmw,
@@ -81,7 +128,7 @@ func main() {
 			}
 			httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		},
-		Onboarding: onboarding.NewHandler(store, kc, log, nil),
+		Onboarding: obHandler,
 		Users:      users.NewHandler(kc, log),
 		KPIs:       agg,
 		Ops:        opsHandler,

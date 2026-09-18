@@ -133,8 +133,10 @@ func main() {
 		r.Use(gate.Module(tc, "refueling-stations"))
 		r.Get("/v1/stations", h.ListStations)
 		r.Get("/v1/stations/{id}", h.GetStation)
-		r.With(jwtmw.RequireRole("operator")).Post("/v1/stations", h.CreateStation)
-		r.With(jwtmw.RequireRole("operator")).Patch("/v1/stations/{id}/status", h.UpdateStationStatus)
+		// Wave-8 W8-9: station-staff is now a real realm role (no longer
+		// mapped to operator at onboarding); station operations accept both.
+		r.With(jwtmw.RequireAnyRole("operator", "station-staff")).Post("/v1/stations", h.CreateStation)
+		r.With(jwtmw.RequireAnyRole("operator", "station-staff")).Patch("/v1/stations/{id}/status", h.UpdateStationStatus)
 		// OCPP charger read APIs (Wave 5; infra.charge_points/charging_sessions
 		// are written by the ocpp-gateway).
 		r.Get("/v1/stations/{id}/chargers", h.ListStationChargers)
@@ -143,7 +145,7 @@ func main() {
 		// Queue management (SPEC §1 "queue mgmt").
 		r.Get("/v1/stations/{id}/queue", h.ListStationQueue)
 		r.With(jwtmw.RequireAuth).Post("/v1/stations/{id}/queue", h.JoinStationQueue)
-		r.With(jwtmw.RequireRole("operator")).Post("/v1/stations/{id}/queue/{entry}/complete", h.CompleteStationQueueEntry)
+		r.With(jwtmw.RequireAnyRole("operator", "station-staff")).Post("/v1/stations/{id}/queue/{entry}/complete", h.CompleteStationQueueEntry)
 		r.With(jwtmw.RequireAuth).Post("/v1/stations/{id}/queue/{entry}/leave", h.LeaveStationQueue)
 	})
 	// leak-detection module: incidents + sensor webhook

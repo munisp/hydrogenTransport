@@ -51,6 +51,10 @@ type AdminClient interface {
 	CreateUser(ctx context.Context, spec CreateUserSpec) (string, error)
 	SetTemporaryPassword(ctx context.Context, userID, password string) error
 	AssignRealmRole(ctx context.Context, userID, role string) error
+	// EnsureRealmRole assigns the role only when the user does not already
+	// have it (idempotent read-then-assign). Wave-8: repairs users stranded
+	// without a role by a mid-sequence provisioning failure.
+	EnsureRealmRole(ctx context.Context, userID, role string) error
 	RevokeRealmRole(ctx context.Context, userID, role string) error
 	// SendActionsEmail triggers the Keycloak "execute actions" email
 	// (e.g. VERIFY_EMAIL, UPDATE_PASSWORD).
@@ -288,6 +292,22 @@ func (c *httpClient) AssignRealmRole(ctx context.Context, userID, role string) e
 		return fmt.Errorf("assign role %q: status %d", role, resp.StatusCode)
 	}
 	return nil
+}
+
+// EnsureRealmRole is AssignRealmRole guarded by a role-mappings read, so
+// callers repairing a half-provisioned user never duplicate assignments and
+// never fail on an already-correct user.
+func (c *httpClient) EnsureRealmRole(ctx context.Context, userID, role string) error {
+	roles, err := c.userRoles(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("ensure role: %w", err)
+	}
+	for _, r := range roles {
+		if r == role {
+			return nil
+		}
+	}
+	return c.AssignRealmRole(ctx, userID, role)
 }
 
 func (c *httpClient) RevokeRealmRole(ctx context.Context, userID, role string) error {

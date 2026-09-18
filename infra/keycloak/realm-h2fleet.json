@@ -20,6 +20,10 @@
         "description": "Bus driver: assigned jobs, vehicle state"
       },
       {
+        "name": "station-staff",
+        "description": "Refueling-station staff: station ops + queue + incident feed (Wave-8; no longer mapped to operator at onboarding)"
+      },
+      {
         "name": "citizen",
         "description": "Passenger: DRT requests, fares, carbon view"
       }

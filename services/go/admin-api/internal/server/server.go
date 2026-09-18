@@ -56,6 +56,9 @@ func NewRouter(d Deps) http.Handler {
 	// ---------------------------------------------------------- onboarding --
 	r.Post("/v1/onboarding/citizen", d.Onboarding.CitizenSelfServe) // public self-serve
 	r.Post("/v1/onboarding/{key}", d.Onboarding.Intake)             // public intake (pending)
+	// Public status check (Wave-8 W8-6): the applicant follows their decision
+	// via the request id (uuid = capability; response carries no PII).
+	r.Get("/v1/onboarding/status/{id}", d.Onboarding.StatusPublic)
 	r.Group(func(r chi.Router) {
 		r.Use(d.JWT.RequireAuth, operatorOrAdmin)
 		r.Get("/v1/onboarding", d.Onboarding.List)
@@ -71,6 +74,10 @@ func NewRouter(d Deps) http.Handler {
 			Post("/v1/onboarding/{key}/approve", d.Onboarding.Approve)
 		r.With(d.Audit.Middleware("onboarding.reject", "onboarding_request", "key", false)).
 			Post("/v1/onboarding/{key}/reject", d.Onboarding.Reject)
+		// Wave-8 W8-4: idempotent repair of realm roles on completed
+		// requests (heals mid-sequence provisioning failures).
+		r.With(d.Audit.Middleware("onboarding.reconcile", "onboarding_request", "", false)).
+			Post("/v1/onboarding/reconcile", d.Onboarding.Reconcile)
 	})
 
 	// ----------------------------------------------------- user management --

@@ -32,24 +32,28 @@ const (
 	StatusApproved  = "approved"
 	StatusRejected  = "rejected"
 	StatusCompleted = "completed"
+	// StatusExpired marks a pending request that outlived the pending TTL
+	// (Wave-8 W8-7); expired requests can no longer be decided.
+	StatusExpired = "expired"
 )
 
 // personaRoles maps each onboarding persona to the Keycloak realm role it is
-// provisioned with. The h2fleet realm only defines platform-admin, operator,
-// driver and citizen, so back-office read-only personas map onto citizen:
+// provisioned with. The h2fleet realm defines platform-admin, operator,
+// driver, citizen and — since Wave 8 — station-staff, so only the back-office
+// read-only personas still map onto citizen:
 //
-//	citizen       -> citizen   (self-serve, provisioned immediately)
+//	citizen       -> citizen       (self-serve, provisioned immediately)
 //	driver        -> driver
 //	operator      -> operator
-//	station-staff -> operator  (station staff operate stations)
-//	advertiser    -> citizen   (read-only portal access)
-//	data-partner  -> citizen   (read-only; open-data API keys via APISIX consumer)
-//	gov-viewer    -> citizen   (read-only dashboard access)
+//	station-staff -> station-staff (Wave-8 W8-9: own role, no longer full operator)
+//	advertiser    -> citizen       (read-only portal access)
+//	data-partner  -> citizen       (read-only; open-data API keys via APISIX consumer)
+//	gov-viewer    -> citizen       (read-only dashboard access)
 var personaRoles = map[string]string{
 	PersonaCitizen:      "citizen",
 	PersonaDriver:       "driver",
 	PersonaOperator:     "operator",
-	PersonaStationStaff: "operator",
+	PersonaStationStaff: "station-staff",
 	PersonaAdvertiser:   "citizen",
 	PersonaDataPartner:  "citizen",
 	PersonaGovViewer:    "citizen",
@@ -94,6 +98,19 @@ type Store interface {
 	// and decided_by. keycloakSub is recorded on completion; reason (when
 	// non-empty) is merged into meta as reject_reason.
 	Decide(ctx context.Context, id, status, keycloakSub, decidedBy, reason string) (*Request, error)
+	// FindPending returns the single pending request for (persona, email)
+	// — at most one can exist (0011 partial unique index). ErrNotFound when
+	// none. Used for intake dedup and citizen orphan-row retry (Wave-8).
+	FindPending(ctx context.Context, persona, email string) (*Request, error)
+	// CountRecent counts requests filed by an email address (any persona,
+	// any status) since the given time — the per-email velocity cap (W8-2).
+	CountRecent(ctx context.Context, email string, since time.Time) (int, error)
+	// ExpirePending flips pending requests created before the cutoff to
+	// expired and returns the number flipped (W8-7 sweep).
+	ExpirePending(ctx context.Context, before time.Time) (int64, error)
+	// MergeMeta merges patch keys into the request's meta jsonb (W8-5:
+	// recording provision_error on failed citizen self-serve).
+	MergeMeta(ctx context.Context, id string, patch map[string]any) (*Request, error)
 }
 
 // PGStore is the Postgres-backed Store.
@@ -105,7 +122,9 @@ type PGStore struct {
 func NewPGStore(pool *pgxpool.Pool) *PGStore { return &PGStore{pool: pool} }
 
 // EnsureSchema idempotently creates the platform schema and the
-// onboarding_requests table (SPEC: platform.onboarding_requests).
+// onboarding_requests table (SPEC: platform.onboarding_requests). Wave-8
+// parity with migration 0011: status CHECK incl. 'expired', pending-dedup
+// partial unique index and the velocity-count email index.
 func (s *PGStore) EnsureSchema(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `
 CREATE SCHEMA IF NOT EXISTS platform;
@@ -116,7 +135,7 @@ CREATE TABLE IF NOT EXISTS platform.onboarding_requests (
     display_name text NOT NULL,
     org          text NOT NULL DEFAULT '',
     status       text NOT NULL DEFAULT 'pending'
-                 CHECK (status IN ('pending','approved','rejected','completed')),
+                 CHECK (status IN ('pending','approved','rejected','completed','expired')),
     keycloak_sub text NOT NULL DEFAULT '',
     meta         jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at   timestamptz NOT NULL DEFAULT now(),
@@ -124,7 +143,11 @@ CREATE TABLE IF NOT EXISTS platform.onboarding_requests (
     decided_by   text NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS onboarding_requests_status_idx  ON platform.onboarding_requests (status);
-CREATE INDEX IF NOT EXISTS onboarding_requests_persona_idx ON platform.onboarding_requests (persona);`)
+CREATE INDEX IF NOT EXISTS onboarding_requests_persona_idx ON platform.onboarding_requests (persona);
+CREATE UNIQUE INDEX IF NOT EXISTS onboarding_requests_pending_uq
+    ON platform.onboarding_requests (persona, email) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS onboarding_requests_email_created_idx
+    ON platform.onboarding_requests (email, created_at DESC);`)
 	return err
 }
 
@@ -198,4 +221,46 @@ SET status = $2,
     meta = CASE WHEN $5 = '' THEN meta ELSE meta || jsonb_build_object('reject_reason', $5) END
 WHERE id = $1
 RETURNING `+selectCols, id, status, keycloakSub, decidedBy, reason))
+}
+
+// FindPending implements the Wave-8 intake dedup: the caller replays the
+// existing pending request instead of inserting a duplicate. The partial
+// unique index (0011) guarantees at most one row matches.
+func (s *PGStore) FindPending(ctx context.Context, persona, email string) (*Request, error) {
+	return scanRequest(s.pool.QueryRow(ctx, `
+SELECT `+selectCols+` FROM platform.onboarding_requests
+WHERE persona = $1 AND email = $2 AND status = 'pending'`, persona, email))
+}
+
+// CountRecent implements the Wave-8 per-email velocity cap.
+func (s *PGStore) CountRecent(ctx context.Context, email string, since time.Time) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM platform.onboarding_requests
+WHERE email = $1 AND created_at >= $2`, email, since).Scan(&n)
+	return n, err
+}
+
+// ExpirePending implements the Wave-8 TTL sweep.
+func (s *PGStore) ExpirePending(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+UPDATE platform.onboarding_requests
+SET status = 'expired', decided_at = now(), decided_by = 'system:ttl-expiry'
+WHERE status = 'pending' AND created_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MergeMeta implements the Wave-8 provision_error recording.
+func (s *PGStore) MergeMeta(ctx context.Context, id string, patch map[string]any) (*Request, error) {
+	payload, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+	return scanRequest(s.pool.QueryRow(ctx, `
+UPDATE platform.onboarding_requests SET meta = meta || $2::jsonb
+WHERE id = $1
+RETURNING `+selectCols, id, string(payload)))
 }
