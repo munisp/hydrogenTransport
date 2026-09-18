@@ -32,6 +32,9 @@ const (
 	CodeFare   uint16 = 100 // fare payment: rider wallet → operator revenue
 	CodeEnergy uint16 = 300 // energy trade settlement
 	CodeCarbon uint16 = 400 // carbon fund movements
+	// CodeBilling (Wave-7 A2-06): corporate settlement — invoice payment from
+	// a corporate clearing account (5xxx) → operator revenue.
+	CodeBilling uint16 = 500
 )
 
 // Well-known platform accounts (SPEC §3.4).
@@ -54,6 +57,14 @@ const (
 // isRiderWallet reports whether id belongs to the per-rider wallet range
 // (1xxx, allocated sequentially from 1001 via commerce.rider_accounts).
 func isRiderWallet(id uint64) bool { return id >= 1001 && id < 2000 }
+
+// isBillingAccount reports whether id belongs to the corporate clearing
+// account range (5xxx, allocated sequentially from 5001 via
+// commerce.billing_accounts — Wave-7 A2-06).
+func isBillingAccount(id uint64) bool { return id >= 5001 && id < 6000 }
+
+// FirstBillingAccountID is the first allocatable corporate clearing account.
+const FirstBillingAccountID uint64 = 5001
 
 // Rider wallet accounts (1xxx) are assigned per rider via the persisted
 // commerce.rider_accounts mapping (see handlers.riderAccount) — never derived
@@ -134,9 +145,11 @@ func (l *tbLedger) EnsureAccount(id uint64, code uint16) error {
 	// The energy-trade clearing account gets the same flag: revenue may not
 	// be conjured from an unfunded clearing account — it must be pre-funded
 	// by an external buyer settlement (SPEC §3.8 workflow); until then an
-	// unfunded trade is rejected and mapped to 402 by the handler.
+	// unfunded trade is rejected and mapped to 402 by the handler. Corporate
+	// clearing accounts (5xxx, Wave-7) likewise: an invoice can only be paid
+	// from funds the corporate actually settled in.
 	var flags uint16
-	if isRiderWallet(id) || id == EnergyTradeAccount {
+	if isRiderWallet(id) || isBillingAccount(id) || id == EnergyTradeAccount {
 		flags = tb_types.AccountFlags{DebitsMustNotExceedCredits: true}.ToUint16()
 	}
 	results, err := l.client.CreateAccounts([]tb_types.Account{{
