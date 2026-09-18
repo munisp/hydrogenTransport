@@ -63,7 +63,9 @@ at fleet-api as `/v1/vehicles` (SPEC §3.6).
 | POST | `/v1/safety/leak` | sensor token / JWT | Leak sensor webhook |
 | GET | `/v1/dispatch/jobs` | public | List dispatch jobs |
 | POST | `/v1/dispatch/jobs` | JWT (`operator`) | Assign job → `dispatch.job.assigned` + Temporal signal |
-| POST | `/v1/dispatch/jobs/{id}/accept` | JWT | Driver accepts job (status `assigned` → `accepted`, stamps `accepted_at`) |
+| POST | `/v1/drivers/register` | JWT (`driver`) | Wave-9 W9-3: driver self-registration — upserts `infra.drivers` keyed by the JWT `sub` (never the body), `{"name","license_no"}` → 201 created / 200 updated. Required before any job can be assigned to the driver |
+| POST | `/v1/drivers` | JWT (`operator`) | Wave-9 W9-3: operator-managed driver registration, `{"sub","name","license_no"}` → 201/200 |
+| POST | `/v1/dispatch/jobs/{id}/accept` | JWT (`driver`) | Driver accepts OWN assigned job (Wave-9 W9-7: scoped by JWT `sub` — another driver's job is 404, indistinguishable from unknown) |
 | POST | `/v1/charters` | JWT (`operator`) | Wave-7 A2-09 charter/school block booking, body `{"reference","customer_name","starts_at","ends_at","vehicle_ids":[...]}`: one tx per vehicle — overlap check → placeholder driver → dispatch job `route='charter:<reference>'`; 409 on overlap, 422 unknown vehicle; same reference replays the booking (200) → `charter.booking.confirmed` |
 | GET | `/v1/charters` | JWT (`operator`) | List charter bookings (`?status=`) with vehicle counts |
 | GET | `/v1/charters/{id}` | JWT (`operator`) | Booking detail + each reserved vehicle and its backing dispatch job |
@@ -150,11 +152,11 @@ feed in `services/go/admin-api/README.md`):
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/v1/onboarding/citizen` | public | Citizen self-serve → immediate Keycloak provisioning, `201`; a retry after a provisioning outage adopts the orphaned pending row → `200` |
-| POST | `/v1/onboarding/{persona}` | public | Intake for `driver`/`operator`/`station-staff`/`advertiser`/`data-partner`/`gov-viewer` → `201 pending`; body requires `email`, `display_name`, `org` (all gated personas) + `meta.license_no` (driver); re-filing the same `(persona, email)` while pending replays the original → `200 {"deduplicated": true}`; >5 requests/email/24 h → `429`; optional `captcha_token` enforced when captcha env is set |
+| POST | `/v1/onboarding/{persona}` | public | Intake for `driver`/`operator`/`station-staff`/`advertiser`/`data-partner`/`gov-viewer` → `201 pending`; body requires `email` (≤254 chars, stored lowercase — case-insensitive identity), `display_name`, `org` (all gated personas) + `meta.license_no` (driver); re-filing the same `(persona, email)` while pending replays the original → `200 {"deduplicated": true}`; >5 requests/email/24 h → `429`; optional `captcha_token` enforced when captcha env is set |
 | GET | `/v1/onboarding/status/{id}` | public | Applicant status check (capability URL): `{id, persona, status, created_at, decided_at}` only — zero PII; unknown ids 404 |
 | GET | `/v1/onboarding?status=&persona=` | JWT (`platform-admin`, `operator`) | List the queue (`status=` accepts `pending\|approved\|rejected\|completed\|expired`) |
 | GET | `/v1/onboarding/{id}` | JWT (`platform-admin`, `operator`) | Single request |
-| POST | `/v1/onboarding/{id}/approve` | JWT (`platform-admin`) | Provisions the Keycloak user (idempotent `EnsureRealmRole`, temp password, actions email) → `completed`; `409` non-pending or TTL-expired; `502` Keycloak failure (stays pending, safe to retry) |
+| POST | `/v1/onboarding/{id}/approve` | JWT (`platform-admin`) | Provisions the Keycloak user (idempotent `EnsureRealmRole`, actions email) → `completed`; temp password ONLY for brand-new users — a pre-existing account's credentials are never reset and the response flags `existing_account: true` (Wave-9 W9-1); `409` non-pending or TTL-expired; `502` Keycloak failure (stays pending, safe to retry) |
 | POST | `/v1/onboarding/{id}/reject` | JWT (`platform-admin`) | `{"reason"}` → `rejected`; `409` non-pending or TTL-expired |
 | POST | `/v1/onboarding/reconcile` | JWT (`platform-admin`) | Self-heal: re-asserts the persona realm role on every completed request → `{"checked","ensured","failed","failed_ids"}` |
 

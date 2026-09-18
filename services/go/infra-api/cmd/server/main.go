@@ -175,6 +175,11 @@ func main() {
 	// dispatch-workforce module
 	r.Group(func(r chi.Router) {
 		r.Use(gate.Module(tc, "dispatch-workforce"))
+		// Wave-9 W9-3: driver registration closes the onboarding loop — an
+		// approved driver self-registers (sub from JWT) or an operator
+		// registers them; without an infra.drivers row no job can be assigned.
+		r.With(jwtmw.RequireRole("driver")).Post("/v1/drivers/register", h.RegisterDriver)
+		r.With(jwtmw.RequireRole("operator")).Post("/v1/drivers", h.CreateDriver)
 		r.Get("/v1/dispatch/jobs", h.ListDispatchJobs)
 		r.With(jwtmw.RequireRole("operator")).Post("/v1/dispatch/jobs", h.CreateDispatchJob)
 		r.With(jwtmw.RequireRole("driver")).Post("/v1/dispatch/jobs/{id}/accept", h.AcceptDispatchJob)

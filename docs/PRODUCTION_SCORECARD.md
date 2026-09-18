@@ -1,4 +1,4 @@
-# H2Fleet — Production Scorecard (Wave 8)
+# H2Fleet — Production Scorecard (Wave 9)
 
 Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: all gates run in-sandbox; live-stack items marked honestly.
 
@@ -9,9 +9,9 @@ Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: a
 | Code completeness (20 features, 4 domains) | 10/10 | All 20 modules implemented, routed, onboarded, toggle-gated |
 | Business rules / logic | **10/10** | Wave-4 line-by-line re-verification: all 20 features 10/10 (was ~5.4 avg) — see below |
 | Production realness (no mocks) | **9.4/10** | 905-hit scan → every path classified REAL / env-gated dev fallback / external boundary; 6 fixes — docs/NO_MOCK_AUDIT.md |
-| Security posture | **9.7/10** | Wave-8: intake dedup + per-email velocity cap + optional captcha on the public onboarding surface, zero-PII status endpoint, station-staff least-privilege realm role (Wave-6: dual-token audit rollover, auditor role separation, HMAC webhooks, evidence packs, GDPR erasure fail-closed salt) |
-| Data integrity & schemas | 10/10 | 11 goose migrations (up/re-up/down verified), idempotency keys everywhere money moves, transactional fare-cap (advisory lock → settle in one tx), invoice settlement on deterministic transfer ids, partial UNIQUE backstop on pending onboarding intakes |
-| Edge-case / gap coverage | **10/10** | Wave-6 4-pass audit: 34 evidence-backed findings, 23 FIX-NOW implemented + tested; Wave-7 built the 2 most operator-valuable DECISION items (A2-06, A2-09); Wave-8 closed all 7 onboarding-workflow gaps (dedup, velocity, structured fields, provisioning self-heal, orphan retry, status check, TTL expiry, captcha, station-staff role); 4 DECISION / 5 CONTRACT documented — docs/GAP_AUDIT.md |
+| Security posture | **9.8/10** | Wave-9: closed a critical unauthenticated credential-reset path on ANY registered account (W9-1), case-bypass of all email-scoped controls (W9-2), cross-driver job acceptance (W9-7), silent admin user adoption (W9-5). Wave-8: intake dedup + per-email velocity cap + optional captcha, zero-PII status endpoint, station-staff least-privilege role. Wave-6: dual-token audit rollover, auditor role separation, HMAC webhooks, evidence packs, GDPR erasure fail-closed salt |
+| Data integrity & schemas | 10/10 | 12 goose migrations (up/re-up/down verified), idempotency keys everywhere money moves, transactional fare-cap (advisory lock → settle in one tx), invoice settlement on deterministic transfer ids, partial UNIQUE backstop on pending onboarding intakes (case-insensitive since 0012) |
+| Edge-case / gap coverage | **10/10** | Wave-6 4-pass audit: 34 evidence-backed findings, 23 FIX-NOW implemented + tested; Wave-7 built the 2 most operator-valuable DECISION items (A2-06, A2-09); Wave-8 closed all 7 onboarding-workflow gaps; Wave-9 audited merchant+individual onboarding beyond that scope → 4 more findings fixed + 3 adjacent authz/robustness gaps (plan-wave9.md); 4 DECISION / 5 CONTRACT documented — docs/GAP_AUDIT.md |
 | Middleware robustness | 9/10 | HA overlays for all 11 components; real Mojaloop + Fluvio rails |
 | Compile/test guarantee | 10/10 | Go/Rust/Python/TS gates all green (see below) |
 | Live-environment proof | 7/10 | Static + unit verification complete; live e2e/load runs pending (needs Docker host) |
@@ -20,6 +20,46 @@ Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: a
 Everything verifiable without a running cluster is verified. The residual is
 honestly unclaimable from a build sandbox: live e2e scenarios, Docker image
 builds, HA failover drills, and a load test at target TPS.
+
+## Wave-9 additions (2026-09-19)
+
+**Merchant & individual onboarding audit beyond the Wave-8 scope**
+(plan-wave9.md): 4 new findings fixed plus 3 adjacent authorization/
+robustness gaps found in the same pass. Migration 0012; all 8 Go modules
+build/vet/test green (Go 1.26.4); 9 new regression tests.
+
+- **W9-1 (critical) — unauthenticated credential reset**: `CreateUser`
+  adopted existing Keycloak accounts on 409 and `provision()` then reset
+  their passwords — the PUBLIC citizen self-serve could force a password
+  reset on any registered account (operators, platform-admins). Now the
+  temp password is set only for brand-new users; existing accounts get the
+  role + actions email (ownership-proof channel); citizen self-serve
+  responds indistinguishably (no existence oracle); approve flags
+  `existing_account: true` to the admin.
+- **W9-2 — case bypass of every email-scoped control**: dedup replay,
+  velocity cap and the pending-dedup unique index all matched email
+  byte-for-byte. Email is now lowercased at validate, matched with
+  `lower(email)` in queries, and migration 0012 backfills + rebuilds both
+  indexes as `lower(email)` expression indexes.
+- **W9-3 — approved drivers could never work**: dispatch jobs FK-reference
+  `infra.drivers(sub)` but onboarding created no row and no registration
+  endpoint existed. New `POST /v1/drivers/register` (driver self-service,
+  sub from JWT, idempotent upsert) + `POST /v1/drivers` (operator-managed).
+- **W9-7 — cross-driver job acceptance**: `POST /v1/dispatch/jobs/{id}/accept`
+  matched id+status only; now scoped by `driver_sub = <JWT sub>` (404
+  either way — no existence leak).
+- **W9-4 — reconcile silent truncation** at 500 completed rows → paginated.
+- **W9-5 — admin create-user silent adoption** of existing accounts → `409`.
+- **W9-6 — hard limits**: email ≤ 254, meta ≤ 8 KiB, reject reason ≤ 500.
+- **Accepted residuals (documented)**: no rejection email (no mail provider;
+  status endpoint is the channel), advertiser self-service portal remains
+  deferred decision A2-08, corporate billing accounts remain
+  operator-mediated (deliberate credit control), existed-path actions email
+  is a bounded nuisance (velocity-capped, non-disclosing).
+
+**GitHub state**: single `main` branch, zero PRs; Wave-8 pushed as
+`bc179bc`+`3801d43` (16/16 byte-verified), Wave-9 pushed in sequential
+≤10-file commits with byte-for-byte verification.
 
 ## Wave-8 additions (2026-09-19)
 
@@ -63,10 +103,8 @@ All existing security invariants preserved: decisions remain
 platform-admin-only (re-checked inside the handler), Keycloak errors never
 echoed to clients, identity paths fail closed.
 
-**GitHub state**: single `main` branch, zero PRs; Wave-8 commit pending —
-the GitHub MCP server was unreachable at build time, so the push
-(≤10-file sequential commits + byte-for-byte verification) runs on
-reconnect.
+**GitHub state**: single `main` branch, zero PRs; Wave-8 pushed as
+`bc179bc` + `3801d43` (16/16 byte-verified).
 
 ## Wave-7 additions (2026-09-19)
 
@@ -190,9 +228,9 @@ event loops closed with real consumers (maintenance.predicted→work orders, fue
 - Advertising: validation + lifecycle state machine; inventory/placements with budget enforcement and overlap 409.
 - Orphans: dead fleet-api routes removed; `min_risk` wired; route-optimizer reads DB stops with deterministic fallback + inventory write-back.
 
-## Schemas (migrations 0001–0011)
+## Schemas (migrations 0001–0012)
 
-13 missing schemas closed in 0005 (audit_log hash-chain mirror, loyalty contract with guarded `user_sub→rider_sub` rename verified on live PG, carbon UNIQUE, DRT labels/assignment, drivers ref + NOT VALID FKs, station queue, ad inventory/placements, refunds, work-order fields, fleet stops/routes/zones, incident numbering `INC-000123`), dispatch partial unique indexes, 0006 trades idempotency, 0007 wave-4 business rules (fuel_consumption, charged_minor, placement costs, queue/incident timestamps), 0008 wave-5 energy vectors (energy_type, generic telemetry columns, charge points/sessions), 0009 wave-6 gaps (fare products/entitlements, refunded_minor, wheelchair flags, webhook tables, incident ack), 0010 wave-7 (billing accounts/charges/invoices, entitlement payer_account, charter bookings/vehicles), 0011 wave-8 onboarding (status CHECK incl. `expired`, pending-dedup partial UNIQUE, email/created velocity index). Verified up/re-up/down on embedded Postgres. Drizzle mirror in `packages/db`.
+13 missing schemas closed in 0005 (audit_log hash-chain mirror, loyalty contract with guarded `user_sub→rider_sub` rename verified on live PG, carbon UNIQUE, DRT labels/assignment, drivers ref + NOT VALID FKs, station queue, ad inventory/placements, refunds, work-order fields, fleet stops/routes/zones, incident numbering `INC-000123`), dispatch partial unique indexes, 0006 trades idempotency, 0007 wave-4 business rules (fuel_consumption, charged_minor, placement costs, queue/incident timestamps), 0008 wave-5 energy vectors (energy_type, generic telemetry columns, charge points/sessions), 0009 wave-6 gaps (fare products/entitlements, refunded_minor, wheelchair flags, webhook tables, incident ack), 0010 wave-7 (billing accounts/charges/invoices, entitlement payer_account, charter bookings/vehicles), 0011 wave-8 onboarding (status CHECK incl. `expired`, pending-dedup partial UNIQUE, email/created velocity index), 0012 wave-9 (email lower() backfill + case-insensitive expression indexes). Verified up/re-up/down on embedded Postgres. Drizzle mirror in `packages/db`.
 
 ## Middleware (docs/MIDDLEWARE_HARDENING.md, infra/prod/)
 

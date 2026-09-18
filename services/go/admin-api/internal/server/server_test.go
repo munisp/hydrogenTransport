@@ -104,7 +104,7 @@ func (s *fakeStore) Get(_ context.Context, id string) (*onboarding.Request, erro
 	}
 	return nil, onboarding.ErrNotFound
 }
-func (s *fakeStore) List(context.Context, string, string, int) ([]onboarding.Request, error) {
+func (s *fakeStore) List(context.Context, string, string, int, int) ([]onboarding.Request, error) {
 	return []onboarding.Request{}, nil
 }
 func (s *fakeStore) Decide(_ context.Context, id, status, kcSub, by, reason string) (*onboarding.Request, error) {

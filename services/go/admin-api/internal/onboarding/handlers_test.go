@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -61,7 +62,7 @@ func (s *fakeStore) Get(_ context.Context, id string) (*Request, error) {
 	return &cp, nil
 }
 
-func (s *fakeStore) List(_ context.Context, status, persona string, _ int) ([]Request, error) {
+func (s *fakeStore) List(_ context.Context, status, persona string, limit, offset int) ([]Request, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []Request{}
@@ -73,6 +74,19 @@ func (s *fakeStore) List(_ context.Context, status, persona string, _ int) ([]Re
 			continue
 		}
 		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if offset > len(out) {
+		return []Request{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
@@ -102,7 +116,7 @@ func (s *fakeStore) FindPending(_ context.Context, persona, email string) (*Requ
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range s.byID {
-		if r.Persona == persona && r.Email == email && r.Status == StatusPending {
+		if r.Persona == persona && strings.EqualFold(r.Email, email) && r.Status == StatusPending {
 			cp := *r
 			return &cp, nil
 		}
@@ -115,7 +129,7 @@ func (s *fakeStore) CountRecent(_ context.Context, email string, since time.Time
 	defer s.mu.Unlock()
 	n := 0
 	for _, r := range s.byID {
-		if r.Email == email && !r.CreatedAt.Before(since) {
+		if strings.EqualFold(r.Email, email) && !r.CreatedAt.Before(since) {
 			n++
 		}
 	}
@@ -174,6 +188,7 @@ func quote(s string) string {
 type fakeKC struct {
 	mu            sync.Mutex
 	created       []keycloak.CreateUserSpec
+	existing      map[string]string // email → user id: pre-registered accounts (W9-1 tests)
 	assignedRoles map[string][]string
 	ensureCalls   int
 	actionsSent   map[string][]string
@@ -184,20 +199,32 @@ type fakeKC struct {
 
 func newFakeKC() *fakeKC {
 	return &fakeKC{
+		existing:      map[string]string{},
 		assignedRoles: map[string][]string{},
 		actionsSent:   map[string][]string{},
 		passwords:     map[string]string{},
 	}
 }
 
-func (f *fakeKC) CreateUser(_ context.Context, spec keycloak.CreateUserSpec) (string, error) {
+// seedExisting pre-registers an account (as if a previous onboarding or the
+// user directory already created it) and returns its Keycloak id.
+func (f *fakeKC) seedExisting(email, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.existing[strings.ToLower(email)] = id
+}
+
+func (f *fakeKC) CreateUser(_ context.Context, spec keycloak.CreateUserSpec) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failCreate {
-		return "", errors.New("keycloak down")
+		return "", false, errors.New("keycloak down")
+	}
+	if id, ok := f.existing[strings.ToLower(spec.Email)]; ok {
+		return id, true, nil // 409-conflict adopt: caller MUST NOT reset credentials
 	}
 	f.created = append(f.created, spec)
-	return fmt.Sprintf("kc-%d", len(f.created)), nil
+	return fmt.Sprintf("kc-%d", len(f.created)), false, nil
 }
 
 func (f *fakeKC) SetTemporaryPassword(_ context.Context, userID, password string) error {
@@ -849,5 +876,142 @@ func TestListFilters(t *testing.T) {
 	}
 	if rec = do(t, router, http.MethodGet, "/v1/onboarding?status=bogus", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status filter got %d want 400", rec.Code)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Wave-9 audit regression tests
+// --------------------------------------------------------------------------
+
+// W9-1 (critical): citizen self-serve for an email that ALREADY has a
+// Keycloak account must never reset that account's credentials. Before the
+// fix, provision() unconditionally SetTemporaryPassword on the adopted id —
+// an unauthenticated password-reset DoS against any registered address
+// (including operators). Now: no password touch, role ensured, actions
+// email to the address on file, indistinguishable 201.
+func TestCitizenSelfServeNeverResetsExistingAccount(t *testing.T) {
+	_, _, kc, router := newTestHandler()
+	kc.seedExisting("victim@example.com", "kc-victim")
+
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/citizen",
+		`{"email":"victim@example.com","display_name":"Attacker Name"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, reset := kc.passwords["kc-victim"]; reset {
+		t.Fatalf("existing account's password was reset — credential-reset DoS regression")
+	}
+	if got := kc.assignedRoles["kc-victim"]; len(got) != 1 || got[0] != "citizen" {
+		t.Fatalf("citizen role must be ensured on the existing account, got %v", got)
+	}
+	if len(kc.actionsSent["kc-victim"]) == 0 {
+		t.Fatalf("actions email (ownership-proof channel) must still be sent")
+	}
+	// The response is indistinguishable from a fresh registration (no
+	// account-existence oracle).
+	m := decodeBody(t, rec)
+	if m["existing_account"] != nil {
+		t.Fatalf("citizen response must not disclose account existence: %v", m)
+	}
+}
+
+// W9-1: the approve path likewise must not reset a pre-existing account's
+// password — but the approving admin IS told (existing_account:true), since
+// an intake filed with someone else's email may be impersonation.
+func TestApproveExistingAccountNoResetButFlagged(t *testing.T) {
+	_, _, kc, router := newTestHandler()
+	kc.seedExisting("boss@example.com", "kc-boss")
+
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/driver",
+		`{"email":"boss@example.com","display_name":"Boss","org":"Depot","meta":{"license_no":"DL-998877"}}`)
+	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
+
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/"+id+"/approve", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve got %d: %s", rec.Code, rec.Body.String())
+	}
+	if m := decodeBody(t, rec); m["existing_account"] != true {
+		t.Fatalf("approve must flag existing_account=true, got %v", m)
+	}
+	if _, reset := kc.passwords["kc-boss"]; reset {
+		t.Fatalf("existing account's password was reset on approve")
+	}
+	if got := kc.assignedRoles["kc-boss"]; len(got) != 1 || got[0] != "driver" {
+		t.Fatalf("driver role must be ensured, got %v", got)
+	}
+}
+
+// W9-2: email identity is case-insensitive — case variants of one address
+// dedup to the same pending request and share the velocity budget.
+func TestEmailCaseInsensitiveDedupAndVelocity(t *testing.T) {
+	_, store, _, router := newTestHandler()
+
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"CaseTest@Example.COM","display_name":"Case Test","org":"H2 Ops"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first intake got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Stored lowercase (canonical form).
+	for _, r := range store.byID {
+		if r.Email != "casetest@example.com" {
+			t.Fatalf("email must be stored lowercase, got %q", r.Email)
+		}
+	}
+	// Same address, different case → dedup replay, not a second row.
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"casetest@example.com","display_name":"Case Test","org":"H2 Ops"}`)
+	if rec.Code != http.StatusOK || decodeBody(t, rec)["deduplicated"] != true {
+		t.Fatalf("case-variant intake must dedup-replay, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Velocity: case variants of another address share one budget.
+	personas := []string{"operator", "advertiser", "data-partner", "gov-viewer", "station-staff"}
+	emails := []string{"Vic@Example.com", "vic@example.COM", "VIC@example.com", "vic@example.com", "vIc@Example.com"}
+	for i, persona := range personas {
+		body := fmt.Sprintf(`{"email":%q,"display_name":"Vic","org":"Org"}`, emails[i])
+		if rec = do(t, router, http.MethodPost, "/v1/onboarding/"+persona, body); rec.Code != http.StatusCreated {
+			t.Fatalf("request %d got %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	// The 6th request for the same address — in yet another case — is capped.
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/driver",
+		`{"email":"vIc@eXample.com","display_name":"Vic","org":"Depot","meta":{"license_no":"DL-1111"}}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("case-variant velocity bypass: got %d want 429", rec.Code)
+	}
+}
+
+// W9-6: intake hard limits — oversized email/meta are rejected.
+func TestIntakeHardLimits(t *testing.T) {
+	_, _, _, router := newTestHandler()
+	longEmail := strings.Repeat("a", 245) + "@example.com" // 257 chars
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		fmt.Sprintf(`{"email":%q,"display_name":"A","org":"O"}`, longEmail))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized email got %d want 400", rec.Code)
+	}
+	bigMeta := `{"blob":"` + strings.Repeat("x", 9000) + `"}`
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"a@example.com","display_name":"A","org":"O","meta":`+bigMeta+`}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized meta got %d want 400", rec.Code)
+	}
+}
+
+// W9-6: reject reasons are length-capped.
+func TestRejectReasonCap(t *testing.T) {
+	_, _, _, router := newTestHandler()
+	rec := do(t, router, http.MethodPost, "/v1/onboarding/operator",
+		`{"email":"r@example.com","display_name":"R","org":"O"}`)
+	id := decodeBody(t, rec)["request"].(map[string]any)["id"].(string)
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/"+id+"/reject",
+		`{"reason":"`+strings.Repeat("x", 501)+`"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("501-char reason got %d want 400", rec.Code)
+	}
+	rec = do(t, router, http.MethodPost, "/v1/onboarding/"+id+"/reject",
+		`{"reason":"duplicate"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("normal reject got %d: %s", rec.Code, rec.Body.String())
 	}
 }

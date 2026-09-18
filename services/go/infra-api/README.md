@@ -26,7 +26,9 @@ a disabled module returns **404** (fail-closed).
 | POST  | `/v1/safety/leak` — sensor webhook: opens incident, publishes `safety.leak.detected`, signals Temporal workflow `incident-{id}` | `leak-detection` | `X-Sensor-Token` (when `LEAK_INGEST_TOKEN` set) or JWT |
 | GET   | `/v1/dispatch/jobs?status=&driver_sub=` | `dispatch-workforce` | — |
 | POST  | `/v1/dispatch/jobs` (`starts_at`/`ends_at` window, overlap → 409) → publishes `dispatch.job.assigned`, signals workflow `dispatch-{id}` | `dispatch-workforce` | JWT (operator) |
-| POST  | `/v1/dispatch/jobs/{id}/accept` | `dispatch-workforce` | JWT (driver) |
+| POST  | `/v1/dispatch/jobs/{id}/accept` — assignee-only (Wave-9 W9-7: scoped by JWT `sub`; another driver's job is 404) | `dispatch-workforce` | JWT (driver) |
+| POST  | `/v1/drivers/register` — Wave-9 W9-3 driver self-registration (upsert keyed by JWT `sub`): `{"name","license_no"}` → 201/200 | `dispatch-workforce` | JWT (driver) |
+| POST  | `/v1/drivers` — Wave-9 W9-3 operator-managed registration: `{"sub","name","license_no"}` → 201/200 | `dispatch-workforce` | JWT (operator) |
 | POST  | `/v1/dispatch/jobs/{id}/cancel` → signals `job-cancelled` to the workflow | `dispatch-workforce` | JWT (operator) |
 | GET   | `/v1/compliance/reports`, `/v1/compliance/reports/{id}` | `compliance-reporting` | — |
 | POST  | `/v1/compliance/reports/generate?days=&domain=` (days default 30, 1..365; sections: incidents by status/severity, MTTR, maintenance predictions, open work orders, fleet availability, station inventory + domain-pack sections; scheduled via `COMPLIANCE_REPORT_INTERVAL`) | `compliance-reporting` | JWT |

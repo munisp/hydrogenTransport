@@ -22,19 +22,21 @@ application-level dedup.
 
 | Method | Path                              | Auth                                | Description |
 |--------|-----------------------------------|-------------------------------------|-------------|
-| POST   | `/v1/onboarding/citizen`          | public                              | Citizen self-serve: validates intake, provisions the Keycloak user with realm role `citizen`, sends the VERIFY_EMAIL+UPDATE_PASSWORD actions email, records `status=completed` immediately → `201 {"request": {...}, "message": "..."}`. If a previous attempt left an orphaned `pending` row (Keycloak outage), the retry adopts and completes it → `200` |
+| POST   | `/v1/onboarding/citizen`          | public                              | Citizen self-serve: validates intake, provisions the Keycloak user with realm role `citizen`, sends the VERIFY_EMAIL+UPDATE_PASSWORD actions email, records `status=completed` immediately → `201 {"request": {...}, "message": "..."}`. A pre-existing account's credentials are NEVER reset (Wave-9 W9-1) and the response is indistinguishable from a fresh registration (no account-existence oracle). If a previous attempt left an orphaned `pending` row (Keycloak outage), the retry adopts and completes it → `200` |
 | POST   | `/v1/onboarding/{persona}`        | public                              | Intake for `driver`, `operator`, `station-staff`, `advertiser`, `data-partner`, `gov-viewer` → `201 {"request": {...}}` with `status=pending`. Re-filing the same `(persona, email)` while pending replays the original → `200 {"request": {...}, "deduplicated": true}` |
 | GET    | `/v1/onboarding/status/{id}`      | public                              | Applicant status check (capability URL): `{id, persona, status, created_at, decided_at}` only — never email/name/org/meta; unknown ids 404 |
 | GET    | `/v1/onboarding?status=&persona=` | role `platform-admin` or `operator` | List → `{"requests": [...]}` (`status=` accepts `expired` too) |
 | GET    | `/v1/onboarding/{id}`             | role `platform-admin` or `operator` | Single request → `{"request": {...}}` |
-| POST   | `/v1/onboarding/{id}/approve`     | role `platform-admin`               | Provisions the Keycloak user (mapped realm role via idempotent `EnsureRealmRole`, temp password, actions email) → `status=completed` |
+| POST   | `/v1/onboarding/{id}/approve`     | role `platform-admin`               | Provisions the Keycloak user (mapped realm role via idempotent `EnsureRealmRole`, actions email) → `status=completed`. Temp password is set ONLY for brand-new users; when the email already has an account its credentials are untouched and the response carries `existing_account: true` (impersonation signal — Wave-9 W9-1) |
 | POST   | `/v1/onboarding/{id}/reject`      | role `platform-admin`               | Optional body `{"reason": "..."}` (merged into `meta.reject_reason`) → `status=rejected` |
-| POST   | `/v1/onboarding/reconcile`        | role `platform-admin`               | Self-heal sweep: re-asserts the persona realm role on every `completed` request with a `keycloak_sub` → `200 {"checked","ensured","failed","failed_ids"}` (failures reported, never hidden) |
+| POST   | `/v1/onboarding/reconcile`        | role `platform-admin`               | Self-heal sweep: re-asserts the persona realm role on every `completed` request with a `keycloak_sub` (paginates ALL rows — Wave-9 W9-4) → `200 {"checked","ensured","failed","failed_ids"}` (failures reported, never hidden) |
 
 Intake body: `{"email": "...", "display_name": "...", "org": "...", "meta": {...}}`
 — `email` + `display_name` required for all personas; **`org` required for
 every approval-gated persona** (Wave-8); **`driver` additionally requires
-`meta.license_no`** (4–64 chars).
+`meta.license_no`** (4–64 chars). Hard limits (Wave-9 W9-6): email ≤ 254
+chars (stored lowercase — identity is case-insensitive, W9-2), meta ≤ 8 KiB,
+reject reason ≤ 500 chars.
 
 Approving/rejecting a non-`pending` request → `409`. Keycloak failure on
 approve → `502` and the request stays `pending` (safe to retry). A request
@@ -71,7 +73,7 @@ The `h2fleet` realm defines `platform-admin`, `operator`, `driver`,
 | Method | Path                            | Description |
 |--------|---------------------------------|-------------|
 | GET    | `/v1/users?role=&q=`            | List Keycloak users with realm roles → `{"users": [{id, username, email, first_name, last_name, enabled, roles}]}`. `role=` filters via `/roles/{role}/users`, `q=` free-text search |
-| POST   | `/v1/users`                     | Body `{email, display_name, roles?}` → `201 {"id": "..."}` + actions email |
+| POST   | `/v1/users`                     | Body `{email, display_name, roles?}` → `201 {"id": "..."}` + actions email; `409` when the email already has an account (Wave-9 W9-5 — no silent adoption; manage roles on the existing account instead) |
 | PUT    | `/v1/users/{id}/roles`          | Body `{add: [...], remove: [...]}` — assign/revoke realm roles |
 | POST   | `/v1/users/{id}/disable`        | `enabled=false` |
 | POST   | `/v1/users/{id}/enable`         | `enabled=true` |
