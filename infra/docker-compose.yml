@@ -59,7 +59,7 @@ services:
   # Event backbone: ZooKeeper + Kafka
   # ---------------------------------------------------------------------------
   zookeeper:
-    image: bitnami/zookeeper:3.9
+    image: soldevelo/zookeeper:3.9
     container_name: h2-zookeeper
     networks: [h2net]
     environment:
@@ -73,7 +73,7 @@ services:
       retries: 6
 
   kafka:
-    image: bitnami/kafka:3.9.1
+    image: soldevelo/kafka:3.9.2
     container_name: h2-kafka
     networks: [h2net]
     ports:
