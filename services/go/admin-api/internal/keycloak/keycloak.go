@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"net/url"
 	"os"
 	"strings"
@@ -85,8 +87,12 @@ func New(adminURL, realm, clientID, clientSecret string, log *zap.Logger) (Admin
 		realm:        realm,
 		clientID:     clientID,
 		clientSecret: clientSecret,
-		log:          log,
-		http:         &http.Client{Timeout: 10 * time.Second},
+		log: log,
+		// Wave-11: tuned transport (httpclient package). The default
+		// transport caps MaxIdleConnsPerHost at 2, so concurrent admin
+		// bursts churn TLS handshakes on the Keycloak upstream; a
+		// pool-sized idle cache keeps p99 flat.
+		http: httpclient.New(10 * time.Second),
 	}, nil
 }
 

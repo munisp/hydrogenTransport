@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"sort"
 	"time"
 
@@ -32,7 +34,7 @@ func NewHandler(targets []Target, alertmanagerURL, toggleURL string, log *zap.Lo
 		targets:         targets,
 		alertmanagerURL: alertmanagerURL,
 		toggleURL:       toggleURL,
-		http:            &http.Client{Timeout: 3 * time.Second},
+		http:            httpclient.New(3 * time.Second),
 		log:             log,
 	}
 }

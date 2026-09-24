@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
+	dbpool "github.com/munisp/hydrogenTransport/packages/go-db"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/httpx"
 	"github.com/munisp/hydrogenTransport/services/go/admin-api/internal/keycloak"
@@ -39,7 +39,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := dbpool.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal("connect postgres", zap.Error(err))
 	}
@@ -137,11 +137,7 @@ func main() {
 		Audit: auditclient.FromEnv("admin-api", log, os.Getenv),
 	})
 
-	srv := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           router,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := dbpool.NewServer(":"+cfg.Port, router)
 
 	go func() {
 		log.Info("admin-api listening", zap.String("addr", srv.Addr))

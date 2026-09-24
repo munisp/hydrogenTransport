@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -127,7 +129,7 @@ type toggleSource struct {
 // ToggleSource returns a Source counting enabled modules per domain via the
 // toggle-service REST API (GET /v1/toggles, SPEC §3.2).
 func ToggleSource(toggleURL string) Source {
-	return &toggleSource{baseURL: toggleURL, http: &http.Client{Timeout: 3 * time.Second}}
+	return &toggleSource{baseURL: toggleURL, http: httpclient.New(3 * time.Second)}
 }
 
 func (s *toggleSource) Name() string { return "toggles" }

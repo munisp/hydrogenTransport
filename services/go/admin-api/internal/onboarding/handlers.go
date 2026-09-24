@@ -7,6 +7,8 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"net/url"
 	"regexp"
 	"strings"
@@ -164,7 +166,7 @@ func (h *Handler) verifyCaptcha(w http.ResponseWriter, r *http.Request, token st
 	}
 	client := h.Captcha.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = httpclient.New(5 * time.Second)
 	}
 	resp, err := client.PostForm(h.Captcha.VerifyURL, url.Values{
 		"secret":   {h.Captcha.Secret},

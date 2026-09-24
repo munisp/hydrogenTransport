@@ -1015,3 +1015,45 @@ func TestRejectReasonCap(t *testing.T) {
 		t.Fatalf("normal reject got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// --------------------------------------------------------------------------
+// Wave-11 benchmarks: handler-path cost in isolation (store + Keycloak
+// simulated in-memory). These numbers bound the Go-side per-request overhead;
+// real p99 adds Postgres/Keycloak/network latency, which the tuning targets.
+// --------------------------------------------------------------------------
+
+func BenchmarkIntakeRequest(b *testing.B) {
+	_, _, _, router := newTestHandler()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// unique email per iteration: (persona, lower(email)) is a unique
+		// index, and a benchmark would 409 on the second insert otherwise.
+		payload := fmt.Sprintf(`{"email":"drv%08d@example.com","display_name":"Dan Driver","org":"Depot","meta":{"license_no":"DL-482910"}}`, i)
+		req := httptest.NewRequest("POST", "/v1/onboarding/driver", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			b.Fatalf("status %d", rec.Code)
+		}
+	}
+}
+
+func BenchmarkCitizenSelfServe(b *testing.B) {
+	_, _, _, router := newTestHandler()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// unique email per iteration: the velocity cap is 5/email/24h and a
+		// benchmark would trip 429 immediately with a shared address.
+		payload := fmt.Sprintf(`{"email":"cit%08d@example.com","display_name":"Cit","password":"Str0ng!Pass"}`, i)
+		req := httptest.NewRequest("POST", "/v1/onboarding/citizen", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			b.Fatalf("status %d", rec.Code)
+		}
+	}
+}
