@@ -11,11 +11,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
+	dbpool "github.com/munisp/hydrogenTransport/packages/go-db"
 	"github.com/munisp/hydrogenTransport/services/go/audit-log/pkg/auditclient"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/toggle-service/internal/events"
@@ -35,7 +35,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := dbpool.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal("connect postgres", zap.Error(err))
 	}
@@ -86,11 +86,7 @@ func main() {
 		).Put("/{module}", h.Put)
 	})
 
-	srv := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           r,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := dbpool.NewServer(":"+cfg.Port, r)
 
 	go func() {
 		log.Info("toggle-service listening", zap.String("addr", srv.Addr))

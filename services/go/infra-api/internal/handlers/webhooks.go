@@ -10,6 +10,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,7 +30,7 @@ import (
 // endpoint.
 
 // webhookHTTPClient is the bounded client used for deliveries.
-var webhookHTTPClient = &http.Client{Timeout: 5 * time.Second}
+var webhookHTTPClient = httpclient.New(5 * time.Second)
 
 // WebhookSubscription mirrors infra.webhook_subscriptions (secret redacted
 // in every response).

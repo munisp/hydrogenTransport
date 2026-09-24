@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"strings"
 	"time"
 )
@@ -114,7 +116,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{}
+		hc = httpclient.New(0)
 	}
 	return &Client{cfg: cfg, hc: hc}, nil
 }

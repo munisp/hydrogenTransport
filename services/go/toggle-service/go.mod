@@ -6,6 +6,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/munisp/hydrogenTransport/packages/go-db v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/twmb/franz-go v1.18.1
@@ -15,6 +16,7 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/munisp/hydrogenTransport/packages/go-httpclient v0.0.0-00010101000000-000000000000 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
@@ -45,3 +47,7 @@ require (
 replace github.com/munisp/hydrogenTransport/packages/go-auth => ../../../packages/go-auth
 
 replace github.com/munisp/hydrogenTransport/services/go/audit-log => ../../../services/go/audit-log
+
+replace github.com/munisp/hydrogenTransport/packages/go-db => ../../../packages/go-db
+
+replace github.com/munisp/hydrogenTransport/packages/go-httpclient => ../../../packages/go-httpclient

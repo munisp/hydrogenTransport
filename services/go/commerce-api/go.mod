@@ -3,6 +3,8 @@ module github.com/munisp/hydrogenTransport/services/go/commerce-api
 go 1.25.0
 
 require (
+	github.com/munisp/hydrogenTransport/packages/go-httpclient v0.0.0-00010101000000-000000000000
+	github.com/munisp/hydrogenTransport/packages/go-db v0.0.0-00010101000000-000000000000
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -45,3 +47,7 @@ replace github.com/munisp/hydrogenTransport/packages/toggle-client/go => ../../.
 replace github.com/munisp/hydrogenTransport/packages/go-auth => ../../../packages/go-auth
 
 replace github.com/munisp/hydrogenTransport/services/go/audit-log => ../../../services/go/audit-log
+
+replace github.com/munisp/hydrogenTransport/packages/go-db => ../../../packages/go-db
+
+replace github.com/munisp/hydrogenTransport/packages/go-httpclient => ../../../packages/go-httpclient

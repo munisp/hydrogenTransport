@@ -3,6 +3,7 @@ module github.com/munisp/hydrogenTransport/services/go/fleet-api
 go 1.25.0
 
 require (
+	github.com/munisp/hydrogenTransport/packages/go-db v0.0.0-00010101000000-000000000000
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/munisp/hydrogenTransport/packages/toggle-client/go v0.0.0-00010101000000-000000000000
@@ -34,3 +35,5 @@ require (
 replace github.com/munisp/hydrogenTransport/packages/toggle-client/go => ../../../packages/toggle-client/go
 
 replace github.com/munisp/hydrogenTransport/packages/go-auth => ../../../packages/go-auth
+
+replace github.com/munisp/hydrogenTransport/packages/go-db => ../../../packages/go-db
