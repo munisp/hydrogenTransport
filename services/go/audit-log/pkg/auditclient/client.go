@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"strings"
 	"time"
 
@@ -61,7 +63,7 @@ func New(baseURL, token, service string, log *zap.Logger) *Client {
 		base:    strings.TrimSuffix(baseURL, "/"),
 		token:   token,
 		service: service,
-		hc:      &http.Client{Timeout: 1500 * time.Millisecond},
+		hc:      httpclient.New(1500 * time.Millisecond),
 		log:     log,
 	}
 }

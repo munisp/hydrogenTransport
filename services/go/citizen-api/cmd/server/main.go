@@ -16,6 +16,7 @@ import (
 
 	auth "github.com/munisp/hydrogenTransport/packages/go-auth"
 	toggle "github.com/munisp/hydrogenTransport/packages/toggle-client/go"
+	dbpool "github.com/munisp/hydrogenTransport/packages/go-db"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/config"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/consumers"
 	"github.com/munisp/hydrogenTransport/services/go/citizen-api/internal/gate"
@@ -41,7 +42,7 @@ func main() {
 	var pool *pgxpool.Pool
 	if cfg.DatabaseURL != "" {
 		var err error
-		pool, err = pgxpool.New(ctx, cfg.DatabaseURL)
+		pool, err = dbpool.NewPool(ctx, cfg.DatabaseURL)
 		if err != nil {
 			log.Fatal("connect postgres", zap.Error(err))
 		}
@@ -112,11 +113,7 @@ func main() {
 		r.Get("/v1/opendata/gtfs/{file}", h.GTFSFile)
 	})
 
-	srv := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           r,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := dbpool.NewServer(":"+cfg.Port, r)
 
 	go func() {
 		log.Info("citizen-api listening", zap.String("addr", srv.Addr))

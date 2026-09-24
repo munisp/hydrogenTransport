@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"strings"
 	"time"
 
@@ -29,7 +31,7 @@ func NewOpenData(searchURL, index string, log *zap.Logger) *OpenData {
 	return &OpenData{
 		searchURL: strings.TrimSuffix(searchURL, "/"),
 		index:     index,
-		client:    &http.Client{Timeout: 8 * time.Second},
+		client:    httpclient.New(8 * time.Second),
 		log:       log,
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"sync"
 	"time"
 
@@ -47,7 +49,7 @@ func New(threshold int, window time.Duration, amURL string, log *zap.Logger) *De
 		cooldown:  5 * time.Minute,
 		amURL:     amURL,
 		log:       log,
-		http:      &http.Client{Timeout: 2 * time.Second},
+		http:      httpclient.New(2 * time.Second),
 		now:       time.Now,
 		seen:      make(map[string][]time.Time),
 		alerted:   make(map[string]time.Time),

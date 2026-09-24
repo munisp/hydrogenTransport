@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	httpclient "github.com/munisp/hydrogenTransport/packages/go-httpclient"
 	"strings"
 	"time"
 
@@ -42,7 +44,7 @@ func New(baseURL, index string, log *zap.Logger) *Mirror {
 		base:  strings.TrimSuffix(baseURL, "/"),
 		index: index,
 		log:   log,
-		http:  &http.Client{Timeout: 3 * time.Second},
+		http:  httpclient.New(3 * time.Second),
 	}
 }
 
