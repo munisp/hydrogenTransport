@@ -48,6 +48,18 @@ routes:
       type: roundrobin
       nodes:
         "infra-api:8082": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/infra(/.*)$", "$1"]
@@ -72,6 +84,18 @@ routes:
       type: roundrobin
       nodes:
         "toggle-service:8080": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/toggles(/.*)$", "$1"]
@@ -97,6 +121,18 @@ routes:
       type: roundrobin
       nodes:
         "fleet-api:8081": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/fleet(/.*)$", "$1"]
@@ -124,6 +160,18 @@ routes:
       type: roundrobin
       nodes:
         "infra-api:8082": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/infra(/.*)$", "$1"]
@@ -146,6 +194,18 @@ routes:
       type: roundrobin
       nodes:
         "infra-api:8082": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/infra(/.*)$", "$1"]
@@ -175,6 +235,18 @@ routes:
       type: roundrobin
       nodes:
         "citizen-api:8083": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/citizen(/.*)$", "$1"]
@@ -197,6 +269,18 @@ routes:
       type: roundrobin
       nodes:
         "citizen-api:8083": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/citizen(/.*)$", "$1"]
@@ -224,6 +308,18 @@ routes:
       type: roundrobin
       nodes:
         "commerce-api:8084": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/commerce(/.*)$", "$1"]
@@ -246,6 +342,18 @@ routes:
       type: roundrobin
       nodes:
         "commerce-api:8084": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/commerce(/.*)$", "$1"]
@@ -276,6 +384,18 @@ routes:
       type: roundrobin
       nodes:
         "admin-api:8085": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/admin(/.*)$", "$1"]
@@ -302,6 +422,18 @@ routes:
       type: roundrobin
       nodes:
         "admin-api:8085": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/admin(/.*)$", "$1"]
@@ -326,6 +458,18 @@ routes:
       type: roundrobin
       nodes:
         "audit-log:8086": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/audit(/.*)$", "$1"]
@@ -349,6 +493,18 @@ routes:
       type: roundrobin
       nodes:
         "analytics-bff:8096": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/analytics(/.*)$", "$1"]
@@ -372,6 +528,18 @@ routes:
       type: roundrobin
       nodes:
         "ml-platform:8095": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/mlplatform(/.*)$", "$1"]
@@ -394,6 +562,18 @@ routes:
       type: roundrobin
       nodes:
         "predictive-maintenance:8090": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/ml(/.*)$", "$1"]
@@ -420,6 +600,18 @@ routes:
       type: roundrobin
       nodes:
         "route-optimizer:8091": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/optimize(/.*)$", "$1"]
@@ -441,6 +633,18 @@ routes:
       type: roundrobin
       nodes:
         "route-optimizer:8091": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/optimize(/.*)$", "$1"]
@@ -464,6 +668,18 @@ routes:
       type: roundrobin
       nodes:
         "digital-twin:8092": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/twin(/.*)$", "$1"]
@@ -489,6 +705,18 @@ routes:
       type: roundrobin
       nodes:
         "citizen-api:8083": 1
+      # Wave-11: keepalive pool + phase timeouts on every upstream. Without an
+      # explicit keepalive_pool APISIX reuses connections opportunistically only;
+      # sizing the pool for burst concurrency removes TLS/TCP handshake jitter
+      # from the p99 path. Timeouts bound slow-loris and hung-upstream leaks.
+      keepalive_pool:
+        size: 512            # idle keepalive connections to this upstream
+        requests: 1000       # max requests per pooled connection
+        idle_timeout: 60     # seconds an idle pooled connection is kept
+      timeouts:
+        connect: 2           # seconds
+        send: 10             # seconds
+        read: 30             # seconds
     plugins:
       proxy-rewrite:
         regex_uri: ["^/api/open-data(/.*)$", "/v1/opendata$1"]

@@ -19,4 +19,4 @@ EXPOSE 8100
 ENV PORT=8100
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s \
     CMD python -c "import os,urllib.request;urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('PORT','8100')}/healthz\",timeout=3)" || exit 1
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers ${UVICORN_WORKERS:-1}"]

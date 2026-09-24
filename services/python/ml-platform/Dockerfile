@@ -27,4 +27,4 @@ EXPOSE 8095
 ENV PORT=8095 MODEL_ARTIFACTS_DIR=/srv/artifacts
 HEALTHCHECK --interval=15s --timeout=3s --start-period=15s \
     CMD python -c "import os,urllib.request;urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('PORT','8095')}/healthz\",timeout=3)" || exit 1
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers ${UVICORN_WORKERS:-1}"]

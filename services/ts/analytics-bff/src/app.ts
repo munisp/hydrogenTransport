@@ -1,6 +1,7 @@
 // App assembly (separated from the server entry so tests can inject a
 // mocked db and auth middlewares).
 import { Hono } from "hono";
+import { compress } from "hono/compress";
 
 import { jwtAuth, requireAnyRole, type AuthConfig, type AuthEnv } from "./auth";
 import { metricsHandler, metricsMiddleware } from "./metrics";
@@ -16,6 +17,9 @@ export function buildApp(deps: AppDeps) {
   const app = new Hono<AuthEnv>();
 
   app.use("*", metricsMiddleware);
+  // Wire-time gzip for analytics payloads (JSON time-series compresses ~10x);
+  // /metrics stays uncompressed (prometheus scrapes handle identity fine).
+  app.use("*", compress());
 
   app.get("/healthz", async (c) => {
     try {

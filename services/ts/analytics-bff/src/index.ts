@@ -15,7 +15,11 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const pool = new pg.Pool({ connectionString: databaseUrl, max: 10 });
+// Pool ceiling: 10 default (gateway concurrency is bounded by APISIX
+// keepalive; 10 connections is 3x the expected concurrent request depth).
+// Override via PGPOOL_MAX for larger nodes.
+const poolMax = Number(process.env.PGPOOL_MAX ?? 10);
+const pool = new pg.Pool({ connectionString: databaseUrl, max: poolMax });
 const db = drizzle(pool);
 
 const app = buildApp({
