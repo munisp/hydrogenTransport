@@ -22,6 +22,11 @@ export default function AlertsScreen() {
         <ErrorNotice error={alerts.error} />
       ) : (
         <FlatList
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={50}
+          windowSize={9}
+          removeClippedSubviews={true}
           data={alerts.data ?? []}
           keyExtractor={(a) => a.id}
           refreshing={alerts.isRefetching}

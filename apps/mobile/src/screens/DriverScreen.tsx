@@ -84,6 +84,11 @@ export default function DriverScreen() {
         <ErrorNotice error={jobs.error} />
       ) : (
         <FlatList
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={50}
+          windowSize={9}
+          removeClippedSubviews={true}
           data={jobs.data ?? []}
           keyExtractor={(j) => j.id}
           refreshing={jobs.isRefetching}

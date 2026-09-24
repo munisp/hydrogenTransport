@@ -1,4 +1,4 @@
-# H2Fleet — Production Scorecard (Wave 10)
+# H2Fleet — Production Scorecard (Wave 11)
 
 Date: 2026-09-19 · Repo: github.com/munisp/hydrogenTransport · Verification: all gates run in-sandbox; live-stack items marked honestly.
 
@@ -278,6 +278,10 @@ index.html/sw.js/manifest `no-cache, no-store, must-revalidate` (+etag off) in n
 ## Scenarios (docs/SCENARIOS.md)
 
 10 stakeholder workflows scripted + machine-validated (64 checks): telemetry surge, predictive maintenance→depot, leak→compliance, citizen DRT, fare→loyalty→redeem, carbon→gov, toggle propagation, NOC wallboard, advertiser→KPI, energy trade→ledger. `make validate-scenarios` (CI) / `make scenarios` (live).
+
+## Performance (Wave 11, docs/PERFORMANCE_TUNING.md)
+
+Target p50 < 50 ms / p99 < 300 ms per API surface. Fixes landed: shared `packages/go-db` pool (`MaxConns` 32/`MinConns` 4/warm floor/health-check) + tuned `http.Server` (phase timeouts, 16 KiB header cap) across all 7 Go services; `packages/go-httpclient` (MaxIdleConnsPerHost 64, HTTP/2, dial 2 s) wired into all 10 default-transport client sites (Keycloak/ops/KPI/OpenSearch/Mojaloop/toggle/webhooks/anomaly/audit-sink); APISIX `keepalive_pool` + phase `timeouts` on all 19 upstreams; mobile `apiFetch` 10 s AbortController deadline + GET-only exponential backoff (300/900 ms, max 2) + windowed FlatLists (5 lists). Handler cost measured: ~82 µs/op both onboarding paths (11.2–11.7 KB, 65–67 allocs) via `BenchmarkIntakeRequest`/`BenchmarkCitizenSelfServe`. 8/8 Go modules build+vet+test green.
 
 ## Known residuals (honest)
 

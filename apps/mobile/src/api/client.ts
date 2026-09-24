@@ -98,6 +98,61 @@ export function setAccessToken(token: string | undefined): void {
   accessToken = token;
 }
 
+/**
+ * Wave-11 mobile performance:
+ *  - every request gets an AbortController deadline (default 10s) so a hung
+ *    gateway never leaves the UI spinner forever on lossy cellular links;
+ *  - idempotent GETs retry twice with exponential backoff (300ms, 900ms) on
+ *    transport errors, 429 and 5xx; mutations and 4xx never auto-retry
+ *    (double-submit safety).
+ */
+const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_GET_RETRIES = 2;
+const BACKOFF_MS = [300, 900];
+
+function isIdempotent(init?: RequestInit): boolean {
+  return !init || !init.method || init.method.toUpperCase() === "GET";
+}
+
+function isRetryable(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+async function apiFetchOnce<T>(
+  path: string,
+  init: RequestInit | undefined,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(`${config.apiBase}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new ApiError(
+      0,
+      path,
+      err instanceof Error && err.name === "AbortError"
+        ? `timeout after ${timeoutMs}ms`
+        : err instanceof Error
+          ? err.message
+          : "network error",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    throw new ApiError(res.status, path, await res.text().catch(() => ""));
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -105,17 +160,21 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
-  let res: Response;
-  try {
-    res = await fetch(`${config.apiBase}${path}`, { ...init, headers });
-  } catch (err) {
-    throw new ApiError(0, path, err instanceof Error ? err.message : "network error");
+  const idempotent = isIdempotent(init);
+  const maxAttempts = idempotent ? 1 + MAX_GET_RETRIES : 1;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await apiFetchOnce<T>(path, init, headers, DEFAULT_TIMEOUT_MS);
+    } catch (err) {
+      lastErr = err;
+      const retryable =
+        err instanceof ApiError && (err.status === 0 || isRetryable(err.status));
+      if (!idempotent || !retryable || attempt === maxAttempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt] ?? 900));
+    }
   }
-  if (!res.ok) {
-    throw new ApiError(res.status, path, await res.text().catch(() => ""));
-  }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  throw lastErr; // unreachable, satisfies the compiler
 }
 
 function unwrapList<T>(payload: unknown): T[] {

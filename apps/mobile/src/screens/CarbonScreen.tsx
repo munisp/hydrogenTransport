@@ -37,6 +37,11 @@ export default function CarbonScreen() {
         <Text style={styles.empty}>No credits issued yet.</Text>
       ) : (
         <FlatList
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={50}
+          windowSize={9}
+          removeClippedSubviews={true}
           data={[...data].sort((a, b) => b.period.localeCompare(a.period))}
           keyExtractor={(c) => c.id}
           renderItem={({ item }) => (

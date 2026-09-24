@@ -37,6 +37,11 @@ export default function ArrivalsScreen() {
       ) : (
         <>
           <FlatList
+            initialNumToRender={12}
+            maxToRenderPerBatch={8}
+            updateCellsBatchingPeriod={50}
+            windowSize={9}
+            removeClippedSubviews={true}
             horizontal
             showsHorizontalScrollIndicator={false}
             data={stops.data ?? []}
@@ -62,6 +67,12 @@ export default function ArrivalsScreen() {
             <ErrorNotice error={arrivals.error} />
           ) : (
             <FlatList
+              // Wave-11 list windowing: bound first paint and per-scroll work.
+              initialNumToRender={12}
+              maxToRenderPerBatch={8}
+              updateCellsBatchingPeriod={50}
+              windowSize={9}
+              removeClippedSubviews={true}
               data={arrivals.data ?? []}
               keyExtractor={(a, i) => `${a.route_id}-${a.scheduled_at}-${i}`}
               refreshing={arrivals.isRefetching}
